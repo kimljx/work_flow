@@ -22,8 +22,8 @@ from app.timeutils import shanghai_now_naive, to_shanghai_naive
 
 
 DATE_PATTERN = re.compile(r"(20\d{2})(?:-|/|年)(\d{1,2})(?:-|/|月)(\d{1,2})(?:日)?")
-TASK_ID_PATTERN = re.compile(r"任务\s*(?:ID|编号)?\s*[#:：]?\s*(\d+)", re.IGNORECASE)
-DELAY_REQUEST_ID_PATTERN = re.compile(r"延期申请\s*(?:ID|编号)?\s*[#:：]?\s*(\d+)", re.IGNORECASE)
+TASK_ID_PATTERN = re.compile(r"(?:任务\s*(?:ID|编号)\s*[#:：]?\s*|任务\s*#\s*)(\d+)", re.IGNORECASE)
+DELAY_REQUEST_ID_PATTERN = re.compile(r"(?:延期申请\s*(?:ID|编号)\s*[#:：]?\s*|延期申请\s*#\s*)(\d+)", re.IGNORECASE)
 
 
 def _provider_hint() -> str:

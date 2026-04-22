@@ -11,6 +11,7 @@ from app.models import DelayRequest, MailAction, MailScanState, Notification, Ta
 from app.security import hash_password
 from app.services.mail import (
     _extract_text_body,
+    _find_task_id,
     diagnose_imap_settings,
     diagnose_mail_settings,
     initialize_mail_scan_baseline,
@@ -116,6 +117,11 @@ class MailServiceTestCase(unittest.TestCase):
         body = _extract_text_body(message)
 
         self.assertIn("测试邮件", body)
+
+    def test_find_task_id_prefers_explicit_id_marker(self) -> None:
+        subject = "回复：任务通知提醒#2：任务1 进行中+任务1开始执行"
+        body = "任务编号：2 任务名称：任务1 请尽快处理。"
+        self.assertEqual(_find_task_id(subject, body), 2)
 
     def test_poll_mailbox_limits_recent_unseen_count(self) -> None:
         import app.services.mail as mail_module

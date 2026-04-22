@@ -70,6 +70,15 @@ def task_status_display(task: Task) -> str:
     return text
 
 
+def infer_task_status_by_time(start_at: datetime, end_at: datetime, now: datetime | None = None) -> str:
+    current = now or shanghai_now_naive()
+    if current < start_at:
+        return "not_started"
+    if current >= end_at:
+        return "done"
+    return "in_progress"
+
+
 def notification_channel_text(channel: str) -> str:
     return NOTIFICATION_CHANNEL_LABELS.get(channel, channel)
 
@@ -334,6 +343,7 @@ def list_tasks(current_user: User = Depends(get_current_user), db: Session = Dep
 def create_task(payload: TaskCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> TaskOut:
     if payload.start_at > payload.end_at:
         raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
+    inferred_status = infer_task_status_by_time(payload.start_at, payload.end_at)
     task = Task(
         title=payload.title,
         content=payload.content,
@@ -343,6 +353,7 @@ def create_task(payload: TaskCreate, current_user: User = Depends(require_admin)
         end_at=payload.end_at,
         due_remind_days=max(payload.due_remind_days, 0),
         planned_minutes=int((payload.end_at - payload.start_at).total_seconds() // 60),
+        main_status=inferred_status,
         created_by=current_user.id,
     )
     db.add(task)
@@ -363,7 +374,7 @@ def create_task(payload: TaskCreate, current_user: User = Depends(require_admin)
                 sort_order=milestone.sort_order,
             )
         )
-    db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status="not_started", source="web", remark="创建任务", operator_id=current_user.id))
+    db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=inferred_status, source="web", remark="创建任务自动判定状态", operator_id=current_user.id))
     create_notification_with_recipients(db, task.id, "email", "task_created", "")
     create_notification_with_recipients(db, task.id, "qax", "task_created", "")
     write_audit(db, current_user.id, "CREATE_TASK", "Task", task.id, {}, {"title": task.title})

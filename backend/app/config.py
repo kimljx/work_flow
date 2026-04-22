@@ -51,6 +51,8 @@ class Settings:
     imap_user: str
     imap_password: str
     imap_max_unseen_scan: int
+    mail_auto_poll_enabled: bool
+    mail_auto_poll_interval_seconds: int
 
 
 settings = Settings(
@@ -76,4 +78,6 @@ settings = Settings(
     imap_user=os.getenv("IMAP_USER", ""),
     imap_password=os.getenv("IMAP_PASSWORD", ""),
     imap_max_unseen_scan=int(os.getenv("IMAP_MAX_UNSEEN_SCAN", "20")),
+    mail_auto_poll_enabled=os.getenv("MAIL_AUTO_POLL_ENABLED", "true").lower() == "true",
+    mail_auto_poll_interval_seconds=int(os.getenv("MAIL_AUTO_POLL_INTERVAL_SECONDS", "300")),
 )

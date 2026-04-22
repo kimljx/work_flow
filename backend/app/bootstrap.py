@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from sqlalchemy import text
+
+from app.config import settings
+from app.db import Base, SessionLocal, engine
+from app.models import Template, User
+from app.security import hash_password
+
+
+DEFAULT_TEMPLATES = [
+    {
+        "name": "默认邮件发送模板",
+        "template_kind": "MAIL_SEND",
+        "notify_type": "task_created",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "您好，系统已为您分配任务。\n任务编号：{task_id}\n任务名称：{task_title}\n开始时间：{start_at}\n结束时间：{end_at}\n\n回复指引：\n1. 回复“进行中 + 备注”可更新任务状态。\n2. 回复“已完成 + 备注”可将任务标记为完成。\n3. 如需延期，请回复“延期 + 新日期 + 原因”。",
+    },
+    {
+        "name": "默认邮件提醒模板",
+        "template_kind": "MAIL_SEND",
+        "notify_type": "manual_remind",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "任务提醒：\n任务编号：{task_id}\n任务名称：{task_title}\n请尽快处理并按模板回复邮件反馈状态。",
+    },
+    {
+        "name": "默认延期审批邮件模板",
+        "template_kind": "MAIL_SEND",
+        "notify_type": "delay_approval",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "收到新的延期申请，请管理员处理。\n延期申请编号：{delay_request_id}\n任务编号：{task_id}\n任务名称：{task_title}\n申请人：{applicant_name}\n申请延期到：{proposed_deadline}\n原因：{apply_reason}\n\n可在系统中审批，也可邮件回复：\n同意 + 新日期\n或\n拒绝 + 原因",
+    },
+    {
+        "name": "默认到期提醒邮件模板",
+        "template_kind": "MAIL_SEND",
+        "notify_type": "due_remind",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "任务到期提醒：\n任务编号：{task_id}\n任务名称：{task_title}\n结束时间：{end_at}\n请尽快处理。",
+    },
+    {
+        "name": "默认 QAX 发送模板",
+        "template_kind": "QAX_SEND",
+        "notify_type": "task_created",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "您有新的任务通知，请登录系统查看详情。任务编号：{task_id}，任务名称：{task_title}",
+    },
+    {
+        "name": "默认 QAX 提醒模板",
+        "template_kind": "QAX_SEND",
+        "notify_type": "manual_remind",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "任务提醒：{task_title}（任务编号：{task_id}），请尽快处理。",
+    },
+    {
+        "name": "默认延期审批 QAX 模板",
+        "template_kind": "QAX_SEND",
+        "notify_type": "delay_approval",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "新的延期审批待处理：延期申请编号 {delay_request_id}，任务 {task_title}。",
+    },
+    {
+        "name": "默认到期提醒 QAX 模板",
+        "template_kind": "QAX_SEND",
+        "notify_type": "due_remind",
+        "priority": 100,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "",
+        "body_rule": "",
+        "content": "任务“{task_title}”即将到期（{end_at}）。",
+    },
+    {
+        "name": "回复模板-已完成",
+        "template_kind": "MAIL_REPLY",
+        "notify_type": "task_done",
+        "priority": 120,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "已完成|完成",
+        "body_rule": "已完成|完成",
+        "content": "用于识别任务完成回复。",
+    },
+    {
+        "name": "回复模板-进行中",
+        "template_kind": "MAIL_REPLY",
+        "notify_type": "task_in_progress",
+        "priority": 110,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "进行中|处理中",
+        "body_rule": "进行中|处理中",
+        "content": "用于识别任务进行中回复。",
+    },
+    {
+        "name": "回复模板-延期申请",
+        "template_kind": "MAIL_REPLY",
+        "notify_type": "delay_request",
+        "priority": 130,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "延期",
+        "body_rule": "延期",
+        "content": "用于识别成员延期申请。格式：延期 + 新日期 + 原因。",
+    },
+    {
+        "name": "回复模板-延期审批",
+        "template_kind": "MAIL_REPLY",
+        "notify_type": "delay_approve",
+        "priority": 140,
+        "version": 1,
+        "enabled": True,
+        "is_default": True,
+        "subject_rule": "同意|拒绝",
+        "body_rule": "同意|拒绝",
+        "content": "用于识别管理员延期审批。格式：同意 + 新日期 或 拒绝 + 原因。",
+    },
+]
+
+
+def _ensure_schema_columns() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        task_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(tasks)")).fetchall()}
+        if "due_remind_days" not in task_columns:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN due_remind_days INTEGER NOT NULL DEFAULT 0"))
+
+
+def bootstrap_database() -> None:
+    if settings.database_url.startswith("sqlite:///./"):
+        db_path = Path(settings.database_url.replace("sqlite:///./", ""))
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+    _ensure_schema_columns()
+    with SessionLocal() as db:
+        if db.query(User).count() == 0:
+            db.add_all(
+                [
+                    User(
+                        username="admin",
+                        password_hash=hash_password(settings.default_password),
+                        role="admin",
+                        name="系统管理员",
+                        email="admin@example.com",
+                        ip_address="10.0.0.1",
+                        is_active=True,
+                    ),
+                    User(
+                        username="member",
+                        password_hash=hash_password(settings.default_password),
+                        role="member",
+                        name="默认成员",
+                        email="member@example.com",
+                        ip_address="10.0.0.2",
+                        is_active=True,
+                    ),
+                ]
+            )
+            db.commit()
+
+        existing_keys = {(item.template_kind, item.notify_type, item.name) for item in db.query(Template).all()}
+        for template_data in DEFAULT_TEMPLATES:
+            key = (template_data["template_kind"], template_data["notify_type"], template_data["name"])
+            if key in existing_keys:
+                continue
+            db.add(Template(**template_data))
+        db.commit()

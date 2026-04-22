@@ -1,0 +1,11 @@
+[Unit]
+Description=Department Task Collaboration Backend
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/department-task/backend
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -1,54 +1,96 @@
 <template>
   <section class="page">
-    <div class="panel hero">
+    <div class="panel workspace-header">
       <div>
-        <h1>{{ text.title }}</h1>
-        <p>{{ text.subtitle }}</p>
+        <div class="workspace-eyebrow">邮件列表</div>
+        <h1 class="workspace-title">已匹配邮件</h1>
+        <p class="workspace-subtitle">这里仅展示命中模板的邮件记录，并提供详情页查看匹配内容和业务动作。</p>
       </div>
       <div class="toolbar">
-        <button class="button secondary" @click="loadEvents" :disabled="loading">
-          {{ loading ? text.loading : text.refresh }}
+        <button class="button secondary" @click="testMailSettings" :disabled="busy">
+          测试 SMTP
+        </button>
+        <button class="button secondary" @click="testInboxSettings" :disabled="busy">
+          测试 IMAP
+        </button>
+        <button class="button secondary" @click="initializeBaseline" :disabled="busy">
+          设置扫描基准
+        </button>
+        <button class="button" @click="pollInbox" :disabled="busy">
+          手动收取邮件
         </button>
       </div>
     </div>
 
+    <div class="stats">
+      <div class="stat-card compact">
+        <span class="metric-label">自动收取</span>
+        <strong>{{ pollState?.auto_poll_enabled ? '已开启' : '未开启' }}</strong>
+      </div>
+      <div class="stat-card compact">
+        <span class="metric-label">下次收取倒计时</span>
+        <strong>{{ countdownText }}</strong>
+      </div>
+      <div class="stat-card compact">
+        <span class="metric-label">上次收取时间</span>
+        <strong>{{ formatDateTime(pollState?.last_scan_at) }}</strong>
+      </div>
+      <div class="stat-card compact">
+        <span class="metric-label">匹配邮件数</span>
+        <strong>{{ events.length }}</strong>
+      </div>
+    </div>
+
+    <div class="panel" v-if="feedback.message">
+      <h2>{{ feedback.title }}</h2>
+      <p :class="feedback.type === 'success' ? 'success-text' : 'error-text'">{{ feedback.message }}</p>
+    </div>
+
     <div class="panel">
+      <div class="section-head">
+        <div>
+          <h2>匹配结果列表</h2>
+          <p>每条记录都可以进入详情查看匹配内容、模板和落库动作。</p>
+        </div>
+        <button class="button secondary small" @click="loadAll" :disabled="busy">刷新列表</button>
+      </div>
+
       <table class="table">
         <thead>
           <tr>
-            <th>{{ text.createdAt }}</th>
-            <th>{{ text.from }}</th>
-            <th>{{ text.subject }}</th>
-            <th>{{ text.template }}</th>
-            <th>{{ text.processStatus }}</th>
-            <th>{{ text.action }}</th>
-            <th>{{ text.task }}</th>
+            <th>收取时间</th>
+            <th>发件人</th>
+            <th>主题</th>
+            <th>匹配模板</th>
+            <th>处理状态</th>
+            <th>关联任务</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="pagedEvents.length === 0">
-            <td colspan="7">{{ text.empty }}</td>
+            <td colspan="7">当前没有匹配成功的邮件。</td>
           </tr>
           <tr v-for="item in pagedEvents" :key="item.id">
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>{{ item.from_addr }}</td>
             <td>
               <div>{{ item.subject || '-' }}</div>
-              <div class="subtle-text">{{ item.body_digest || '-' }}</div>
+              <div class="subtle-text clamp-2">{{ item.body_digest || '-' }}</div>
             </td>
             <td>
-              <div>{{ item.template_name || text.unmatched }}</div>
-              <div class="subtle-text" v-if="item.notify_type_text">{{ item.notify_type_text }}</div>
+              <div>{{ item.template_name || '-' }}</div>
+              <div class="subtle-text">{{ item.notify_type_text || notifyTypeText(item.notify_type) }}</div>
             </td>
             <td>{{ item.process_status_text }}</td>
             <td>
-              <div>{{ item.action_type || '-' }}</div>
-              <div class="subtle-text" v-if="item.action_status_text">{{ item.action_status_text }}</div>
-              <pre v-if="item.action_result_json" class="code-block">{{ item.action_result_json }}</pre>
+              <router-link v-if="item.task_id" :to="`/admin/tasks/${item.task_id}`">
+                {{ item.task_title || `任务 #${item.task_id}` }}
+              </router-link>
+              <span v-else>-</span>
             </td>
             <td>
-              <router-link v-if="item.task_id" :to="`/admin/tasks/${item.task_id}`">{{ item.task_title || `${text.taskPrefix}${item.task_id}` }}</router-link>
-              <span v-else>-</span>
+              <router-link class="button secondary small" :to="`/admin/mail-events/${item.id}`">查看详情</router-link>
             </td>
           </tr>
         </tbody>
@@ -59,47 +101,120 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
-import { formatDateTime } from '../../utils/format'
-
-const text = {
-  title: '最近扫描邮件',
-  subtitle: '查看系统最近从收件箱扫描到的邮件、匹配到的模板，以及已经落下的业务动作。',
-  loading: '刷新中...',
-  refresh: '刷新列表',
-  createdAt: '时间',
-  from: '发件人',
-  subject: '主题',
-  template: '模板',
-  processStatus: '处理状态',
-  action: '业务动作',
-  task: '关联任务',
-  empty: '当前还没有扫描到邮件。',
-  unmatched: '未匹配模板',
-  taskPrefix: '任务 #',
-}
+import { notifyTypeText } from '../../constants/notifyTypes'
+import { formatCountdown, formatDateTime } from '../../utils/format'
 
 const events = ref([])
-const loading = ref(false)
+const pollState = ref(null)
 const page = ref(1)
 const pageSize = 10
+const busy = ref(false)
+const feedback = ref({
+  title: '',
+  message: '',
+  type: 'success',
+})
+const nowTick = ref(Date.now())
 
 const pagedEvents = computed(() => {
   const start = (page.value - 1) * pageSize
   return events.value.slice(start, start + pageSize)
 })
 
+const countdownText = computed(() => {
+  void nowTick.value
+  if (!pollState.value?.auto_poll_enabled) return '自动收取未开启'
+  return formatCountdown(pollState.value?.next_poll_at)
+})
+
+let timerId = null
+
 async function loadEvents() {
-  loading.value = true
+  const { data } = await http.get('/admin/mail/events')
+  events.value = data
+}
+
+async function loadPollState() {
+  const { data } = await http.get('/admin/mail/poll-state')
+  pollState.value = data
+}
+
+async function loadAll() {
+  busy.value = true
   try {
-    const { data } = await http.get('/admin/mail/events')
-    events.value = data
+    await Promise.all([loadEvents(), loadPollState()])
   } finally {
-    loading.value = false
+    busy.value = false
   }
 }
 
-onMounted(loadEvents)
+function showFeedback(title, message, type = 'success') {
+  feedback.value = { title, message, type }
+}
+
+async function testMailSettings() {
+  busy.value = true
+  try {
+    const { data } = await http.post('/admin/mail/test')
+    showFeedback('SMTP 测试结果', data.message, data.status === 'success' ? 'success' : 'error')
+  } catch (error) {
+    showFeedback('SMTP 测试结果', error.response?.data?.detail || 'SMTP 测试失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function testInboxSettings() {
+  busy.value = true
+  try {
+    const { data } = await http.post('/admin/mail/inbox-test')
+    showFeedback('IMAP 测试结果', data.message, data.status === 'success' ? 'success' : 'error')
+  } catch (error) {
+    showFeedback('IMAP 测试结果', error.response?.data?.detail || 'IMAP 测试失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function initializeBaseline() {
+  busy.value = true
+  try {
+    const { data } = await http.post('/admin/mail/baseline')
+    showFeedback('扫描基准设置', data.message, data.status === 'success' ? 'success' : 'error')
+    await loadPollState()
+  } catch (error) {
+    showFeedback('扫描基准设置', error.response?.data?.detail || '设置扫描基准失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function pollInbox() {
+  busy.value = true
+  try {
+    const { data } = await http.post('/admin/mail/poll')
+    showFeedback('邮件收取结果', data.message, ['success', 'initialized'].includes(data.status) ? 'success' : 'error')
+    await Promise.all([loadEvents(), loadPollState()])
+  } catch (error) {
+    showFeedback('邮件收取结果', error.response?.data?.detail || '邮件收取失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+onMounted(async () => {
+  await loadAll()
+  timerId = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
+})
+
+onUnmounted(() => {
+  if (timerId) {
+    window.clearInterval(timerId)
+  }
+})
 </script>

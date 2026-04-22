@@ -10,6 +10,8 @@
     <div class="panel">
       <h2>任务内容</h2>
       <p>{{ task.content }}</p>
+      <p>开始时间：{{ formatDateTime(task.start_at) }}</p>
+      <p>结束时间：{{ formatDateTime(task.end_at) }}</p>
       <p>计划用时：{{ formatMinutes(task.planned_minutes) }}</p>
       <p>实际用时：{{ formatMinutes(task.actual_minutes) }}</p>
       <p>到期提醒：{{ task.due_remind_days > 0 ? `提前 ${task.due_remind_days} 天` : '未开启' }}</p>

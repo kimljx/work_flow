@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,7 +25,7 @@ from app.constants import (
     TASK_STATUS_LABELS,
 )
 from app.db import get_db
-from app.models import AuditLog, DelayRequest, MailAction, MailEvent, Notification, NotificationRecipient, Task, TaskMember, TaskMilestone, TaskStatusEvent, Template, User
+from app.models import AuditLog, DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskMilestone, TaskStatusEvent, Template, User
 from app.schemas import (
     ApiMessage,
     AuditOut,
@@ -33,7 +33,11 @@ from app.schemas import (
     DelayDecisionRequest,
     DelayRequestCreate,
     LoginRequest,
+    MailEventDetailOut,
     MailEventOut,
+    MailPollStateOut,
+    NotificationDetailOut,
+    NotificationRecipientOut,
     NotificationOut,
     RefreshRequest,
     TaskCreate,
@@ -165,6 +169,33 @@ def serialize_notification(notification: Notification, db: Session) -> Notificat
     )
 
 
+def serialize_notification_recipient(recipient: NotificationRecipient, db: Session) -> NotificationRecipientOut:
+    user = db.query(User).filter(User.id == recipient.user_id).first()
+    return NotificationRecipientOut(
+        user_id=recipient.user_id,
+        name=user.name if user else "",
+        email=user.email if user else "",
+        recipient_role=recipient.recipient_role,
+        recipient_role_text=MEMBER_ROLE_LABELS.get(recipient.recipient_role, recipient.recipient_role),
+        delivery_status=recipient.delivery_status,
+        delivery_status_text=notification_status_text(recipient.delivery_status),
+        read_status=recipient.read_status,
+        read_status_text=read_status_text(recipient.read_status),
+        retry_count=recipient.retry_count,
+        last_error=recipient.last_error,
+    )
+
+
+def serialize_notification_detail(notification: Notification, db: Session) -> NotificationDetailOut:
+    base = serialize_notification(notification, db)
+    recipients = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).all()
+    return NotificationDetailOut(
+        **base.model_dump(),
+        content_snapshot=notification.content_snapshot,
+        recipients=[serialize_notification_recipient(item, db) for item in recipients],
+    )
+
+
 def serialize_mail_event(mail_event: MailEvent, db: Session) -> MailEventOut:
     template = db.query(Template).filter(Template.id == mail_event.resolved_template_id).first() if mail_event.resolved_template_id else None
     action = db.query(MailAction).filter(MailAction.mail_event_id == mail_event.id).order_by(MailAction.id.desc()).first()
@@ -189,6 +220,42 @@ def serialize_mail_event(mail_event: MailEvent, db: Session) -> MailEventOut:
         action_result_json=action.action_result_json if action else "",
         created_at=mail_event.created_at,
     )
+
+
+def serialize_mail_event_detail(mail_event: MailEvent, db: Session) -> MailEventDetailOut:
+    base = serialize_mail_event(mail_event, db)
+    template = db.query(Template).filter(Template.id == mail_event.resolved_template_id).first() if mail_event.resolved_template_id else None
+    return MailEventDetailOut(
+        **base.model_dump(),
+        template_id=template.id if template else None,
+        template_kind=template.template_kind if template else "",
+        content=template.content if template else "",
+    )
+
+
+def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
+    state = db.query(MailScanState).filter(MailScanState.id == 1).first()
+    interval_seconds = max(settings.mail_auto_poll_interval_seconds, 30)
+    last_scan_at = state.last_scan_at if state else None
+    next_poll_at = None
+    if settings.mail_auto_poll_enabled and last_scan_at:
+        next_poll_at = last_scan_at + timedelta(seconds=interval_seconds)
+    return MailPollStateOut(
+        auto_poll_enabled=settings.mail_auto_poll_enabled,
+        interval_seconds=interval_seconds,
+        last_scan_at=last_scan_at,
+        next_poll_at=next_poll_at,
+    )
+
+
+def ensure_notification_access(notification: Notification, current_user: User, db: Session) -> None:
+    if current_user.role == "admin":
+        return
+    if notification.task_id is None:
+        raise HTTPException(status_code=403, detail="无权访问该通知")
+    membership = db.query(TaskMember).filter(TaskMember.task_id == notification.task_id, TaskMember.user_id == current_user.id).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="无权访问该通知")
 
 
 @router.post("/auth/login", response_model=TokenPair)
@@ -551,7 +618,7 @@ def template_options(_: User = Depends(require_admin)) -> dict:
     return {
         "template_kind_options": [
             {"value": "MAIL_SEND", "label": "邮件发送模板"},
-            {"value": "QAX_SEND", "label": "QAX 发送模板"},
+            {"value": "QAX_SEND", "label": "即时消息发送模板"},
             {"value": "MAIL_REPLY", "label": "邮件回复模板"},
         ],
         "notify_type_options": {
@@ -629,9 +696,37 @@ def list_notifications(current_user: User = Depends(get_current_user), db: Sessi
     return [serialize_notification(item, db) for item in query.order_by(Notification.id.desc()).all()]
 
 
+@router.get("/notifications/{notification_id}", response_model=NotificationDetailOut)
+def get_notification_detail(notification_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> NotificationDetailOut:
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="通知不存在")
+    ensure_notification_access(notification, current_user, db)
+    return serialize_notification_detail(notification, db)
+
+
 @router.get("/admin/mail/events", response_model=list[MailEventOut])
 def list_mail_events(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[MailEventOut]:
-    return [serialize_mail_event(item, db) for item in db.query(MailEvent).order_by(MailEvent.id.desc()).limit(100).all()]
+    query = (
+        db.query(MailEvent)
+        .filter(MailEvent.resolved_template_id.isnot(None))
+        .order_by(MailEvent.id.desc())
+        .limit(100)
+    )
+    return [serialize_mail_event(item, db) for item in query.all()]
+
+
+@router.get("/admin/mail/events/{event_id}", response_model=MailEventDetailOut)
+def get_mail_event_detail(event_id: int, _: User = Depends(require_admin), db: Session = Depends(get_db)) -> MailEventDetailOut:
+    event = db.query(MailEvent).filter(MailEvent.id == event_id, MailEvent.resolved_template_id.isnot(None)).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="邮件记录不存在")
+    return serialize_mail_event_detail(event, db)
+
+
+@router.get("/admin/mail/poll-state", response_model=MailPollStateOut)
+def get_mail_poll_state(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> MailPollStateOut:
+    return serialize_mail_poll_state(db)
 
 
 @router.post("/admin/mail/test", response_model=dict)
@@ -712,8 +807,12 @@ def list_pending_delay_requests(_: User = Depends(require_admin), db: Session = 
                 "id": item.id,
                 "task_id": item.task_id,
                 "task_title": task.title if task else "",
+                "task_priority": task.priority if task else "",
+                "task_start_at": task.start_at if task else None,
+                "task_end_at": task.end_at if task else None,
                 "applicant_id": item.applicant_id,
                 "applicant_name": applicant.name if applicant else "",
+                "applicant_email": applicant.email if applicant else "",
                 "approval_status": item.approval_status,
                 "approval_status_text": DELAY_STATUS_LABELS.get(item.approval_status, item.approval_status),
                 "apply_reason": item.apply_reason,
@@ -723,6 +822,7 @@ def list_pending_delay_requests(_: User = Depends(require_admin), db: Session = 
                 "approve_remark": item.approve_remark,
                 "decided_by_channel": item.decided_by_channel,
                 "version": item.version,
+                "created_at": item.created_at,
             }
         )
     return result

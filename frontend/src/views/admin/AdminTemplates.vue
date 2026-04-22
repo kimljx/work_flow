@@ -3,7 +3,7 @@
     <div class="panel hero">
       <div>
         <h1>模板管理</h1>
-        <p>统一维护邮件发送模板、QAX 发送模板和邮件回复模板，并为每种模板类型保留默认模板。</p>
+        <p>统一维护邮件发送模板、即时消息发送模板和邮件回复模板，并为每种模板类型保留默认模板。</p>
       </div>
     </div>
 
@@ -113,7 +113,7 @@ const templates = ref([])
 const editingId = ref(null)
 const templateKindOptions = ref([
   { value: 'MAIL_SEND', label: '邮件发送模板' },
-  { value: 'QAX_SEND', label: 'QAX 发送模板' },
+  { value: 'QAX_SEND', label: '即时消息发送模板' },
   { value: 'MAIL_REPLY', label: '邮件回复模板' },
 ])
 const notifyTypeOptions = ref({
@@ -145,9 +145,9 @@ const templateRules = [
     description: '用于任务创建、提醒等外发邮件正文。建议在正文中附带明确的回复指引，方便成员按格式回信。',
   },
   {
-    title: 'QAX 发送模板',
+    title: '即时消息发送模板',
     keyword: 'QAX_SEND',
-    description: '用于桌面通知文案展示。QAX 只负责送达和已读展示，不直接回写任务主状态。',
+    description: '用于即时消息文案展示。即时消息只负责送达和已读展示，不直接回写任务主状态。',
   },
   {
     title: '邮件回复模板',
@@ -185,7 +185,7 @@ watch(
 function templateKindText(kind) {
   return {
     MAIL_SEND: '邮件发送模板',
-    QAX_SEND: 'QAX 发送模板',
+    QAX_SEND: '即时消息发送模板',
     MAIL_REPLY: '邮件回复模板',
   }[kind] || kind
 }

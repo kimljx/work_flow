@@ -9,6 +9,7 @@ import AdminTaskDetail from '../views/admin/AdminTaskDetail.vue'
 import AdminTemplates from '../views/admin/AdminTemplates.vue'
 import AdminNotifications from '../views/admin/AdminNotifications.vue'
 import AdminMailEvents from '../views/admin/AdminMailEvents.vue'
+import AdminMailEventDetail from '../views/admin/AdminMailEventDetail.vue'
 import AdminDelayRequests from '../views/admin/AdminDelayRequests.vue'
 import AdminUsers from '../views/admin/AdminUsers.vue'
 import AdminImportExport from '../views/admin/AdminImportExport.vue'
@@ -16,6 +17,7 @@ import AdminAuditLogs from '../views/admin/AdminAuditLogs.vue'
 import MemberTasks from '../views/member/MemberTasks.vue'
 import MemberTaskDetail from '../views/member/MemberTaskDetail.vue'
 import MemberNotifications from '../views/member/MemberNotifications.vue'
+import NotificationDetailPage from '../views/shared/NotificationDetailPage.vue'
 
 const routes = [
   { path: '/', redirect: '/auth/login' },
@@ -28,7 +30,9 @@ const routes = [
   { path: '/admin/tasks/:id/edit', component: AdminTaskForm, meta: { role: 'admin' } },
   { path: '/admin/templates', component: AdminTemplates, meta: { role: 'admin' } },
   { path: '/admin/notifications', component: AdminNotifications, meta: { role: 'admin' } },
+  { path: '/admin/notifications/:id', component: NotificationDetailPage, meta: { role: 'admin' } },
   { path: '/admin/mail-events', component: AdminMailEvents, meta: { role: 'admin' } },
+  { path: '/admin/mail-events/:id', component: AdminMailEventDetail, meta: { role: 'admin' } },
   { path: '/admin/delay-requests', component: AdminDelayRequests, meta: { role: 'admin' } },
   { path: '/admin/users', component: AdminUsers, meta: { role: 'admin' } },
   { path: '/admin/import-export', component: AdminImportExport, meta: { role: 'admin' } },
@@ -36,6 +40,7 @@ const routes = [
   { path: '/member/tasks', component: MemberTasks, meta: { role: 'member' } },
   { path: '/member/tasks/:id', component: MemberTaskDetail, meta: { role: 'member' } },
   { path: '/member/notifications', component: MemberNotifications, meta: { role: 'member' } },
+  { path: '/member/notifications/:id', component: NotificationDetailPage, meta: { role: 'member' } },
 ]
 
 const router = createRouter({

@@ -37,7 +37,7 @@ const labels = {
   tasks: '任务',
   templates: '模板',
   notifications: '通知中心',
-  mailEvents: '扫描邮件',
+  mailEvents: '邮件列表',
   delayRequests: '延期审批',
   users: '用户管理',
   importExport: '导入导出',

@@ -15,6 +15,8 @@
       <div>
         <h2>基础信息</h2>
         <p>任务内容：{{ task.content }}</p>
+        <p>开始时间：{{ formatDateTime(task.start_at) }}</p>
+        <p>结束时间：{{ formatDateTime(task.end_at) }}</p>
         <p>优先级：{{ task.priority_text }}</p>
         <p>计划用时：{{ formatMinutes(task.planned_minutes) }}</p>
         <p>实际用时：{{ formatMinutes(task.actual_minutes) }}</p>

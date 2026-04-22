@@ -1,9 +1,10 @@
 <template>
   <section class="page">
-    <div class="panel hero">
+    <div class="panel workspace-header">
       <div>
-        <h1>任务列表</h1>
-        <p>按关键词和状态筛选任务，支持查看详情、手动提醒和删除。</p>
+        <div class="workspace-eyebrow">任务模块</div>
+        <h1 class="workspace-title">任务排期与执行视图</h1>
+        <p class="workspace-subtitle">集中查看任务起止时间、优先级、当前状态和送达情况，支持直接进入详情、提醒和删除。</p>
       </div>
       <div class="toolbar">
         <button class="button secondary" @click="runDueRemind">执行到期提醒</button>
@@ -11,9 +12,9 @@
       </div>
     </div>
 
-    <div class="panel">
-      <div class="toolbar">
-        <input v-model="keyword" placeholder="输入任务标题关键词" />
+    <div class="panel filter-shell">
+      <div class="filter-grid">
+        <input v-model="keyword" placeholder="搜索任务标题或负责人" />
         <select v-model="status">
           <option value="">全部状态</option>
           <option value="not_started">未开始</option>
@@ -22,42 +23,77 @@
           <option value="canceled">已取消</option>
         </select>
       </div>
-
-      <table class="table">
-        <thead>
-          <tr>
-            <th>任务名称</th>
-            <th>负责人</th>
-            <th>参与人数</th>
-            <th>状态</th>
-            <th>已送达/总通知</th>
-            <th>计划用时</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="pagedTasks.length === 0">
-            <td colspan="7">当前没有符合条件的任务。</td>
-          </tr>
-          <tr v-for="task in pagedTasks" :key="task.id">
-            <td>{{ task.title }}</td>
-            <td>{{ task.owner_name || '-' }}</td>
-            <td>{{ task.participant_count }}</td>
-            <td>{{ task.status_text }}</td>
-            <td>{{ task.delivered_count }}/{{ task.notification_total }}</td>
-            <td>{{ formatMinutes(task.planned_minutes) }}</td>
-            <td>
-              <div class="toolbar">
-                <router-link class="button secondary" :to="`/admin/tasks/${task.id}`">详情</router-link>
-                <button class="button secondary" @click="remind(task.id)">提醒</button>
-                <button class="button danger" @click="removeTask(task.id)">删除</button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <AppPagination v-model="page" :total="filteredTasks.length" :page-size="pageSize" />
+      <div class="filter-summary">当前展示 {{ filteredTasks.length }} 条任务</div>
     </div>
+
+    <div class="task-stack">
+      <article v-if="pagedTasks.length === 0" class="panel empty-state">
+        <h2>暂无符合条件的任务</h2>
+        <p>可以调整筛选条件，或直接创建新的任务计划。</p>
+      </article>
+
+      <article
+        v-for="task in pagedTasks"
+        :key="task.id"
+        class="task-work-card"
+      >
+        <div :class="statusUi(task).dot"></div>
+        <div class="task-work-main">
+          <div class="task-work-heading">
+            <div>
+              <div class="task-work-kicker">任务编号 #{{
+                task.id
+              }}</div>
+              <h2>{{ task.title }}</h2>
+              <p>{{ task.content }}</p>
+            </div>
+            <span :class="resolvePriorityMeta(task.priority).tone">
+              {{ resolvePriorityMeta(task.priority).label }}
+            </span>
+          </div>
+
+          <div class="task-info-grid">
+            <div class="info-cell">
+              <span class="info-label">负责人</span>
+              <strong>{{ task.owner_name || '-' }}</strong>
+            </div>
+            <div class="info-cell">
+              <span class="info-label">参与成员</span>
+              <strong>{{ task.participant_count }} 人</strong>
+            </div>
+            <div class="info-cell">
+              <span class="info-label">开始时间</span>
+              <strong>{{ formatDateTime(task.start_at) }}</strong>
+            </div>
+            <div class="info-cell">
+              <span class="info-label">结束时间</span>
+              <strong>{{ formatDateTime(task.end_at) }}</strong>
+            </div>
+            <div class="info-cell">
+              <span class="info-label">计划用时</span>
+              <strong>{{ formatMinutes(task.planned_minutes) }}</strong>
+            </div>
+            <div class="info-cell">
+              <span class="info-label">通知送达</span>
+              <strong>{{ task.delivered_count }}/{{ task.notification_total }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="task-work-side">
+          <span :class="statusUi(task).tone">{{ statusUi(task).text }}</span>
+          <div class="task-side-note">优先级 {{ task.priority_text }}</div>
+          <div class="task-side-note">提醒设置 {{ task.due_remind_days > 0 ? `提前 ${task.due_remind_days} 天` : '未开启' }}</div>
+          <div class="toolbar task-actions">
+            <router-link class="button secondary" :to="`/admin/tasks/${task.id}`">详情</router-link>
+            <button class="button secondary" @click="remind(task.id)">提醒</button>
+            <button class="button danger" @click="removeTask(task.id)">删除</button>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <AppPagination v-model="page" :total="filteredTasks.length" :page-size="pageSize" />
   </section>
 </template>
 
@@ -65,7 +101,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
-import { formatMinutes } from '../../utils/format'
+import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
+import { formatDateTime, formatMinutes } from '../../utils/format'
 
 const tasks = ref([])
 const keyword = ref('')
@@ -75,7 +112,11 @@ const pageSize = 8
 
 const filteredTasks = computed(() =>
   tasks.value.filter((item) => {
-    const matchKeyword = !keyword.value || item.title.includes(keyword.value)
+    const query = keyword.value.trim()
+    const matchKeyword =
+      !query ||
+      item.title.includes(query) ||
+      (item.owner_name || '').includes(query)
     const matchStatus = !status.value || item.main_status === status.value
     return matchKeyword && matchStatus
   })
@@ -89,6 +130,10 @@ const pagedTasks = computed(() => {
 watch([keyword, status], () => {
   page.value = 1
 })
+
+function statusUi(task) {
+  return resolveTaskStatusTone(task)
+}
 
 async function loadTasks() {
   const { data } = await http.get('/tasks')

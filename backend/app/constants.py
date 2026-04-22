@@ -22,7 +22,7 @@ MEMBER_ROLE_LABELS = {
 
 NOTIFICATION_CHANNEL_LABELS = {
     "email": "邮件",
-    "qax": "QAX 通知",
+    "qax": "即时消息",
 }
 
 NOTIFICATION_TYPE_LABELS = {

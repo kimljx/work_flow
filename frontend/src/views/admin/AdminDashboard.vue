@@ -49,8 +49,8 @@ const stats = computed(() => [
   { label: '已取消', value: summary.value.canceled_total },
   { label: '延期任务', value: summary.value.delayed_total },
   { label: '邮件发送成功率', value: `${summary.value.email_success_rate}%` },
-  { label: 'QAX 送达率', value: `${summary.value.qax_delivery_rate}%` },
-  { label: 'QAX 已读率', value: `${summary.value.qax_read_rate}%` },
+  { label: '即时消息送达率', value: `${summary.value.qax_delivery_rate}%` },
+  { label: '即时消息已读率', value: `${summary.value.qax_read_rate}%` },
   { label: '失败重试数', value: summary.value.retry_total },
 ])
 

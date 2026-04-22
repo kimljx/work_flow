@@ -161,6 +161,25 @@ class NotificationOut(BaseModel):
     created_at: datetime | None = None
 
 
+class NotificationRecipientOut(BaseModel):
+    user_id: int
+    name: str = ""
+    email: str = ""
+    recipient_role: str
+    recipient_role_text: str = ""
+    delivery_status: str
+    delivery_status_text: str = ""
+    read_status: str
+    read_status_text: str = ""
+    retry_count: int = 0
+    last_error: str = ""
+
+
+class NotificationDetailOut(NotificationOut):
+    content_snapshot: str = ""
+    recipients: list[NotificationRecipientOut] = Field(default_factory=list)
+
+
 class MailEventOut(BaseModel):
     id: int
     message_id: str
@@ -179,6 +198,19 @@ class MailEventOut(BaseModel):
     action_status_text: str = ""
     action_result_json: str = ""
     created_at: datetime | None = None
+
+
+class MailEventDetailOut(MailEventOut):
+    template_id: int | None = None
+    template_kind: str = ""
+    content: str = ""
+
+
+class MailPollStateOut(BaseModel):
+    auto_poll_enabled: bool
+    interval_seconds: int
+    last_scan_at: datetime | None = None
+    next_poll_at: datetime | None = None
 
 
 class DashboardSummary(BaseModel):

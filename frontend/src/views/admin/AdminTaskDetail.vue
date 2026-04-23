@@ -6,7 +6,8 @@
         <p>{{ task.status_text }}，负责人：{{ task.owner_name || '-' }}</p>
       </div>
       <div class="toolbar">
-        <router-link class="button secondary" :to="`/admin/tasks/${task.id}/edit`">编辑计划</router-link>
+        <router-link class="button secondary" :to="backTarget">返回上页</router-link>
+        <router-link class="button secondary" :to="{ path: `/admin/tasks/${task.id}/edit`, query: { from: route.fullPath } }">编辑计划</router-link>
         <button class="button secondary" @click="remindTask">手动提醒</button>
       </div>
     </div>
@@ -91,15 +92,26 @@
             <th>渠道</th>
             <th>类型</th>
             <th>状态</th>
-            <th>送达/已读</th>
+            <th>送达</th>
+            <th>已读</th>
+            <th>创建时间</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
+          <tr v-if="task.notifications.length === 0">
+            <td colspan="7">当前没有通知记录。</td>
+          </tr>
           <tr v-for="item in task.notifications" :key="item.id">
             <td>{{ item.channel_text }}</td>
             <td>{{ item.notify_type_text }}</td>
             <td>{{ item.status_text }}</td>
-            <td>{{ item.delivered_count }}/{{ item.read_count }}</td>
+            <td>{{ item.delivered_count }}/{{ item.recipient_total }}</td>
+            <td>{{ item.read_count }}</td>
+            <td>{{ formatDateTime(item.created_at) }}</td>
+            <td>
+              <router-link class="button secondary small" :to="{ path: `/admin/notifications/${item.id}`, query: { from: route.fullPath } }">查看详情</router-link>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -107,29 +119,65 @@
 
     <div class="panel">
       <h2>延期记录</h2>
-      <table class="table">
-        <thead>
-          <tr>
-            <th>申请人</th>
-            <th>申请原因</th>
-            <th>原截止</th>
-            <th>申请截止</th>
-            <th>审批状态</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="task.delay_requests.length === 0">
-            <td colspan="5">当前没有延期申请记录。</td>
-          </tr>
-          <tr v-for="item in task.delay_requests" :key="item.id">
-            <td>{{ item.applicant_name }}</td>
-            <td>{{ item.apply_reason }}</td>
-            <td>{{ formatDateTime(item.original_deadline) }}</td>
-            <td>{{ formatDateTime(item.proposed_deadline) }}</td>
-            <td>{{ item.approval_status_text }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div v-if="task.delay_requests.length === 0" class="empty-state approval-empty">
+        <h3>当前没有延期申请记录</h3>
+        <p>成员提交延期申请后，会在这里同步展示审批结果和处理信息。</p>
+      </div>
+      <div v-else class="section-block">
+        <article
+          v-for="item in task.delay_requests"
+          :key="item.id"
+          class="approval-card task-delay-card"
+        >
+          <div class="approval-avatar">
+            {{ applicantInitial(item.applicant_name) }}
+          </div>
+
+          <div class="approval-main">
+            <div class="approval-topline">
+              <div>
+                <div class="approval-user">{{ item.applicant_name || '未知申请人' }}</div>
+                <div class="subtle-text">申请编号 #{{ item.id }}</div>
+              </div>
+              <span :class="delayStatusTone(item.approval_status)">{{ item.approval_status_text }}</span>
+            </div>
+
+            <div class="approval-meta-grid">
+              <div class="info-cell">
+                <span class="info-label">原截止时间</span>
+                <strong>{{ formatDateTime(item.original_deadline) }}</strong>
+              </div>
+              <div class="info-cell">
+                <span class="info-label">申请截止时间</span>
+                <strong>{{ formatDateTime(item.proposed_deadline) }}</strong>
+              </div>
+              <div class="info-cell">
+                <span class="info-label">最终截止时间</span>
+                <strong>{{ formatDateTime(item.approved_deadline || item.proposed_deadline) }}</strong>
+              </div>
+            </div>
+
+            <div class="approval-reason">
+              <span class="info-label">申请原因</span>
+              <p>{{ item.apply_reason || '未填写申请原因' }}</p>
+            </div>
+          </div>
+
+          <div class="approval-action task-delay-summary">
+            <label>审批人</label>
+            <div>{{ item.approver_name || '待处理' }}</div>
+            <label>审批渠道</label>
+            <div>{{ decisionChannelText(item.decided_by_channel) }}</div>
+            <label>审批时间</label>
+            <div>{{ formatDateTime(item.decided_at) }}</div>
+            <label>审批备注</label>
+            <div class="task-delay-remark">{{ item.approve_remark || '暂无审批备注' }}</div>
+            <div class="toolbar approval-action-buttons">
+              <router-link class="button secondary small" :to="{ path: '/admin/delay-requests', query: { from: route.fullPath } }">前往审批工作台</router-link>
+            </div>
+          </div>
+        </article>
+      </div>
     </div>
 
     <div class="panel">
@@ -158,6 +206,23 @@ const statusForm = reactive({
   main_status: 'not_started',
   remark: '',
 })
+const backTarget = route.query.from || '/admin/tasks'
+
+function applicantInitial(name) {
+  return (name || '成员').slice(0, 2)
+}
+
+function delayStatusTone(status) {
+  if (status === 'APPROVED') return 'status-tone status-tone-success'
+  if (status === 'REJECTED') return 'status-tone status-tone-danger'
+  return 'status-tone status-tone-warning'
+}
+
+function decisionChannelText(channel) {
+  if (channel === 'web') return '系统审批'
+  if (channel === 'mail') return '邮件审批'
+  return '待处理'
+}
 
 async function loadTask() {
   const { data } = await http.get(`/tasks/${route.params.id}`)
@@ -186,7 +251,7 @@ async function toggleLock(shouldLock) {
 async function removeTask() {
   if (!window.confirm('确认删除该任务吗？删除后仍会保留审计日志。')) return
   await http.delete(`/tasks/${route.params.id}`)
-  router.push('/admin/tasks')
+  router.push(backTarget)
 }
 
 onMounted(loadTask)

@@ -5,6 +5,9 @@
         <h1>{{ task.title }}</h1>
         <p>{{ task.status_text }}，截止时间：{{ formatDateTime(task.end_at) }}</p>
       </div>
+      <div class="toolbar">
+        <router-link class="button secondary" :to="backPath">返回上页</router-link>
+      </div>
     </div>
 
     <div class="panel">
@@ -60,13 +63,14 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import { formatDateTime, formatMinutes } from '../../utils/format'
 
 const route = useRoute()
 const task = ref(null)
+const backPath = computed(() => route.query.from || '/member/tasks')
 
 onMounted(async () => {
   const { data } = await http.get(`/tasks/${route.params.id}`)

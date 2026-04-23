@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+"""后端核心接口路由。
+
+模块聚合认证、用户、任务、模板、通知、邮件、延期审批、导入导出与审计接口，
+并承担接口层数据组装、权限校验与错误提示的职责。
+"""
+
 import csv
 import io
 from datetime import datetime, timedelta
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -61,13 +69,29 @@ from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
 
 router = APIRouter(prefix="/api/v1")
+TASK_IMPORT_FIELDS = (
+    "title",
+    "content",
+    "owner_username",
+    "participant_usernames",
+    "start_at",
+    "end_at",
+    "priority",
+    "remark",
+    "due_remind_days",
+    "milestone_names",
+    "milestone_datetimes",
+    "remind_offsets",
+)
 
 
 def task_status_text(status: str) -> str:
+    """将任务状态编码转换为中文展示文案。"""
     return TASK_STATUS_LABELS.get(status, status)
 
 
 def task_status_display(task: Task) -> str:
+    """生成任务列表与详情页使用的状态展示文本。"""
     text = task_status_text(task.main_status)
     if task.delay_days > 0:
         return f"{text}（延期{task.delay_days}天）"
@@ -75,6 +99,7 @@ def task_status_display(task: Task) -> str:
 
 
 def infer_task_status_by_time(start_at: datetime, end_at: datetime, now: datetime | None = None) -> str:
+    """根据任务起止时间推断默认主状态。"""
     current = now or shanghai_now_naive()
     if current < start_at:
         return "not_started"
@@ -96,6 +121,7 @@ def read_status_text(status: str) -> str:
 
 
 def serialize_user(user: User) -> UserOut:
+    """将数据库用户对象序列化为接口响应结构。"""
     return UserOut(
         id=user.id,
         username=user.username,
@@ -109,6 +135,7 @@ def serialize_user(user: User) -> UserOut:
 
 
 def serialize_task(task: Task, db: Session) -> TaskOut:
+    """聚合任务成员和通知统计，生成任务列表项。"""
     members = db.query(TaskMember).filter(TaskMember.task_id == task.id).all()
     owner_name = next((item.user.name for item in members if item.member_role == "owner" and item.user), "")
     participant_count = sum(1 for item in members if item.member_role == "participant")
@@ -144,6 +171,7 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
 
 
 def serialize_notification(notification: Notification, db: Session) -> NotificationOut:
+    """将通知主记录扩展为包含统计信息的列表项。"""
     recipients = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).all()
     task_title = ""
     if notification.task_id:
@@ -170,6 +198,7 @@ def serialize_notification(notification: Notification, db: Session) -> Notificat
 
 
 def serialize_notification_recipient(recipient: NotificationRecipient, db: Session) -> NotificationRecipientOut:
+    """序列化通知接收人明细。"""
     user = db.query(User).filter(User.id == recipient.user_id).first()
     return NotificationRecipientOut(
         user_id=recipient.user_id,
@@ -187,6 +216,7 @@ def serialize_notification_recipient(recipient: NotificationRecipient, db: Sessi
 
 
 def serialize_notification_detail(notification: Notification, db: Session) -> NotificationDetailOut:
+    """构造通知详情页所需的完整响应。"""
     base = serialize_notification(notification, db)
     recipients = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).all()
     return NotificationDetailOut(
@@ -197,6 +227,7 @@ def serialize_notification_detail(notification: Notification, db: Session) -> No
 
 
 def serialize_mail_event(mail_event: MailEvent, db: Session) -> MailEventOut:
+    """序列化邮件事件，并补齐匹配模板与动作结果。"""
     template = db.query(Template).filter(Template.id == mail_event.resolved_template_id).first() if mail_event.resolved_template_id else None
     action = db.query(MailAction).filter(MailAction.mail_event_id == mail_event.id).order_by(MailAction.id.desc()).first()
     task = db.query(Task).filter(Task.id == action.target_task_id).first() if action and action.target_task_id else None
@@ -223,6 +254,7 @@ def serialize_mail_event(mail_event: MailEvent, db: Session) -> MailEventOut:
 
 
 def serialize_mail_event_detail(mail_event: MailEvent, db: Session) -> MailEventDetailOut:
+    """序列化邮件详情，补充模板正文快照。"""
     base = serialize_mail_event(mail_event, db)
     template = db.query(Template).filter(Template.id == mail_event.resolved_template_id).first() if mail_event.resolved_template_id else None
     return MailEventDetailOut(
@@ -234,6 +266,7 @@ def serialize_mail_event_detail(mail_event: MailEvent, db: Session) -> MailEvent
 
 
 def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
+    """读取自动收件配置和最近扫描时间，供前端展示倒计时。"""
     state = db.query(MailScanState).filter(MailScanState.id == 1).first()
     interval_seconds = max(settings.mail_auto_poll_interval_seconds, 30)
     last_scan_at = state.last_scan_at if state else None
@@ -249,6 +282,7 @@ def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
 
 
 def ensure_notification_access(notification: Notification, current_user: User, db: Session) -> None:
+    """校验当前用户是否允许查看某条通知详情。"""
     if current_user.role == "admin":
         return
     if notification.task_id is None:
@@ -258,8 +292,152 @@ def ensure_notification_access(notification: Notification, current_user: User, d
         raise HTTPException(status_code=403, detail="无权访问该通知")
 
 
+def _create_task_record(payload: TaskCreate, current_user: User, db: Session, source: str = "web") -> Task:
+    """按统一规则落库任务、成员、里程碑、状态流水与初始通知。"""
+    if payload.start_at > payload.end_at:
+        raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
+
+    inferred_status = infer_task_status_by_time(payload.start_at, payload.end_at)
+    task = Task(
+        title=payload.title,
+        content=payload.content,
+        priority=payload.priority,
+        remark=payload.remark,
+        start_at=payload.start_at,
+        end_at=payload.end_at,
+        due_remind_days=max(payload.due_remind_days, 0),
+        planned_minutes=int((payload.end_at - payload.start_at).total_seconds() // 60),
+        main_status=inferred_status,
+        created_by=current_user.id,
+    )
+    db.add(task)
+    db.flush()
+
+    # 负责人也要作为成员写入，便于成员视图与通知逻辑统一复用同一张关联表。
+    member_ids = {payload.owner_id, *payload.participant_ids}
+    for user_id in member_ids:
+        member_role = "owner" if user_id == payload.owner_id else "participant"
+        db.add(TaskMember(task_id=task.id, user_id=user_id, member_role=member_role))
+
+    for milestone in payload.milestones:
+        if milestone.planned_at < payload.start_at or milestone.planned_at > payload.end_at:
+            raise HTTPException(status_code=400, detail="里程碑时间必须位于任务时间范围内")
+        db.add(
+            TaskMilestone(
+                task_id=task.id,
+                name=milestone.name,
+                planned_at=milestone.planned_at,
+                remind_offsets=",".join(str(item) for item in milestone.remind_offsets),
+                sort_order=milestone.sort_order,
+            )
+        )
+
+    db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=inferred_status, source=source, remark="创建任务自动判定状态", operator_id=current_user.id))
+    # 创建任务后立即生成邮件和即时消息通知，确保成员在多个渠道都能收到任务分发信息。
+    create_notification_with_recipients(db, task.id, "email", "task_created", "")
+    create_notification_with_recipients(db, task.id, "qax", "task_created", "")
+    write_audit(db, current_user.id, "CREATE_TASK", "Task", task.id, {}, {"title": task.title, "source": source})
+    return task
+
+
+def _normalize_import_datetime(value: object, field_label: str) -> datetime:
+    """将 Excel 单元格值归一化为 datetime。"""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_label}不能为空")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{field_label}格式无效，请使用 YYYY-MM-DDTHH:MM:SS") from exc
+
+
+def _split_import_usernames(value: object) -> list[str]:
+    """解析 Excel 中的账号列表。"""
+    text = str(value or "").replace("，", ",").replace("；", ",").replace(" ", "").strip(",")
+    if not text:
+        return []
+    return [item for item in text.split(",") if item]
+
+
+def _parse_import_milestones(row_data: dict[str, object]) -> list[dict]:
+    """解析导入行中的里程碑字段。"""
+    milestone_names = [item.strip() for item in str(row_data.get("milestone_names") or "").split("|") if item.strip()]
+    milestone_datetimes = [item.strip() for item in str(row_data.get("milestone_datetimes") or "").split("|") if item.strip()]
+    remind_groups = [item.strip() for item in str(row_data.get("remind_offsets") or "").split("|") if item.strip()]
+
+    if not milestone_names and not milestone_datetimes and not remind_groups:
+        return []
+    if len(milestone_names) != len(milestone_datetimes):
+        raise ValueError("里程碑名称与里程碑时间数量不一致")
+    if remind_groups and len(remind_groups) != len(milestone_names):
+        raise ValueError("里程碑提醒天数数量与里程碑名称数量不一致")
+
+    milestones: list[dict] = []
+    for index, name in enumerate(milestone_names):
+        remind_values = remind_groups[index] if remind_groups else "1"
+        offsets = [int(item.strip()) for item in remind_values.split(",") if item.strip()]
+        milestones.append(
+            {
+                "name": name,
+                "planned_at": _normalize_import_datetime(milestone_datetimes[index], f"第 {index + 1} 个里程碑时间"),
+                "remind_offsets": offsets or [1],
+                "sort_order": index,
+            }
+        )
+    return milestones
+
+
+def _build_task_create_from_import_row(row_data: dict[str, object], db: Session) -> TaskCreate:
+    """将 Excel 行数据转换成任务创建模型。"""
+    owner_username = str(row_data.get("owner_username") or "").strip()
+    if not owner_username:
+        raise ValueError("负责人账号不能为空")
+    owner = db.query(User).filter(User.username == owner_username, User.is_active.is_(True)).first()
+    if not owner:
+        raise ValueError(f"负责人账号不存在或已禁用：{owner_username}")
+
+    participant_usernames = _split_import_usernames(row_data.get("participant_usernames"))
+    participant_ids: list[int] = []
+    for username in participant_usernames:
+        user = db.query(User).filter(User.username == username, User.is_active.is_(True)).first()
+        if not user:
+            raise ValueError(f"参与者账号不存在或已禁用：{username}")
+        if user.id != owner.id and user.id not in participant_ids:
+            participant_ids.append(user.id)
+
+    priority = str(row_data.get("priority") or "").strip().lower()
+    if priority not in PRIORITY_LABELS:
+        raise ValueError("优先级仅支持 high、medium、low")
+
+    due_remind_days_value = row_data.get("due_remind_days")
+    due_remind_days = 0 if due_remind_days_value in (None, "") else int(due_remind_days_value)
+    if due_remind_days < 0:
+        raise ValueError("到期前提醒天数不能小于 0")
+
+    payload = {
+        "title": str(row_data.get("title") or "").strip(),
+        "content": str(row_data.get("content") or "").strip(),
+        "owner_id": owner.id,
+        "participant_ids": participant_ids,
+        "start_at": _normalize_import_datetime(row_data.get("start_at"), "开始时间"),
+        "end_at": _normalize_import_datetime(row_data.get("end_at"), "结束时间"),
+        "due_remind_days": due_remind_days,
+        "priority": priority,
+        "remark": str(row_data.get("remark") or "").strip(),
+        "milestones": _parse_import_milestones(row_data),
+    }
+    if not payload["title"]:
+        raise ValueError("任务标题不能为空")
+    if not payload["content"]:
+        raise ValueError("任务内容不能为空")
+    return TaskCreate(**payload)
+
+
 @router.post("/auth/login", response_model=TokenPair)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenPair:
+    """用户名密码登录，并返回访问令牌与刷新令牌。"""
     user = db.query(User).filter(User.username == payload.username, User.is_active.is_(True)).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
@@ -399,6 +577,10 @@ def reset_password(user_id: int, current_user: User = Depends(require_admin), db
 
 @router.get("/tasks", response_model=list[TaskOut])
 def list_tasks(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[TaskOut]:
+    """获取任务列表。
+
+    管理员可查看全部未删除任务，成员仅可查看自己参与的任务。
+    """
     query = db.query(Task).filter(Task.deleted_at.is_(None))
     if current_user.role != "admin":
         task_ids = [tm.task_id for tm in db.query(TaskMember).filter(TaskMember.user_id == current_user.id).all()]
@@ -408,46 +590,113 @@ def list_tasks(current_user: User = Depends(get_current_user), db: Session = Dep
 
 @router.post("/tasks", response_model=TaskOut)
 def create_task(payload: TaskCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> TaskOut:
-    if payload.start_at > payload.end_at:
-        raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
-    inferred_status = infer_task_status_by_time(payload.start_at, payload.end_at)
-    task = Task(
-        title=payload.title,
-        content=payload.content,
-        priority=payload.priority,
-        remark=payload.remark,
-        start_at=payload.start_at,
-        end_at=payload.end_at,
-        due_remind_days=max(payload.due_remind_days, 0),
-        planned_minutes=int((payload.end_at - payload.start_at).total_seconds() // 60),
-        main_status=inferred_status,
-        created_by=current_user.id,
-    )
-    db.add(task)
-    db.flush()
-    member_ids = {payload.owner_id, *payload.participant_ids}
-    for user_id in member_ids:
-        member_role = "owner" if user_id == payload.owner_id else "participant"
-        db.add(TaskMember(task_id=task.id, user_id=user_id, member_role=member_role))
-    for milestone in payload.milestones:
-        if milestone.planned_at < payload.start_at or milestone.planned_at > payload.end_at:
-            raise HTTPException(status_code=400, detail="里程碑时间必须位于任务时间范围内")
-        db.add(
-            TaskMilestone(
-                task_id=task.id,
-                name=milestone.name,
-                planned_at=milestone.planned_at,
-                remind_offsets=",".join(str(item) for item in milestone.remind_offsets),
-                sort_order=milestone.sort_order,
-            )
-        )
-    db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=inferred_status, source="web", remark="创建任务自动判定状态", operator_id=current_user.id))
-    create_notification_with_recipients(db, task.id, "email", "task_created", "")
-    create_notification_with_recipients(db, task.id, "qax", "task_created", "")
-    write_audit(db, current_user.id, "CREATE_TASK", "Task", task.id, {}, {"title": task.title})
+    """创建任务并同步生成初始通知。"""
+    task = _create_task_record(payload, current_user, db, source="web")
     db.commit()
     db.refresh(task)
     return serialize_task(task, db)
+
+
+@router.get("/tasks/import-template")
+def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
+    """生成任务导入 Excel 模板。
+
+    模板会同时提供：
+    - `任务导入模板` 工作表：用于直接录入导入数据；
+    - `填写说明` 工作表：说明字段含义、格式与示例规则。
+    """
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "任务导入模板"
+
+    headers = [
+        "任务标题(title)",
+        "任务内容(content)",
+        "负责人账号(owner_username)",
+        "参与者账号(participant_usernames)",
+        "开始时间(start_at)",
+        "结束时间(end_at)",
+        "优先级(priority)",
+        "备注(remark)",
+        "到期前提醒天数(due_remind_days)",
+        "里程碑名称(milestone_names)",
+        "里程碑时间(milestone_datetimes)",
+        "里程碑提醒天数(remind_offsets)",
+    ]
+    example_row = [
+        "Q2 重点项目汇总",
+        "完成季度重点项目进展汇总与风险登记。",
+        "admin",
+        "member,member2",
+        "2026-04-23T09:00:00",
+        "2026-04-30T18:00:00",
+        "high",
+        "用于周会汇报",
+        2,
+        "初稿整理|主管复核|正式提交",
+        "2026-04-24T18:00:00|2026-04-27T18:00:00|2026-04-30T12:00:00",
+        "1,2|1|1,3",
+    ]
+
+    sheet.append(headers)
+    sheet.append(example_row)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    column_widths = {
+        "A": 22,
+        "B": 36,
+        "C": 20,
+        "D": 28,
+        "E": 22,
+        "F": 22,
+        "G": 14,
+        "H": 24,
+        "I": 18,
+        "J": 30,
+        "K": 42,
+        "L": 28,
+    }
+    for column, width in column_widths.items():
+        sheet.column_dimensions[column].width = width
+
+    instruction_sheet = workbook.create_sheet("填写说明")
+    instruction_sheet.append(["字段", "是否必填", "填写说明", "示例"])
+    instructions = [
+        ["任务标题(title)", "是", "任务名称，建议直接对应业务事项标题。", "Q2 重点项目汇总"],
+        ["任务内容(content)", "是", "任务详细说明。", "完成季度重点项目进展汇总与风险登记。"],
+        ["负责人账号(owner_username)", "是", "填写系统中的用户名。", "admin"],
+        ["参与者账号(participant_usernames)", "否", "多个账号用英文逗号分隔。", "member,member2"],
+        ["开始时间(start_at)", "是", "使用 ISO 格式时间，精确到秒。", "2026-04-23T09:00:00"],
+        ["结束时间(end_at)", "是", "使用 ISO 格式时间，必须晚于开始时间。", "2026-04-30T18:00:00"],
+        ["优先级(priority)", "是", "仅支持 high、medium、low。", "high"],
+        ["备注(remark)", "否", "补充说明，可留空。", "用于周会汇报"],
+        ["到期前提醒天数(due_remind_days)", "否", "填写整数，0 表示不自动提醒。", "2"],
+        ["里程碑名称(milestone_names)", "否", "多个里程碑用 | 分隔，顺序需与时间、提醒列一致。", "初稿整理|主管复核|正式提交"],
+        ["里程碑时间(milestone_datetimes)", "否", "多个时间用 | 分隔，格式需与任务时间一致。", "2026-04-24T18:00:00|2026-04-27T18:00:00|2026-04-30T12:00:00"],
+        ["里程碑提醒天数(remind_offsets)", "否", "每个里程碑的提醒天数用英文逗号分隔，多个里程碑之间用 | 分隔。", "1,2|1|1,3"],
+    ]
+    for row in instructions:
+        instruction_sheet.append(row)
+
+    for cell in instruction_sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for column in ("A", "B", "C", "D"):
+        instruction_sheet.column_dimensions[column].width = 32 if column == "C" else 24
+
+    excel_buffer = io.BytesIO()
+    workbook.save(excel_buffer)
+    excel_buffer.seek(0)
+    response_headers = {
+        "Content-Disposition": 'attachment; filename="task-import-template.xlsx"',
+    }
+    return StreamingResponse(
+        iter([excel_buffer.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=response_headers,
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskDetailOut)
@@ -494,6 +743,8 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "id": item.id,
                 "applicant_id": item.applicant_id,
                 "applicant_name": db.query(User).filter(User.id == item.applicant_id).first().name if item.applicant_id else "",
+                "approver_id": item.approver_id,
+                "approver_name": db.query(User).filter(User.id == item.approver_id).first().name if item.approver_id else "",
                 "apply_reason": item.apply_reason,
                 "approval_status": item.approval_status,
                 "approval_status_text": DELAY_STATUS_LABELS.get(item.approval_status, item.approval_status),
@@ -502,6 +753,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "approved_deadline": item.approved_deadline,
                 "approve_remark": item.approve_remark,
                 "decided_by_channel": item.decided_by_channel,
+                "decided_at": item.decided_at,
                 "version": item.version,
             }
             for item in delay_requests
@@ -698,6 +950,7 @@ def list_notifications(current_user: User = Depends(get_current_user), db: Sessi
 
 @router.get("/notifications/{notification_id}", response_model=NotificationDetailOut)
 def get_notification_detail(notification_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> NotificationDetailOut:
+    """获取通知详情，包括正文和按成员拆分的送达情况。"""
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="通知不存在")
@@ -707,6 +960,7 @@ def get_notification_detail(notification_id: int, current_user: User = Depends(g
 
 @router.get("/admin/mail/events", response_model=list[MailEventOut])
 def list_mail_events(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[MailEventOut]:
+    """获取已匹配模板的邮件列表。"""
     query = (
         db.query(MailEvent)
         .filter(MailEvent.resolved_template_id.isnot(None))
@@ -718,6 +972,7 @@ def list_mail_events(_: User = Depends(require_admin), db: Session = Depends(get
 
 @router.get("/admin/mail/events/{event_id}", response_model=MailEventDetailOut)
 def get_mail_event_detail(event_id: int, _: User = Depends(require_admin), db: Session = Depends(get_db)) -> MailEventDetailOut:
+    """获取邮件详情页所需的完整记录。"""
     event = db.query(MailEvent).filter(MailEvent.id == event_id, MailEvent.resolved_template_id.isnot(None)).first()
     if not event:
         raise HTTPException(status_code=404, detail="邮件记录不存在")
@@ -726,6 +981,7 @@ def get_mail_event_detail(event_id: int, _: User = Depends(require_admin), db: S
 
 @router.get("/admin/mail/poll-state", response_model=MailPollStateOut)
 def get_mail_poll_state(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> MailPollStateOut:
+    """返回自动收件状态与下一次预计执行时间。"""
     return serialize_mail_poll_state(db)
 
 
@@ -770,6 +1026,7 @@ def run_due_remind(_: User = Depends(require_admin), db: Session = Depends(get_d
 
 @router.post("/delay-requests", response_model=dict)
 def create_delay_request(payload: DelayRequestCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """成员提交延期申请，并同步通知管理员审批。"""
     task = db.query(Task).filter(Task.id == payload.task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -789,6 +1046,7 @@ def create_delay_request(payload: DelayRequestCreate, current_user: User = Depen
         "proposed_deadline": payload.proposed_deadline.strftime("%Y-%m-%d"),
         "apply_reason": payload.apply_reason,
     }
+    # 延期审批属于管理员定向通知，因此这里显式指定收件人列表。
     create_notification_with_recipients(db, task.id, "email", "delay_approval", "", recipient_user_ids=admin_ids, extra_context=extra_context)
     create_notification_with_recipients(db, task.id, "qax", "delay_approval", "", recipient_user_ids=admin_ids, extra_context=extra_context)
     write_audit(db, current_user.id, "CREATE_DELAY_REQUEST", "DelayRequest", request_obj.id, {}, {"task_id": task.id})
@@ -798,6 +1056,7 @@ def create_delay_request(payload: DelayRequestCreate, current_user: User = Depen
 
 @router.get("/delay-requests/pending", response_model=list[dict])
 def list_pending_delay_requests(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
+    """返回延期审批工作台列表。"""
     result = []
     for item in db.query(DelayRequest).order_by(DelayRequest.id.desc()).all():
         task = db.query(Task).filter(Task.id == item.task_id).first()
@@ -830,6 +1089,7 @@ def list_pending_delay_requests(_: User = Depends(require_admin), db: Session = 
 
 @router.post("/delay-requests/{delay_id}/approve", response_model=dict)
 def decide_delay_request(delay_id: int, payload: DelayDecisionRequest, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """管理员审批延期申请，并复用服务层保证幂等与版本控制。"""
     request_obj = db.query(DelayRequest).filter(DelayRequest.id == delay_id).first()
     if not request_obj:
         raise HTTPException(status_code=404, detail="延期申请不存在")
@@ -853,18 +1113,63 @@ def decide_delay_request(delay_id: int, payload: DelayDecisionRequest, current_u
     }
 
 
-@router.get("/tasks/import-template")
-def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
-    csv_buffer = io.StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow(["title", "content", "owner_username", "participant_usernames", "start_at", "end_at", "priority", "remark", "milestone_names", "milestone_datetimes", "remind_offsets"])
-    writer.writerow(["月度汇总", "完成月度汇总整理", "admin", "member1,member2", "2026-04-21T09:00:00", "2026-04-30T18:00:00", "high", "内部演示", "初稿|复核", "2026-04-24T10:00:00|2026-04-28T10:00:00", "1,3|1,2,5"])
-    return StreamingResponse(iter([csv_buffer.getvalue().encode("utf-8")]), media_type="text/csv")
+@router.post("/tasks/import", response_model=dict)
+async def import_tasks(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """导入任务 Excel，并返回成功数与失败行明细。"""
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="仅支持导入 .xlsx 格式文件")
 
+    workbook_bytes = await file.read()
+    if not workbook_bytes:
+        raise HTTPException(status_code=400, detail="上传文件为空")
 
-@router.post("/tasks/import", response_model=ApiMessage)
-def import_tasks(_: User = Depends(require_admin)) -> ApiMessage:
-    return ApiMessage(message="导入接口骨架已就位，解析流程将在下一阶段接入")
+    try:
+        workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Excel 文件解析失败：{exc}") from exc
+
+    sheet = workbook["任务导入模板"] if "任务导入模板" in workbook.sheetnames else workbook.worksheets[0]
+    rows = list(sheet.iter_rows(values_only=True))
+    if len(rows) < 2:
+        raise HTTPException(status_code=400, detail="模板中没有可导入的数据行")
+
+    created_task_ids: list[int] = []
+    failures: list[dict[str, object]] = []
+    for index, row in enumerate(rows[1:], start=2):
+        if not any(cell not in (None, "") for cell in row):
+            continue
+
+        row_data = {field: row[position] if position < len(row) else None for position, field in enumerate(TASK_IMPORT_FIELDS)}
+        try:
+            payload = _build_task_create_from_import_row(row_data, db)
+            task = _create_task_record(payload, current_user, db, source="import")
+            db.commit()
+            created_task_ids.append(task.id)
+        except Exception as exc:
+            db.rollback()
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            failures.append(
+                {
+                    "row_number": index,
+                    "title": str(row_data.get("title") or "").strip(),
+                    "reason": detail,
+                }
+            )
+
+    success_count = len(created_task_ids)
+    failure_count = len(failures)
+    return {
+        "message": f"任务导入完成：成功 {success_count} 条，失败 {failure_count} 条",
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "created_task_ids": created_task_ids,
+        "failures": failures,
+    }
 
 
 @router.get("/reports/export")

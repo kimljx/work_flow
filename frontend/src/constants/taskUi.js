@@ -1,3 +1,6 @@
+// 任务状态与优先级展示元数据。
+// 这里统一维护颜色和文案映射，避免多个页面各自写一套判断分支。
+
 export const taskStatusMeta = {
   not_started: {
     tone: 'status-tone status-tone-neutral',
@@ -19,20 +22,21 @@ export const taskStatusMeta = {
 
 export const priorityMeta = {
   high: {
-    label: 'HIGH',
+    label: '高',
     tone: 'priority-text priority-text-high',
   },
   medium: {
-    label: 'MEDIUM',
+    label: '中',
     tone: 'priority-text priority-text-medium',
   },
   low: {
-    label: 'LOW',
+    label: '低',
     tone: 'priority-text priority-text-low',
   },
 }
 
 export function resolveTaskStatusTone(task) {
+  // 延期中的任务优先使用风险态展示，即使主状态仍然是“进行中”。
   if (task?.delay_days > 0 && task?.main_status !== 'done' && task?.main_status !== 'canceled') {
     return {
       tone: 'status-tone status-tone-danger',

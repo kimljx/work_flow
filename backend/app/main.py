@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""FastAPI 应用入口。
+
+负责完成以下启动期工作：
+1. 初始化数据库与默认数据；
+2. 注册跨域中间件与业务路由；
+3. 在需要时启动后台邮件轮询线程；
+4. 提供基础健康检查接口。
+"""
+
 import logging
 import threading
 
@@ -19,6 +28,11 @@ _mail_poll_thread: threading.Thread | None = None
 
 
 def _mail_poll_loop() -> None:
+    """后台轮询邮箱并同步邮件动作。
+
+    这里使用独立线程而不是阻塞主线程，避免影响 Web 接口响应。
+    轮询间隔设置了最小值，防止因错误配置导致数据库和邮箱被过度请求。
+    """
     interval = max(settings.mail_auto_poll_interval_seconds, 30)
     while not _mail_poll_stop_event.wait(interval):
         try:
@@ -40,6 +54,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_event() -> None:
+    """应用启动时初始化数据库，并按配置拉起自动收件线程。"""
     bootstrap_database()
     global _mail_poll_thread
     if settings.mail_auto_poll_enabled and _mail_poll_thread is None:
@@ -51,6 +66,7 @@ def startup_event() -> None:
 
 @app.on_event("shutdown")
 def shutdown_event() -> None:
+    """应用关闭时优雅停止后台轮询线程，避免进程悬挂。"""
     global _mail_poll_thread
     _mail_poll_stop_event.set()
     if _mail_poll_thread and _mail_poll_thread.is_alive():
@@ -60,6 +76,7 @@ def shutdown_event() -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """提供部署健康检查接口。"""
     return {"status": "ok"}
 
 

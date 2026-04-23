@@ -7,8 +7,8 @@
         <p class="workspace-subtitle">集中查看任务起止时间、优先级、当前状态和送达情况，支持直接进入详情、提醒和删除。</p>
       </div>
       <div class="toolbar">
-        <button class="button secondary" @click="runDueRemind">执行到期提醒</button>
-        <router-link class="button" to="/admin/tasks/new">新建任务</router-link>
+        <router-link class="button secondary" :to="{ path: '/admin/import-export', query: { from: route.fullPath } }">导入任务</router-link>
+        <router-link class="button" :to="{ path: '/admin/tasks/new', query: { from: route.fullPath } }">新建任务</router-link>
       </div>
     </div>
 
@@ -85,7 +85,7 @@
           <div class="task-side-note">优先级 {{ task.priority_text }}</div>
           <div class="task-side-note">提醒设置 {{ task.due_remind_days > 0 ? `提前 ${task.due_remind_days} 天` : '未开启' }}</div>
           <div class="toolbar task-actions">
-            <router-link class="button secondary" :to="`/admin/tasks/${task.id}`">详情</router-link>
+            <router-link class="button secondary" :to="{ path: `/admin/tasks/${task.id}`, query: { from: route.fullPath } }">详情</router-link>
             <button class="button secondary" @click="remind(task.id)">提醒</button>
             <button class="button danger" @click="removeTask(task.id)">删除</button>
           </div>
@@ -99,11 +99,14 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
 import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
 import { formatDateTime, formatMinutes } from '../../utils/format'
 
+const route = useRoute()
+const router = useRouter()
 const tasks = ref([])
 const keyword = ref('')
 const status = ref('')
@@ -140,6 +143,17 @@ async function loadTasks() {
   tasks.value = data
 }
 
+async function handleRouteRefresh() {
+  if (route.query.refresh !== 'import') {
+    return
+  }
+  await loadTasks()
+  const successCount = Number(route.query.import_success_count || 0)
+  const failureCount = Number(route.query.import_failure_count || 0)
+  window.alert(`任务导入完成：成功 ${successCount} 条，失败 ${failureCount} 条`)
+  router.replace({ path: route.path, query: {} })
+}
+
 async function remind(taskId) {
   if (!window.confirm('确认要对该任务发送手动提醒吗？')) return
   await http.post(`/tasks/${taskId}/remind`)
@@ -153,11 +167,8 @@ async function removeTask(taskId) {
   await loadTasks()
 }
 
-async function runDueRemind() {
-  const { data } = await http.post('/tasks/due-remind/run')
-  window.alert(data.message || '到期提醒已执行')
+onMounted(async () => {
   await loadTasks()
-}
-
-onMounted(loadTasks)
+  await handleRouteRefresh()
+})
 </script>

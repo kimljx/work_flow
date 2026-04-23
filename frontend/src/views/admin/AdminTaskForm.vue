@@ -6,7 +6,7 @@
           <h1>{{ isEdit ? '编辑任务' : '新建任务' }}</h1>
           <p>配置任务基础信息、负责人、参与者和多个里程碑节点。</p>
         </div>
-        <router-link class="button secondary" to="/admin/tasks">返回列表</router-link>
+        <router-link class="button secondary" :to="backTarget">{{ backText }}</router-link>
       </div>
 
       <form class="page" @submit.prevent="submit">
@@ -119,6 +119,8 @@ const form = reactive({
 })
 
 const participantOptions = computed(() => users.value.filter((item) => item.id !== form.owner_id))
+const backTarget = computed(() => route.query.from || (isEdit.value ? `/admin/tasks/${route.params.id}` : '/admin/tasks'))
+const backText = computed(() => '返回上页')
 const participantSummary = computed(() => {
   if (participantSelection.value.length === 0) return '请选择参与者'
   const names = participantSelection.value
@@ -226,11 +228,16 @@ async function submit() {
   }
   if (isEdit.value) {
     await http.put(`/tasks/${route.params.id}`, payload)
-    router.push(`/admin/tasks/${route.params.id}`)
+    router.push(route.query.from || `/admin/tasks/${route.params.id}`)
     return
   }
   const { data } = await http.post('/tasks', payload)
-  router.push(`/admin/tasks/${data.id}`)
+  router.push({
+    path: `/admin/tasks/${data.id}`,
+    query: {
+      from: route.query.from || '/admin/tasks',
+    },
+  })
 }
 
 onMounted(async () => {

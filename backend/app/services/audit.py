@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""审计日志写入服务。"""
+
 import json
 
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ def write_audit(
     after: dict,
     source_ip: str = "",
 ) -> None:
+    """写入一条审计日志。"""
     db.add(
         AuditLog(
             operator_id=operator_id,

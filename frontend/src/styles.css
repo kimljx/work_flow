@@ -776,6 +776,27 @@ textarea:focus {
   margin-top: 4px;
 }
 
+.task-delay-card {
+  grid-template-columns: 78px minmax(0, 1fr) 280px;
+}
+
+.task-delay-summary {
+  align-self: stretch;
+}
+
+.task-delay-summary > div {
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.task-delay-remark {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  min-height: 72px;
+}
+
 .approval-empty {
   min-height: 180px;
   border: 1px dashed var(--line);

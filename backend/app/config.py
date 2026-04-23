@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+"""应用配置加载模块。
+
+统一负责读取 `.env` 与系统环境变量，并转换为强类型配置对象，
+供后端所有模块复用，避免在业务代码中直接散落读取环境变量。
+"""
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 
 def _load_env_file(path: Path) -> None:
+    """按最小依赖方式读取 `.env` 文件。
+
+    参数:
+    - path: `.env` 文件路径。
+
+    返回:
+    - 无返回值，直接将缺失的环境变量写入 `os.environ`。
+
+    说明:
+    - 仅在环境变量尚未存在时写入，便于外部部署环境覆盖本地默认值。
+    """
     if not path.exists():
         return
 
@@ -29,6 +46,7 @@ _load_env_file(PROJECT_ROOT / ".env")
 
 @dataclass
 class Settings:
+    """应用运行配置集合。"""
     app_name: str
     app_env: str
     secret_key: str
@@ -56,6 +74,8 @@ class Settings:
 
 
 settings = Settings(
+    # 这里集中完成字符串到布尔值、整数等类型的转换，
+    # 避免业务层重复解析同一份配置。
     app_name=os.getenv("APP_NAME", "工作流管理系统"),
     app_env=os.getenv("APP_ENV", "dev"),
     secret_key=os.getenv("SECRET_KEY", "change-me-in-production"),

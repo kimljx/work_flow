@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""数据库初始化与默认数据灌入。"""
+
 from pathlib import Path
 
 from sqlalchemy import text
@@ -159,6 +161,7 @@ DEFAULT_TEMPLATES = [
 
 
 def _ensure_schema_columns() -> None:
+    """在 SQLite 场景下补齐历史库缺失字段。"""
     if not settings.database_url.startswith("sqlite"):
         return
     with engine.begin() as conn:
@@ -168,6 +171,7 @@ def _ensure_schema_columns() -> None:
 
 
 def bootstrap_database() -> None:
+    """初始化数据库、默认账号与默认模板。"""
     if settings.database_url.startswith("sqlite:///./"):
         db_path = Path(settings.database_url.replace("sqlite:///./", ""))
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -204,5 +208,6 @@ def bootstrap_database() -> None:
             key = (template_data["template_kind"], template_data["notify_type"], template_data["name"])
             if key in existing_keys:
                 continue
+            # 仅补齐缺失模板，避免覆盖管理员在线调整过的模板内容。
             db.add(Template(**template_data))
         db.commit()

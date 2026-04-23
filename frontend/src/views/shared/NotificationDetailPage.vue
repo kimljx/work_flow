@@ -116,10 +116,16 @@ const route = useRoute()
 const auth = useAuthStore()
 const detail = ref(null)
 
-const backPath = computed(() => (auth.isAdmin ? '/admin/notifications' : '/member/notifications'))
+const defaultBackPath = computed(() => (auth.isAdmin ? '/admin/notifications' : '/member/notifications'))
+const backPath = computed(() => route.query.from || defaultBackPath.value)
 const taskPath = computed(() => {
   if (!detail.value?.task_id) return backPath.value
-  return auth.isAdmin ? `/admin/tasks/${detail.value.task_id}` : `/member/tasks/${detail.value.task_id}`
+  return {
+    path: auth.isAdmin ? `/admin/tasks/${detail.value.task_id}` : `/member/tasks/${detail.value.task_id}`,
+    query: {
+      from: route.fullPath,
+    },
+  }
 })
 
 async function loadDetail() {

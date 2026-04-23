@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""延期审批服务。"""
+
 import json
 import uuid
 from datetime import datetime
@@ -23,6 +25,12 @@ def apply_delay_decision(
     remark: str = "",
     approved_deadline: datetime | None = None,
 ) -> tuple[str, DelayRequest]:
+    """执行延期审批，并保证幂等与并发安全。
+
+    返回:
+    - 第一个值为处理结果编码，例如 `APPLIED`、`IDEMPOTENT_REPLAY`。
+    - 第二个值为审批后的延期申请对象。
+    """
     idempotency_key = f"{request_id}+{admin_id}" if channel == "web" else request_id
     replay = (
         db.query(DelayRequestEvent)
@@ -34,6 +42,7 @@ def apply_delay_decision(
         .first()
     )
     if replay:
+        # 同一审批请求重复提交时直接返回重放结果，避免二次落库。
         return "IDEMPOTENT_REPLAY", request_obj
 
     next_status = "APPROVED" if action == "APPROVE" else "REJECTED"
@@ -57,6 +66,7 @@ def apply_delay_decision(
         )
     )
     if result.rowcount == 0:
+        # 通过版本号与待审批状态双条件更新，确保只有首个有效审批能生效。
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该延期申请已被其他审批结果生效")
 
     refreshed = db.query(DelayRequest).filter(DelayRequest.id == request_obj.id).first()
@@ -66,6 +76,7 @@ def apply_delay_decision(
     if next_status == "APPROVED" and approved_deadline is not None:
         task = db.query(Task).filter(Task.id == refreshed.task_id).first()
         if task:
+            # 审批通过后同步更新任务结束时间，并重新计算延期天数。
             task.delay_days = max((approved_deadline.date() - task.end_at.date()).days, 0)
             task.end_at = approved_deadline
 

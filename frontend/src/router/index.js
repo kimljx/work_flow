@@ -19,6 +19,7 @@ import MemberTaskDetail from '../views/member/MemberTaskDetail.vue'
 import MemberNotifications from '../views/member/MemberNotifications.vue'
 import NotificationDetailPage from '../views/shared/NotificationDetailPage.vue'
 
+// 路由表按角色拆分，管理员与成员共用部分页面时复用同一组件。
 const routes = [
   { path: '/', redirect: '/auth/login' },
   { path: '/auth/login', component: LoginPage, meta: { public: true } },
@@ -50,6 +51,7 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
+  // 刷新页面后优先从本地存储恢复登录状态，避免首次路由判断误判未登录。
   auth.hydrate()
   if (to.meta.public) {
     return true
@@ -59,6 +61,7 @@ router.beforeEach(async (to) => {
   }
   if (!auth.profile) {
     try {
+      // 当前仅持有令牌但无用户资料时，补拉一次当前用户，保证角色判断可靠。
       await auth.fetchMe()
     } catch (error) {
       auth.logout()
@@ -66,6 +69,7 @@ router.beforeEach(async (to) => {
     }
   }
   if (to.meta.role && auth.profile?.role !== to.meta.role) {
+    // 登录成功但角色不匹配时跳到统一 403 页面，而不是简单回登录页。
     return '/403'
   }
   return true

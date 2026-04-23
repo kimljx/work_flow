@@ -1,30 +1,37 @@
 from __future__ import annotations
 
+"""Pydantic 接口模型定义。"""
+
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class TokenPair(BaseModel):
+    """登录与刷新接口返回的令牌对。"""
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
 
 
 class LoginRequest(BaseModel):
+    """登录请求体。"""
     username: str
     password: str
 
 
 class RefreshRequest(BaseModel):
+    """刷新令牌请求体。"""
     refresh_token: str
 
 
 class ApiMessage(BaseModel):
+    """统一的简单提示消息响应。"""
     message: str
 
 
 class UserOut(BaseModel):
+    """用户输出模型。"""
     model_config = ConfigDict(from_attributes=True)
     id: int
     username: str
@@ -37,6 +44,7 @@ class UserOut(BaseModel):
 
 
 class UserCreate(BaseModel):
+    """创建用户请求体。"""
     username: str
     role: str
     name: str
@@ -45,6 +53,7 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    """更新用户请求体。"""
     role: str
     name: str
     email: str
@@ -53,6 +62,7 @@ class UserUpdate(BaseModel):
 
 
 class MilestonePayload(BaseModel):
+    """任务里程碑输入结构。"""
     name: str
     planned_at: datetime
     remind_offsets: list[int] = Field(default_factory=lambda: [1])
@@ -60,6 +70,7 @@ class MilestonePayload(BaseModel):
 
 
 class TaskCreate(BaseModel):
+    """任务创建与编辑通用请求体。"""
     title: str
     content: str
     owner_id: int
@@ -73,11 +84,13 @@ class TaskCreate(BaseModel):
 
 
 class TaskStatusUpdate(BaseModel):
+    """任务状态更新请求体。"""
     main_status: str
     remark: str = ""
 
 
 class TaskOut(BaseModel):
+    """任务列表输出结构。"""
     model_config = ConfigDict(from_attributes=True)
     id: int
     title: str
@@ -102,6 +115,7 @@ class TaskOut(BaseModel):
 
 
 class TaskDetailOut(TaskOut):
+    """任务详情输出结构，补充成员、通知、延期与状态流水。"""
     members: list[dict] = Field(default_factory=list)
     milestones: list[dict] = Field(default_factory=list)
     notifications: list[dict] = Field(default_factory=list)
@@ -110,6 +124,7 @@ class TaskDetailOut(TaskOut):
 
 
 class TemplateCreate(BaseModel):
+    """模板新增与编辑请求体。"""
     name: str
     template_kind: str
     notify_type: str
@@ -123,18 +138,21 @@ class TemplateCreate(BaseModel):
 
 
 class TemplatePreviewRequest(BaseModel):
+    """模板预匹配调试请求体。"""
     subject: str
     body: str
     template_kind: str
 
 
 class DelayRequestCreate(BaseModel):
+    """延期申请创建请求体。"""
     task_id: int
     proposed_deadline: datetime
     apply_reason: str
 
 
 class DelayDecisionRequest(BaseModel):
+    """延期审批请求体。"""
     action: str
     request_id: str
     version: int
@@ -143,6 +161,7 @@ class DelayDecisionRequest(BaseModel):
 
 
 class NotificationOut(BaseModel):
+    """通知列表输出结构。"""
     model_config = ConfigDict(from_attributes=True)
     id: int
     task_id: int | None
@@ -162,6 +181,7 @@ class NotificationOut(BaseModel):
 
 
 class NotificationRecipientOut(BaseModel):
+    """通知详情中的成员送达状态结构。"""
     user_id: int
     name: str = ""
     email: str = ""
@@ -176,11 +196,13 @@ class NotificationRecipientOut(BaseModel):
 
 
 class NotificationDetailOut(NotificationOut):
+    """通知详情输出结构，包含正文快照与接收人明细。"""
     content_snapshot: str = ""
     recipients: list[NotificationRecipientOut] = Field(default_factory=list)
 
 
 class MailEventOut(BaseModel):
+    """邮件列表输出结构。"""
     id: int
     message_id: str
     from_addr: str
@@ -201,12 +223,14 @@ class MailEventOut(BaseModel):
 
 
 class MailEventDetailOut(MailEventOut):
+    """邮件详情输出结构。"""
     template_id: int | None = None
     template_kind: str = ""
     content: str = ""
 
 
 class MailPollStateOut(BaseModel):
+    """邮件轮询状态输出结构。"""
     auto_poll_enabled: bool
     interval_seconds: int
     last_scan_at: datetime | None = None
@@ -214,6 +238,7 @@ class MailPollStateOut(BaseModel):
 
 
 class DashboardSummary(BaseModel):
+    """管理员看板汇总指标。"""
     task_total: int
     in_progress_total: int
     done_total: int
@@ -226,6 +251,7 @@ class DashboardSummary(BaseModel):
 
 
 class AuditOut(BaseModel):
+    """审计日志输出结构。"""
     id: int
     action_type: str
     target_type: str

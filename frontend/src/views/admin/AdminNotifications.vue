@@ -68,7 +68,7 @@
             <td>{{ item.read_count }}</td>
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>
-              <router-link class="button secondary small" :to="`/admin/notifications/${item.id}`">查看详情</router-link>
+              <router-link class="button secondary small" :to="{ path: `/admin/notifications/${item.id}`, query: { from: route.fullPath } }">查看详情</router-link>
             </td>
           </tr>
         </tbody>
@@ -80,11 +80,13 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
 import { notifyTypeText } from '../../constants/notifyTypes'
 import { formatDateTime } from '../../utils/format'
 
+const route = useRoute()
 const notifications = ref([])
 const keyword = ref('')
 const channel = ref('')

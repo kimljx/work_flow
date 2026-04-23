@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""SQLAlchemy 数据模型定义。"""
+
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -10,10 +12,12 @@ from app.timeutils import shanghai_now_naive
 
 
 class TimestampMixin:
+    """为业务表提供统一的创建时间字段。"""
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now_naive, nullable=False)
 
 
 class User(Base, TimestampMixin):
+    """系统用户表，兼顾管理员与普通成员。"""
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
@@ -26,6 +30,7 @@ class User(Base, TimestampMixin):
 
 
 class Task(Base, TimestampMixin):
+    """任务主表，记录任务时间范围、状态与提醒配置。"""
     __tablename__ = "tasks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -48,6 +53,7 @@ class Task(Base, TimestampMixin):
 
 
 class TaskMember(Base, TimestampMixin):
+    """任务成员关联表，区分负责人和参与人。"""
     __tablename__ = "task_members"
     __table_args__ = (UniqueConstraint("task_id", "user_id", name="uq_task_user"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -60,6 +66,7 @@ class TaskMember(Base, TimestampMixin):
 
 
 class TaskMilestone(Base, TimestampMixin):
+    """任务里程碑表，用于细化关键节点与提醒偏移量。"""
     __tablename__ = "task_milestones"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False)
@@ -73,6 +80,7 @@ class TaskMilestone(Base, TimestampMixin):
 
 
 class TaskStatusEvent(Base, TimestampMixin):
+    """任务状态变更流水，用于详情页与审计回溯。"""
     __tablename__ = "task_status_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False)
@@ -84,6 +92,7 @@ class TaskStatusEvent(Base, TimestampMixin):
 
 
 class Template(Base, TimestampMixin):
+    """通知模板表，覆盖邮件发送、即时消息发送与邮件回复识别。"""
     __tablename__ = "templates"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -99,6 +108,7 @@ class Template(Base, TimestampMixin):
 
 
 class Notification(Base, TimestampMixin):
+    """通知主表，记录一次通知发送的快照与整体状态。"""
     __tablename__ = "notifications"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
@@ -109,6 +119,7 @@ class Notification(Base, TimestampMixin):
 
 
 class NotificationRecipient(Base, TimestampMixin):
+    """通知接收人表，按成员拆分送达、已读与重试情况。"""
     __tablename__ = "notification_recipients"
     __table_args__ = (UniqueConstraint("notification_id", "user_id", name="uq_notification_recipient"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -122,6 +133,7 @@ class NotificationRecipient(Base, TimestampMixin):
 
 
 class DelayRequest(Base, TimestampMixin):
+    """延期申请主表，保存审批状态、版本号与审批结果。"""
     __tablename__ = "delay_requests"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False)
@@ -141,6 +153,7 @@ class DelayRequest(Base, TimestampMixin):
 
 
 class DelayRequestEvent(Base, TimestampMixin):
+    """延期审批事件流，记录幂等键与原始处理载荷。"""
     __tablename__ = "delay_request_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     request_id: Mapped[int] = mapped_column(ForeignKey("delay_requests.id"), nullable=False)
@@ -150,6 +163,7 @@ class DelayRequestEvent(Base, TimestampMixin):
 
 
 class MailEvent(Base, TimestampMixin):
+    """收件事件表，记录进入系统的原始邮件及其模板匹配结果。"""
     __tablename__ = "mail_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     message_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
@@ -162,6 +176,7 @@ class MailEvent(Base, TimestampMixin):
 
 
 class MailAction(Base, TimestampMixin):
+    """邮件动作表，描述某封邮件最终触发的业务动作及结果。"""
     __tablename__ = "mail_actions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     mail_event_id: Mapped[int] = mapped_column(ForeignKey("mail_events.id"), nullable=False)
@@ -172,6 +187,7 @@ class MailAction(Base, TimestampMixin):
 
 
 class MailScanState(Base):
+    """邮箱扫描状态表，记录基线与最近拉取时间。"""
     __tablename__ = "mail_scan_state"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     baseline_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -179,6 +195,7 @@ class MailScanState(Base):
 
 
 class AuditLog(Base, TimestampMixin):
+    """审计日志表，记录关键管理动作的前后状态。"""
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     operator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

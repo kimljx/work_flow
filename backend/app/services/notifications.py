@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""通知生成服务。"""
+
 from sqlalchemy.orm import Session
 
 from app.models import Notification, NotificationRecipient, Task, TaskMember, Template, User
@@ -8,6 +10,7 @@ from app.timeutils import shanghai_now_naive
 
 
 def _render_template(content: str, context: dict[str, str]) -> str:
+    """用上下文变量渲染模板内容。"""
     rendered = content
     for key, value in context.items():
         rendered = rendered.replace(f"{{{key}}}", str(value))
@@ -15,6 +18,7 @@ def _render_template(content: str, context: dict[str, str]) -> str:
 
 
 def _build_context(task: Task | None, extra_context: dict[str, str] | None = None) -> dict[str, str]:
+    """构建通知模板渲染上下文。"""
     context = {
         "task_id": task.id if task else "",
         "task_title": task.title if task else "",
@@ -29,6 +33,7 @@ def _build_context(task: Task | None, extra_context: dict[str, str] | None = Non
 
 
 def _default_subject(task: Task | None, notify_type: str, extra_context: dict[str, str] | None = None) -> str:
+    """在没有模板标题时生成默认主题。"""
     if notify_type == "delay_approval":
         delay_request_id = extra_context.get("delay_request_id") if extra_context else ""
         title = task.title if task else "未知任务"
@@ -39,6 +44,7 @@ def _default_subject(task: Task | None, notify_type: str, extra_context: dict[st
 
 
 def _default_content(task: Task | None, notify_type: str, extra_context: dict[str, str] | None = None) -> str:
+    """在没有模板内容时生成默认通知正文。"""
     context = _build_context(task, extra_context)
     if notify_type == "delay_approval":
         return (
@@ -60,6 +66,7 @@ def _default_content(task: Task | None, notify_type: str, extra_context: dict[st
 
 
 def _resolve_template_content(db: Session, channel: str, notify_type: str, task: Task | None, extra_context: dict[str, str] | None = None) -> tuple[str, str]:
+    """解析指定渠道与通知类型最终应发送的标题和正文。"""
     template_kind = "MAIL_SEND" if channel == "email" else "QAX_SEND"
     template = (
         db.query(Template)
@@ -83,6 +90,16 @@ def create_notification_with_recipients(
     recipient_user_ids: list[int] | None = None,
     extra_context: dict[str, str] | None = None,
 ) -> Notification:
+    """创建通知及其接收人记录。
+
+    参数:
+    - task_id: 关联任务编号。
+    - channel: 通知渠道，支持 `email` 与 `qax`。
+    - notify_type: 通知业务类型。
+    - content_snapshot: 已确定的通知正文快照；为空时按模板渲染。
+    - recipient_user_ids: 指定接收人列表；为空时默认使用任务成员。
+    - extra_context: 模板渲染扩展上下文。
+    """
     task = db.query(Task).filter(Task.id == task_id).first()
     subject, rendered_content = _resolve_template_content(db, channel, notify_type, task, extra_context)
     notification = Notification(
@@ -101,11 +118,13 @@ def create_notification_with_recipients(
         members = db.query(TaskMember).filter(TaskMember.task_id == task_id).all()
         recipient_specs = [(item.user_id, item.member_role) for item in members]
     else:
+        # 管理员定向通知不依赖任务成员角色，因此统一标记为 admin。
         recipient_specs = [(user_id, "admin") for user_id in recipient_user_ids]
 
     seen_users: set[int] = set()
     for user_id, recipient_role in recipient_specs:
         if user_id in seen_users:
+            # 负责人和参与人可能在上游数据里重复出现，这里做一次去重。
             continue
         seen_users.add(user_id)
         user = db.query(User).filter(User.id == user_id).first()
@@ -152,6 +171,7 @@ def create_notification_with_recipients(
 
 
 def create_due_reminders(db: Session) -> int:
+    """批量创建到期提醒通知。"""
     now = shanghai_now_naive()
     created = 0
     tasks = db.query(Task).filter(Task.deleted_at.is_(None), Task.due_remind_days > 0).all()
@@ -171,6 +191,7 @@ def create_due_reminders(db: Session) -> int:
             .first()
         )
         if exists:
+            # 同一天同任务只允许生成一次到期提醒，避免重复打扰成员。
             continue
 
         create_notification_with_recipients(db, task.id, "email", "due_remind", "")

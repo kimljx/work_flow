@@ -7,6 +7,7 @@
         <p class="workspace-subtitle">按申请卡片集中处理延期审批，支持直接录入新截止时间和审批意见。</p>
       </div>
       <div class="toolbar">
+        <router-link class="button secondary" :to="backPath">返回上页</router-link>
         <button class="button secondary" @click="loadRequests">刷新数据</button>
         <button class="button secondary" @click="exportList">导出清单</button>
       </div>
@@ -147,10 +148,13 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import { resolvePriorityMeta } from '../../constants/taskUi'
 import { formatDateTime, toBackendDateTime, toDateTimeLocal } from '../../utils/format'
 
+const route = useRoute()
+const backPath = computed(() => route.query.from || '/admin/tasks')
 const requests = ref([])
 const reviewForms = reactive({})
 

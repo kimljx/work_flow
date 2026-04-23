@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""邮件接入服务。
+
+负责 SMTP 连通性检测、IMAP 收件、邮件正文解析、模板匹配以及
+“邮件驱动任务状态 / 延期审批”的业务处理。
+"""
+
 import email
 import imaplib
 import json
@@ -27,6 +33,7 @@ DELAY_REQUEST_ID_PATTERN = re.compile(r"(?:延期申请\s*(?:ID|编号)\s*[#:：
 
 
 def _provider_hint() -> str:
+    """根据已知服务商给出更有针对性的配置提示。"""
     host = settings.smtp_host.lower().strip()
     if "qq.com" in host:
         if settings.smtp_port == 587 and not settings.smtp_use_tls:
@@ -36,6 +43,7 @@ def _provider_hint() -> str:
 
 
 def _generic_hint() -> str:
+    """返回通用的 SMTP 排障建议。"""
     return (
         "请确认 SMTP_HOST 填写的是纯域名，不要包含 http:// 或 https:// 前缀；"
         "并检查 DNS 配置是否可解析该域名。"
@@ -43,6 +51,7 @@ def _generic_hint() -> str:
 
 
 def _decode_header_value(value: str | None) -> str:
+    """解码邮件头中的多段编码文本。"""
     if not value:
         return ""
     parts = []
@@ -55,6 +64,7 @@ def _decode_header_value(value: str | None) -> str:
 
 
 def _normalize_charset(charset: str | None) -> str:
+    """将不规范字符集名称归一化到可解码值。"""
     if not charset:
         return "utf-8"
     normalized = charset.strip().lower()
@@ -64,6 +74,7 @@ def _normalize_charset(charset: str | None) -> str:
 
 
 def _decode_bytes(payload: bytes, charset: str | None) -> str:
+    """尽量以多种候选编码解码邮件字节内容。"""
     candidates = [_normalize_charset(charset), "utf-8", "gb18030", "gbk", "latin-1"]
     seen: set[str] = set()
     for candidate in candidates:
@@ -78,6 +89,7 @@ def _decode_bytes(payload: bytes, charset: str | None) -> str:
 
 
 def _extract_text_body(message: Message) -> str:
+    """优先提取纯文本正文，并跳过附件。"""
     if message.is_multipart():
         texts: list[str] = []
         for part in message.walk():
@@ -96,6 +108,7 @@ def _extract_text_body(message: Message) -> str:
 
 
 def _open_smtp_connection() -> smtplib.SMTP:
+    """按配置自动选择普通 SMTP 或 SSL SMTP 连接。"""
     use_ssl = settings.smtp_use_ssl or settings.smtp_port == 465
     if use_ssl:
         return smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds)
@@ -103,6 +116,7 @@ def _open_smtp_connection() -> smtplib.SMTP:
 
 
 def _mail_scan_state(db: Session) -> MailScanState:
+    """获取或初始化唯一的邮箱扫描状态记录。"""
     state = db.query(MailScanState).filter(MailScanState.id == 1).first()
     if not state:
         state = MailScanState(id=1)
@@ -112,6 +126,7 @@ def _mail_scan_state(db: Session) -> MailScanState:
 
 
 def initialize_mail_scan_baseline(db: Session) -> dict[str, str]:
+    """重置邮件扫描基线，避免首次扫描误处理历史邮件。"""
     state = _mail_scan_state(db)
     now = shanghai_now_naive()
     state.baseline_started_at = now
@@ -121,6 +136,7 @@ def initialize_mail_scan_baseline(db: Session) -> dict[str, str]:
 
 
 def _message_datetime(message: Message) -> datetime | None:
+    """从邮件头解析发信时间，并转换为上海本地无时区时间。"""
     value = message.get("Date")
     if not value:
         return None
@@ -134,10 +150,12 @@ def _message_datetime(message: Message) -> datetime | None:
 
 
 def _extract_sender_email(from_addr: str) -> str:
+    """从发件人文本中提取邮箱地址并归一化。"""
     return parseaddr(from_addr)[1].strip().lower()
 
 
 def _parse_date(text: str) -> datetime | None:
+    """从自然语言文本中提取日期。"""
     match = DATE_PATTERN.search(text or "")
     if not match:
         return None
@@ -149,6 +167,7 @@ def _parse_date(text: str) -> datetime | None:
 
 
 def _find_task_id(subject: str, body: str) -> int | None:
+    """从主题或正文中提取任务编号。"""
     for source in (subject, body):
         match = TASK_ID_PATTERN.search(source or "")
         if match:
@@ -157,6 +176,7 @@ def _find_task_id(subject: str, body: str) -> int | None:
 
 
 def _find_delay_request_id(subject: str, body: str) -> int | None:
+    """从主题或正文中提取延期申请编号。"""
     for source in (subject, body):
         match = DELAY_REQUEST_ID_PATTERN.search(source or "")
         if match:
@@ -165,6 +185,7 @@ def _find_delay_request_id(subject: str, body: str) -> int | None:
 
 
 def _first_matching_line(text: str, keywords: tuple[str, ...]) -> str:
+    """在邮件前几行中查找包含关键词的第一行。"""
     for raw_line in (text or "").splitlines()[:20]:
         line = raw_line.strip().replace("?", ":")
         if any(keyword in line for keyword in keywords):
@@ -173,6 +194,7 @@ def _first_matching_line(text: str, keywords: tuple[str, ...]) -> str:
 
 
 def _append_mail_action(db: Session, mail_event_id: int, action_type: str, status: str, target_task_id: int | None, payload: dict) -> None:
+    """记录邮件触发的业务动作结果，便于列表页与详情页回放。"""
     db.add(
         MailAction(
             mail_event_id=mail_event_id,
@@ -185,6 +207,7 @@ def _append_mail_action(db: Session, mail_event_id: int, action_type: str, statu
 
 
 def diagnose_mail_settings() -> dict[str, str]:
+    """测试 SMTP 连通性与认证配置。"""
     if not settings.smtp_host or not settings.smtp_from_address:
         return {"status": "failed", "message": "请先配置 SMTP_HOST 与 SMTP_FROM_ADDRESS 后再测试。"}
 
@@ -221,6 +244,7 @@ def diagnose_mail_settings() -> dict[str, str]:
 
 
 def diagnose_imap_settings() -> dict[str, str]:
+    """测试 IMAP 登录与收件箱访问能力。"""
     if not settings.imap_host or not settings.imap_user:
         return {"status": "failed", "message": "请先配置 IMAP_HOST 与 IMAP_USER 后再测试。"}
     try:
@@ -239,6 +263,7 @@ def diagnose_imap_settings() -> dict[str, str]:
 
 
 def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type: str, sender: User, subject: str, body: str) -> None:
+    """根据邮件内容更新任务状态。"""
     task_id = _find_task_id(subject, body)
     if not task_id:
         mail_event.process_status = "FAILED"
@@ -266,6 +291,7 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
     previous_status = task.main_status
     task.main_status = next_status
     if next_status == "done" and task.actual_minutes == 0:
+        # 首次完成时补算实际耗时，避免后续重复覆盖人工修正数据。
         task.actual_minutes = max(int((shanghai_now_naive() - task.start_at).total_seconds() // 60), 0)
     db.add(
         TaskStatusEvent(
@@ -282,6 +308,7 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
 
 
 def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: User, subject: str, body: str) -> None:
+    """根据成员邮件创建延期申请，并通知管理员审批。"""
     task_id = _find_task_id(subject, body)
     proposed_deadline = _parse_date(body) or _parse_date(subject)
     if not task_id or proposed_deadline is None:
@@ -328,6 +355,7 @@ def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: U
 
 
 def _parse_delay_approval(body: str, subject: str) -> tuple[str | None, datetime | None, str]:
+    """从管理员邮件中解析同意/拒绝动作和审批日期。"""
     line = _first_matching_line(body, ("同意", "拒绝")) or _first_matching_line(subject, ("同意", "拒绝"))
     if not line:
         return None, None, ""
@@ -337,6 +365,7 @@ def _parse_delay_approval(body: str, subject: str) -> tuple[str | None, datetime
 
 
 def _apply_delay_approval_from_mail(db: Session, mail_event: MailEvent, sender: User, subject: str, body: str) -> None:
+    """根据管理员邮件执行延期审批。"""
     if sender.role != "admin":
         mail_event.process_status = "FAILED"
         _append_mail_action(db, mail_event.id, "delay_approve", "FAILED", None, {"reason": "发送人不是管理员"})
@@ -384,6 +413,7 @@ def _apply_delay_approval_from_mail(db: Session, mail_event: MailEvent, sender: 
 
 
 def _apply_business_action(db: Session, mail_event: MailEvent, template: Template, subject: str, body: str, from_addr: str) -> None:
+    """根据匹配到的回复模板，将邮件转成具体业务动作。"""
     sender_email = _extract_sender_email(from_addr)
     sender = db.query(User).filter(User.email == sender_email).first()
     if not sender:
@@ -405,6 +435,13 @@ def _apply_business_action(db: Session, mail_event: MailEvent, template: Templat
 
 
 def poll_mailbox(db: Session) -> dict[str, str | int]:
+    """扫描邮箱未读邮件并写入系统。
+
+    说明:
+    - 首次运行只建立基线，不处理历史邮件；
+    - 仅扫描未读邮件，并限制单次最大扫描数量；
+    - 邮件成功匹配回复模板后会尝试触发对应业务动作。
+    """
     if not settings.imap_host or not settings.imap_user:
         return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
 
@@ -442,6 +479,7 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
                 message = email.message_from_bytes(raw_message)
                 message_time = _message_datetime(message)
                 if message_time and state.baseline_started_at and message_time <= state.baseline_started_at:
+                    # 基线之前的历史邮件不参与自动处理，避免系统接入初期误操作旧数据。
                     continue
 
                 message_id = _decode_header_value(message.get("Message-ID")) or f"imap-{imap_id.decode()}"
@@ -496,6 +534,7 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
 
 
 def send_mail_notification(to_address: str, subject: str, content: str) -> dict[str, str]:
+    """发送一封系统通知邮件。"""
     if not settings.smtp_host or not settings.smtp_from_address:
         return {"status": "failed", "message": "未配置 SMTP，无法发送邮件。"}
     if not to_address:

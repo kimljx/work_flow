@@ -1,5 +1,8 @@
 <template>
-  <div class="shell">
+  <div v-if="isPublicPage" class="auth-layout">
+    <router-view />
+  </div>
+  <div v-else class="shell">
     <aside class="sidebar" v-if="auth.isLoggedIn">
       <div class="brand">{{ labels.brand }}</div>
       <nav>
@@ -16,20 +19,29 @@
         <router-link v-if="auth.isMember" to="/member/notifications">{{ labels.memberNotifications }}</router-link>
       </nav>
     </aside>
-    <main class="content">
+    <main class="content" :class="{ 'content-full': !auth.isLoggedIn }">
       <div v-if="auth.isLoggedIn" class="top-note">
         <span>{{ labels.currentUser }}{{ auth.profile?.name || auth.profile?.username }}</span>
         <span class="top-note-role">{{ auth.profile?.role_text || (auth.isAdmin ? labels.admin : labels.member) }}</span>
-        <button class="button secondary small" @click="handleLogout">{{ labels.logout }}</button>
+        <button class="button secondary small" :disabled="loading.isBusy" @click="handleLogout">{{ labels.logout }}</button>
       </div>
       <router-view />
     </main>
+    <div v-if="loading.isBusy" class="global-loading-mask">
+      <div class="global-loading-card">
+        <div class="global-loading-spinner" />
+        <strong>正在处理中</strong>
+        <span>请稍候，系统正在提交或刷新数据。</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { useRouter } from 'vue-router'
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
+import { useLoadingStore } from './stores/loading'
 
 const labels = {
   brand: '部门任务协同系统',
@@ -51,10 +63,14 @@ const labels = {
 }
 
 const auth = useAuthStore()
+const loading = useLoadingStore()
+const route = useRoute()
 const router = useRouter()
+const isPublicPage = computed(() => Boolean(route.meta.public))
 
 function handleLogout() {
   auth.logout()
+  loading.reset()
   router.push('/auth/login')
 }
 </script>

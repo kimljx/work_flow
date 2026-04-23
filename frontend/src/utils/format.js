@@ -1,5 +1,4 @@
 // 时间与文案格式化工具，供任务、通知、邮件和审批页面统一复用。
-
 export function formatDateTime(value) {
   if (!value) return '-'
   const date = new Date(value)
@@ -17,7 +16,6 @@ export function formatDate(value) {
 }
 
 export function formatDateRange(startAt, endAt) {
-  // 起止时间有任意一端存在时仍然展示，避免列表信息被完全吞掉。
   if (!startAt && !endAt) return '-'
   return `${formatDateTime(startAt)} - ${formatDateTime(endAt)}`
 }
@@ -59,7 +57,7 @@ export function toBackendEndOfDay(dateValue) {
   if (!dateValue) return null
   const date = new Date(`${dateValue}T00:00:00`)
   if (Number.isNaN(date.getTime())) return null
-  // 结束日期按“次日零点”传给后端，便于后端以左闭右开区间处理筛选。
+  // 结束日期按“次日零点”传给后端，便于以后端以左闭右开区间处理筛选。
   date.setDate(date.getDate() + 1)
   const pad = (item) => String(item).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T00:00:00`
@@ -72,6 +70,14 @@ export function formatMinutes(value) {
   if (hours === 0) return `${minutes} 分钟`
   if (minutes === 0) return `${hours} 小时`
   return `${hours} 小时 ${minutes} 分钟`
+}
+
+export function formatDurationDays(value) {
+  if (!value) return '0 天'
+  const days = value / (24 * 60)
+  if (days >= 10) return `${days.toFixed(0)} 天`
+  if (days >= 1) return `${days.toFixed(1)} 天`
+  return `${days.toFixed(2)} 天`
 }
 
 export function formatCountdown(targetTime) {

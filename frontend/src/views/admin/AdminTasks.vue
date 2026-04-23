@@ -23,7 +23,30 @@
           <option value="canceled">已取消</option>
         </select>
       </div>
-      <div class="filter-summary">当前展示 {{ filteredTasks.length }} 条任务</div>
+      <div class="filter-chip-group">
+        <button
+          v-for="item in subtaskFilterOptions"
+          :key="item.value"
+          :class="['button secondary small filter-chip', { active: subtaskStatusFilter === item.value }]"
+          @click="toggleSubtaskFilter(item.value)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+      <div class="filter-chip-group">
+        <button
+          v-for="item in advancedFilterOptions"
+          :key="item.key"
+          :class="['button secondary small filter-chip', { active: advancedFilters[item.key] }]"
+          @click="toggleAdvancedFilter(item.key)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+      <div class="filter-summary">
+        当前展示 {{ filteredTasks.length }} 条任务
+        <span v-if="activeFilterTexts.length > 0">，已启用：{{ activeFilterTexts.join(' / ') }}</span>
+      </div>
     </div>
 
     <div class="task-stack">
@@ -77,6 +100,20 @@
               <span class="info-label">通知送达</span>
               <strong>{{ task.delivered_count }}/{{ task.notification_total }}</strong>
             </div>
+            <div class="info-cell">
+              <span class="info-label">子任务进度</span>
+              <strong>{{ task.subtask_count || 0 }} 项</strong>
+              <div v-if="subtaskStatusSummary(task).length > 0" class="subtask-summary-row">
+                <span
+                  v-for="item in subtaskStatusSummary(task)"
+                  :key="`${task.id}-${item.status}`"
+                  :class="`${resolveSubtaskStatusMeta(item.status, item.label).tone} status-chip`"
+                >
+                  {{ item.label }} {{ item.count }}
+                </span>
+              </div>
+              <div v-else class="subtle-text">暂无子任务</div>
+            </div>
           </div>
         </div>
 
@@ -98,11 +135,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
-import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
+import { resolvePriorityMeta, resolveSubtaskStatusMeta, resolveTaskStatusTone } from '../../constants/taskUi'
 import { formatDateTime, formatMinutes } from '../../utils/format'
 
 const route = useRoute()
@@ -110,8 +147,63 @@ const router = useRouter()
 const tasks = ref([])
 const keyword = ref('')
 const status = ref('')
+const subtaskStatusFilter = ref('')
 const page = ref(1)
 const pageSize = 8
+const advancedFilters = reactive({
+  delayedOnly: false,
+  lockedOnly: false,
+  lowDeliveryOnly: false,
+})
+const subtaskFilterOptions = [
+  { value: '', label: '全部子任务' },
+  { value: 'in_progress', label: '进行中子任务' },
+  { value: 'pending', label: '待开始子任务' },
+  { value: 'done', label: '已完成子任务' },
+  { value: 'canceled', label: '已取消子任务' },
+  { value: 'empty', label: '无子任务' },
+]
+const advancedFilterOptions = [
+  { key: 'delayedOnly', label: '仅看延期任务' },
+  { key: 'lockedOnly', label: '仅看已锁定' },
+  { key: 'lowDeliveryOnly', label: '仅看送达不足' },
+]
+const activeFilterTexts = computed(() => {
+  const labels = []
+  if (status.value) {
+    const statusText = {
+      not_started: '主状态=未开始',
+      in_progress: '主状态=进行中',
+      done: '主状态=已完成',
+      canceled: '主状态=已取消',
+    }[status.value]
+    if (statusText) {
+      labels.push(statusText)
+    }
+  }
+  if (subtaskStatusFilter.value) {
+    const subtaskText = {
+      in_progress: '子任务=进行中',
+      pending: '子任务=待开始',
+      done: '子任务=已完成',
+      canceled: '子任务=已取消',
+      empty: '无子任务',
+    }[subtaskStatusFilter.value]
+    if (subtaskText) {
+      labels.push(subtaskText)
+    }
+  }
+  if (advancedFilters.delayedOnly) {
+    labels.push('延期中')
+  }
+  if (advancedFilters.lockedOnly) {
+    labels.push('状态已锁定')
+  }
+  if (advancedFilters.lowDeliveryOnly) {
+    labels.push('通知送达不足')
+  }
+  return labels
+})
 
 const filteredTasks = computed(() =>
   tasks.value.filter((item) => {
@@ -121,7 +213,9 @@ const filteredTasks = computed(() =>
       item.title.includes(query) ||
       (item.owner_name || '').includes(query)
     const matchStatus = !status.value || item.main_status === status.value
-    return matchKeyword && matchStatus
+    const matchSubtask = matchSubtaskFilter(item)
+    const matchAdvanced = matchAdvancedFilters(item)
+    return matchKeyword && matchStatus && matchSubtask && matchAdvanced
   })
 )
 
@@ -130,19 +224,95 @@ const pagedTasks = computed(() => {
   return filteredTasks.value.slice(start, start + pageSize)
 })
 
-watch([keyword, status], () => {
+watch([keyword, status, subtaskStatusFilter, () => advancedFilters.delayedOnly, () => advancedFilters.lockedOnly, () => advancedFilters.lowDeliveryOnly], () => {
   page.value = 1
 })
 
+/**
+ * 返回任务主状态的视觉展示配置。
+ * @param {object} task 当前任务对象。
+ * @returns {{tone: string, dot: string, text: string}} 列表卡片使用的状态样式与文案。
+ */
 function statusUi(task) {
   return resolveTaskStatusTone(task)
 }
 
+/**
+ * 提取当前任务的子任务状态统计，用于列表信息卡和快捷筛选。
+ * @param {object} task 当前任务对象。
+ * @returns {Array<{status: string, label: string, count: number}>} 只保留数量大于 0 的状态项。
+ */
+function subtaskStatusSummary(task) {
+  return (task.subtask_status_summary || []).filter((item) => Number(item.count) > 0)
+}
+
+/**
+ * 判断任务是否命中当前子任务筛选条件。
+ * @param {object} task 当前任务对象。
+ * @returns {boolean} 是否需要在列表中保留。
+ */
+function matchSubtaskFilter(task) {
+  if (!subtaskStatusFilter.value) {
+    return true
+  }
+  if (subtaskStatusFilter.value === 'empty') {
+    return Number(task.subtask_count || 0) === 0
+  }
+  return subtaskStatusSummary(task).some((item) => item.status === subtaskStatusFilter.value)
+}
+
+/**
+ * 判断任务是否命中高级组合筛选条件。
+ * 这些条件与主状态、子任务状态筛选叠加使用，用于快速定位“进行中且延期”等交叉场景。
+ * @param {object} task 当前任务对象。
+ * @returns {boolean} 是否满足当前高级筛选组合。
+ */
+function matchAdvancedFilters(task) {
+  if (advancedFilters.delayedOnly && Number(task.delay_days || 0) <= 0) {
+    return false
+  }
+  if (advancedFilters.lockedOnly && !task.state_locked) {
+    return false
+  }
+  if (advancedFilters.lowDeliveryOnly && Number(task.delivered_count || 0) >= Number(task.notification_total || 0)) {
+    return false
+  }
+  return true
+}
+
+/**
+ * 切换列表顶部的子任务快捷筛选。
+ * 再次点击同一项时会恢复为“全部子任务”，减少用户来回清空筛选的操作成本。
+ * @param {string} value 目标筛选值。
+ * @returns {void}
+ */
+function toggleSubtaskFilter(value) {
+  subtaskStatusFilter.value = subtaskStatusFilter.value === value ? '' : value
+}
+
+/**
+ * 切换高级组合筛选项。
+ * 支持与主状态和子任务筛选同时生效，用于快速锁定复杂业务场景。
+ * @param {'delayedOnly' | 'lockedOnly' | 'lowDeliveryOnly'} key 高级筛选键。
+ * @returns {void}
+ */
+function toggleAdvancedFilter(key) {
+  advancedFilters[key] = !advancedFilters[key]
+}
+
+/**
+ * 拉取当前账号可见的任务列表。
+ * @returns {Promise<void>}
+ */
 async function loadTasks() {
   const { data } = await http.get('/tasks')
   tasks.value = data
 }
 
+/**
+ * 处理从导入页返回任务列表后的刷新提示。
+ * @returns {Promise<void>}
+ */
 async function handleRouteRefresh() {
   if (route.query.refresh !== 'import') {
     return
@@ -154,6 +324,11 @@ async function handleRouteRefresh() {
   router.replace({ path: route.path, query: {} })
 }
 
+/**
+ * 为指定任务创建一次手动提醒。
+ * @param {number} taskId 任务编号。
+ * @returns {Promise<void>}
+ */
 async function remind(taskId) {
   if (!window.confirm('确认要对该任务发送手动提醒吗？')) return
   await http.post(`/tasks/${taskId}/remind`)
@@ -161,6 +336,11 @@ async function remind(taskId) {
   await loadTasks()
 }
 
+/**
+ * 删除指定任务并刷新列表。
+ * @param {number} taskId 任务编号。
+ * @returns {Promise<void>}
+ */
 async function removeTask(taskId) {
   if (!window.confirm('删除任务会保留审计记录，是否继续？')) return
   await http.delete(`/tasks/${taskId}`)

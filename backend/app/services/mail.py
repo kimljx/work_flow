@@ -21,7 +21,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Task, TaskMember, TaskStatusEvent, Template, User
+from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
 from app.services.templates import sort_templates, template_matches
 from app.timeutils import shanghai_now_naive, to_shanghai_naive
@@ -206,6 +206,20 @@ def _append_mail_action(db: Session, mail_event_id: int, action_type: str, statu
     )
 
 
+def _derive_task_status_from_subtasks(task: Task, subtasks: list[TaskSubtask]) -> str:
+    """根据子任务状态推导主任务状态。"""
+    if not subtasks:
+        return task.main_status
+    active_statuses = {item.status for item in subtasks}
+    if active_statuses and active_statuses <= {"done"}:
+        return "done"
+    if "in_progress" in active_statuses or "done" in active_statuses:
+        return "in_progress"
+    if active_statuses <= {"canceled"}:
+        return "canceled"
+    return "not_started"
+
+
 def diagnose_mail_settings() -> dict[str, str]:
     """测试 SMTP 连通性与认证配置。"""
     if not settings.smtp_host or not settings.smtp_from_address:
@@ -289,22 +303,53 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
 
     next_status = "done" if notify_type == "task_done" else "in_progress"
     previous_status = task.main_status
-    task.main_status = next_status
-    if next_status == "done" and task.actual_minutes == 0:
+    sender_subtasks = (
+        db.query(TaskSubtask)
+        .filter(TaskSubtask.task_id == task.id, TaskSubtask.assignee_id == sender.id)
+        .order_by(TaskSubtask.sort_order.asc())
+        .all()
+    )
+    updated_subtask_ids: list[int] = []
+    if sender_subtasks:
+        for item in sender_subtasks:
+            if item.status == "canceled":
+                # 已取消的子任务不再受邮件回执影响。
+                continue
+            item.status = next_status
+            updated_subtask_ids.append(item.id)
+        task.main_status = _derive_task_status_from_subtasks(
+            task,
+            db.query(TaskSubtask).filter(TaskSubtask.task_id == task.id).all(),
+        )
+    else:
+        # 未拆子任务时，仍沿用原有主任务状态回写逻辑。
+        task.main_status = next_status
+    if task.main_status == "done" and task.actual_minutes == 0:
         # 首次完成时补算实际耗时，避免后续重复覆盖人工修正数据。
         task.actual_minutes = max(int((shanghai_now_naive() - task.start_at).total_seconds() // 60), 0)
     db.add(
         TaskStatusEvent(
             task_id=task.id,
             from_status=previous_status,
-            to_status=next_status,
+            to_status=task.main_status,
             source="mail",
             remark=body[:500],
             operator_id=sender.id,
         )
     )
     mail_event.process_status = "APPLIED"
-    _append_mail_action(db, mail_event.id, notify_type, "APPLIED", task.id, {"from_status": previous_status, "to_status": next_status})
+    _append_mail_action(
+        db,
+        mail_event.id,
+        notify_type,
+        "APPLIED",
+        task.id,
+        {
+            "from_status": previous_status,
+            "to_status": task.main_status,
+            "updated_subtask_ids": updated_subtask_ids,
+        },
+    )
 
 
 def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: User, subject: str, body: str) -> None:

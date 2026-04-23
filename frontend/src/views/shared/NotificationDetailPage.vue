@@ -77,6 +77,7 @@
           <tr>
             <th>成员</th>
             <th>角色</th>
+            <th>接收内容</th>
             <th>送达状态</th>
             <th>已读状态</th>
             <th>重试次数</th>
@@ -85,7 +86,7 @@
         </thead>
         <tbody>
           <tr v-if="detail.recipients.length === 0">
-            <td colspan="6">当前没有成员回执记录。</td>
+            <td colspan="7">当前没有成员回执记录。</td>
           </tr>
           <tr v-for="recipient in detail.recipients" :key="`${detail.id}-${recipient.user_id}`">
             <td>
@@ -93,6 +94,9 @@
               <div class="subtle-text">{{ recipient.email || '未配置邮箱' }}</div>
             </td>
             <td>{{ recipient.recipient_role_text || recipient.recipient_role }}</td>
+            <td>
+              <pre class="detail-pre detail-pre-subtle">{{ recipient.content_snapshot || '沿用通知正文' }}</pre>
+            </td>
             <td><span class="status-tone status-tone-soft">{{ recipient.delivery_status_text }}</span></td>
             <td><span class="status-tone status-tone-neutral">{{ recipient.read_status_text }}</span></td>
             <td>{{ recipient.retry_count }}</td>

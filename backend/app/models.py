@@ -50,6 +50,7 @@ class Task(Base, TimestampMixin):
 
     members = relationship("TaskMember", back_populates="task", cascade="all, delete-orphan")
     milestones = relationship("TaskMilestone", back_populates="task", cascade="all, delete-orphan")
+    subtasks = relationship("TaskSubtask", back_populates="task", cascade="all, delete-orphan")
 
 
 class TaskMember(Base, TimestampMixin):
@@ -77,6 +78,21 @@ class TaskMilestone(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
 
     task = relationship("Task", back_populates="milestones")
+
+
+class TaskSubtask(Base, TimestampMixin):
+    """任务子任务表，记录主任务下拆分给成员的执行项。"""
+    __tablename__ = "task_subtasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    assignee_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+
+    task = relationship("Task", back_populates="subtasks")
+    assignee = relationship("User")
 
 
 class TaskStatusEvent(Base, TimestampMixin):
@@ -129,7 +145,26 @@ class NotificationRecipient(Base, TimestampMixin):
     delivery_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     read_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unread")
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content_snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="")
     last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class TaskImportHistory(Base, TimestampMixin):
+    """任务导入批次表，记录导入结果、重复风险与行签名。"""
+    __tablename__ = "task_import_histories"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    operator_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    total_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    overlap_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confirmed_duplicate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    row_signatures_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    summary_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+    operator = relationship("User")
 
 
 class DelayRequest(Base, TimestampMixin):

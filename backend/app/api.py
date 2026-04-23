@@ -7,11 +7,13 @@ from __future__ import annotations
 """
 
 import csv
+import hashlib
 import io
+import json
 from datetime import datetime, timedelta
 
 import jwt
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
@@ -29,11 +31,12 @@ from app.constants import (
     PRIORITY_LABELS,
     READ_STATUS_LABELS,
     ROLE_LABELS,
+    SUBTASK_STATUS_LABELS,
     TEMPLATE_NOTIFY_TYPE_OPTIONS,
     TASK_STATUS_LABELS,
 )
 from app.db import get_db
-from app.models import AuditLog, DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskMilestone, TaskStatusEvent, Template, User
+from app.models import AuditLog, DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskImportHistory, TaskMember, TaskMilestone, TaskStatusEvent, TaskSubtask, Template, User
 from app.schemas import (
     ApiMessage,
     AuditOut,
@@ -45,11 +48,14 @@ from app.schemas import (
     MailEventOut,
     MailPollStateOut,
     NotificationDetailOut,
+    NotificationPreviewOut,
     NotificationRecipientOut,
     NotificationOut,
     RefreshRequest,
     TaskCreate,
     TaskDetailOut,
+    TaskImportHistoryOut,
+    TaskImportPreviewOut,
     TaskOut,
     TaskStatusUpdate,
     TemplateCreate,
@@ -63,8 +69,8 @@ from app.security import create_token, decode_token, get_current_user, require_a
 from app.services.audit import write_audit
 from app.services.delay import apply_delay_decision
 from app.services.mail import diagnose_imap_settings, diagnose_mail_settings, initialize_mail_scan_baseline, poll_mailbox
-from app.services.notifications import create_due_reminders, create_notification_with_recipients
-from app.services.templates import sort_templates, template_matches
+from app.services.notifications import create_due_reminders, create_notification_with_recipients, preview_notification_content
+from app.services.templates import sort_templates, template_matches, validate_template_content
 from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
 
@@ -72,8 +78,8 @@ router = APIRouter(prefix="/api/v1")
 TASK_IMPORT_FIELDS = (
     "title",
     "content",
-    "owner_username",
-    "participant_usernames",
+    "owner_name",
+    "participant_names",
     "start_at",
     "end_at",
     "priority",
@@ -82,6 +88,9 @@ TASK_IMPORT_FIELDS = (
     "milestone_names",
     "milestone_datetimes",
     "remind_offsets",
+    "subtask_titles",
+    "subtask_contents",
+    "subtask_assignee_names",
 )
 
 
@@ -138,6 +147,7 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
     """聚合任务成员和通知统计，生成任务列表项。"""
     members = db.query(TaskMember).filter(TaskMember.task_id == task.id).all()
     owner_name = next((item.user.name for item in members if item.member_role == "owner" and item.user), "")
+    creator = db.query(User).filter(User.id == task.created_by).first() if task.created_by else None
     participant_count = sum(1 for item in members if item.member_role == "participant")
     recipients = (
         db.query(NotificationRecipient)
@@ -146,6 +156,19 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
         .all()
     )
     delivered_count = sum(1 for item in recipients if item.delivery_status == "delivered")
+    subtask_status_summary = []
+    subtasks = list(task.subtasks or [])
+    for status in ("pending", "in_progress", "done", "canceled"):
+        count = sum(1 for item in subtasks if item.status == status)
+        if count <= 0:
+            continue
+        subtask_status_summary.append(
+            {
+                "status": status,
+                "label": SUBTASK_STATUS_LABELS.get(status, status),
+                "count": count,
+            }
+        )
     return TaskOut(
         id=task.id,
         title=task.title,
@@ -163,10 +186,14 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
         status_text=task_status_display(task),
         priority_text=PRIORITY_LABELS.get(task.priority, task.priority),
         owner_name=owner_name,
+        creator_name=creator.name if creator else "",
         participant_count=participant_count,
         notification_total=len(recipients),
         delivered_count=delivered_count,
         completed_member_count=1 if task.main_status == "done" else 0,
+        subtask_count=len(subtasks),
+        subtask_status_summary=subtask_status_summary,
+        created_at=task.created_at,
     )
 
 
@@ -211,6 +238,7 @@ def serialize_notification_recipient(recipient: NotificationRecipient, db: Sessi
         read_status=recipient.read_status,
         read_status_text=read_status_text(recipient.read_status),
         retry_count=recipient.retry_count,
+        content_snapshot=recipient.content_snapshot,
         last_error=recipient.last_error,
     )
 
@@ -223,6 +251,28 @@ def serialize_notification_detail(notification: Notification, db: Session) -> No
         **base.model_dump(),
         content_snapshot=notification.content_snapshot,
         recipients=[serialize_notification_recipient(item, db) for item in recipients],
+    )
+
+
+def serialize_task_import_history(history: TaskImportHistory, db: Session) -> TaskImportHistoryOut:
+    """序列化任务导入历史。"""
+    operator = db.query(User).filter(User.id == history.operator_id).first()
+    try:
+        summary = json.loads(history.summary_json or "{}")
+    except json.JSONDecodeError:
+        summary = {}
+    return TaskImportHistoryOut(
+        id=history.id,
+        filename=history.filename,
+        operator_name=operator.name if operator else "",
+        total_rows=history.total_rows,
+        success_count=history.success_count,
+        failure_count=history.failure_count,
+        overlap_count=history.overlap_count,
+        confirmed_duplicate=history.confirmed_duplicate,
+        overlap_samples=summary.get("overlap_samples", [])[:5],
+        failure_samples=summary.get("failures", [])[:5],
+        created_at=history.created_at,
     )
 
 
@@ -332,6 +382,20 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
             )
         )
 
+    for subtask in payload.subtasks:
+        if subtask.assignee_id not in member_ids:
+            raise HTTPException(status_code=400, detail="子任务执行人必须从主任务参与成员中选择")
+        db.add(
+            TaskSubtask(
+                task_id=task.id,
+                title=subtask.title,
+                content=subtask.content,
+                assignee_id=subtask.assignee_id,
+                sort_order=subtask.sort_order,
+                status=subtask.status or "pending",
+            )
+        )
+
     db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=inferred_status, source=source, remark="创建任务自动判定状态", operator_id=current_user.id))
     # 创建任务后立即生成邮件和即时消息通知，确保成员在多个渠道都能收到任务分发信息。
     create_notification_with_recipients(db, task.id, "email", "task_created", "")
@@ -354,11 +418,111 @@ def _normalize_import_datetime(value: object, field_label: str) -> datetime:
 
 
 def _split_import_usernames(value: object) -> list[str]:
-    """解析 Excel 中的账号列表。"""
+    """解析 Excel 中的姓名列表。"""
     text = str(value or "").replace("，", ",").replace("；", ",").replace(" ", "").strip(",")
     if not text:
         return []
     return [item for item in text.split(",") if item]
+
+
+def _find_active_user_by_name(db: Session, name: str, field_label: str) -> User:
+    """按姓名查找启用中的系统用户，并阻止重名误导入。"""
+    user_name = str(name or "").strip()
+    if not user_name:
+        raise ValueError(f"{field_label}不能为空")
+    matches = db.query(User).filter(User.name == user_name, User.is_active.is_(True)).all()
+    if not matches:
+        raise ValueError(f"{field_label}不存在或已禁用：{user_name}")
+    if len(matches) > 1:
+        raise ValueError(f"{field_label}存在重名用户，请先处理重名：{user_name}")
+    return matches[0]
+
+
+def _build_import_row_signature(row_data: dict[str, object]) -> str:
+    """为导入行生成稳定签名，用于识别高重叠重复导入。"""
+    signature_payload = {
+        "title": str(row_data.get("title") or "").strip(),
+        "content": str(row_data.get("content") or "").strip(),
+        "owner_name": str(row_data.get("owner_name") or "").strip(),
+        "participant_names": sorted(_split_import_usernames(row_data.get("participant_names"))),
+        "start_at": str(row_data.get("start_at") or "").strip(),
+        "end_at": str(row_data.get("end_at") or "").strip(),
+        "priority": str(row_data.get("priority") or "").strip().lower(),
+        "subtask_titles": str(row_data.get("subtask_titles") or "").strip(),
+        "subtask_assignee_names": str(row_data.get("subtask_assignee_names") or "").strip(),
+    }
+    return hashlib.sha256(json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _build_import_row_sample(row_number: int, row_data: dict[str, object], signature: str) -> dict[str, object]:
+    """构造导入行摘要，用于历史回看和重复对比展示。"""
+    return {
+        "signature": signature,
+        "row_number": row_number,
+        "title": str(row_data.get("title") or "").strip(),
+        "owner_name": str(row_data.get("owner_name") or "").strip(),
+        "end_at": str(row_data.get("end_at") or "").strip(),
+    }
+
+
+def _collect_import_rows(rows: list[tuple[object, ...]]) -> tuple[list[tuple[int, dict[str, object]]], list[str], list[dict[str, object]]]:
+    """抽取有效导入行，并预先生成行签名。"""
+    collected_rows: list[tuple[int, dict[str, object]]] = []
+    signatures: list[str] = []
+    row_samples: list[dict[str, object]] = []
+    for index, row in enumerate(rows[1:], start=2):
+        if not any(cell not in (None, "") for cell in row):
+            continue
+        row_data = {field: row[position] if position < len(row) else None for position, field in enumerate(TASK_IMPORT_FIELDS)}
+        signature = _build_import_row_signature(row_data)
+        collected_rows.append((index, row_data))
+        signatures.append(signature)
+        row_samples.append(_build_import_row_sample(index, row_data, signature))
+    return collected_rows, signatures, row_samples
+
+
+def _detect_import_overlap(db: Session, signatures: list[str], row_samples: list[dict[str, object]]) -> tuple[int, float, list[dict[str, object]]]:
+    """检测当前导入与近几次导入历史的最大重叠规模。"""
+    current_signatures = {item for item in signatures if item}
+    current_sample_map = {item.get("signature"): item for item in row_samples if item.get("signature")}
+    if not current_signatures:
+        return 0, 0, []
+    best_history: TaskImportHistory | None = None
+    best_overlap_signatures: set[str] = set()
+    histories = db.query(TaskImportHistory).order_by(TaskImportHistory.id.desc()).limit(20).all()
+    for history in histories:
+        history_signatures = set(json.loads(history.row_signatures_json or "[]"))
+        overlap_signatures = current_signatures & history_signatures
+        if len(overlap_signatures) > len(best_overlap_signatures):
+            best_history = history
+            best_overlap_signatures = overlap_signatures
+    overlap_count = len(best_overlap_signatures)
+    overlap_rate = overlap_count / len(current_signatures) if current_signatures else 0
+    overlap_samples: list[dict[str, object]] = []
+    if best_history and best_overlap_signatures:
+        try:
+            history_summary = json.loads(best_history.summary_json or "{}")
+        except json.JSONDecodeError:
+            history_summary = {}
+        history_rows = {
+            item.get("signature"): item
+            for item in history_summary.get("rows", [])
+            if isinstance(item, dict) and item.get("signature")
+        }
+        for signature in list(best_overlap_signatures)[:5]:
+            current_row = current_sample_map.get(signature, {})
+            history_row = history_rows.get(signature, {})
+            overlap_samples.append(
+                {
+                    "title": current_row.get("title") or history_row.get("title") or "-",
+                    "owner_name": current_row.get("owner_name") or history_row.get("owner_name") or "",
+                    "end_at": current_row.get("end_at") or history_row.get("end_at") or "",
+                    "current_row_number": current_row.get("row_number") or history_row.get("row_number"),
+                    "history_filename": best_history.filename,
+                    "history_created_at": best_history.created_at.isoformat() if best_history.created_at else "",
+                }
+            )
+    return overlap_count, overlap_rate, overlap_samples
 
 
 def _parse_import_milestones(row_data: dict[str, object]) -> list[dict]:
@@ -389,23 +553,47 @@ def _parse_import_milestones(row_data: dict[str, object]) -> list[dict]:
     return milestones
 
 
+def _parse_import_subtasks(row_data: dict[str, object], db: Session, member_ids: set[int]) -> list[dict]:
+    """解析导入行中的子任务字段。"""
+    subtask_titles = [item.strip() for item in str(row_data.get("subtask_titles") or "").split("|") if item.strip()]
+    subtask_contents = [item.strip() for item in str(row_data.get("subtask_contents") or "").split("|")] if row_data.get("subtask_contents") else []
+    subtask_assignees = [item.strip() for item in str(row_data.get("subtask_assignee_names") or "").split("|") if item.strip()]
+
+    if not subtask_titles and not subtask_assignees and not any(item for item in subtask_contents):
+        return []
+    if len(subtask_titles) != len(subtask_assignees):
+        raise ValueError("子任务标题与子任务执行人数量不一致")
+    if subtask_contents and len(subtask_contents) not in (0, len(subtask_titles)):
+        raise ValueError("子任务内容数量与子任务标题数量不一致")
+
+    subtasks: list[dict] = []
+    for index, title in enumerate(subtask_titles):
+        assignee_name = subtask_assignees[index]
+        assignee = _find_active_user_by_name(db, assignee_name, "子任务执行人")
+        if assignee.id not in member_ids:
+            raise ValueError(f"子任务执行人必须属于主任务成员：{assignee_name}")
+        subtasks.append(
+            {
+                "title": title,
+                "content": subtask_contents[index] if index < len(subtask_contents) else "",
+                "assignee_id": assignee.id,
+                "sort_order": index,
+            }
+        )
+    return subtasks
+
+
 def _build_task_create_from_import_row(row_data: dict[str, object], db: Session) -> TaskCreate:
     """将 Excel 行数据转换成任务创建模型。"""
-    owner_username = str(row_data.get("owner_username") or "").strip()
-    if not owner_username:
-        raise ValueError("负责人账号不能为空")
-    owner = db.query(User).filter(User.username == owner_username, User.is_active.is_(True)).first()
-    if not owner:
-        raise ValueError(f"负责人账号不存在或已禁用：{owner_username}")
+    owner = _find_active_user_by_name(db, str(row_data.get("owner_name") or "").strip(), "负责人")
 
-    participant_usernames = _split_import_usernames(row_data.get("participant_usernames"))
+    participant_usernames = _split_import_usernames(row_data.get("participant_names"))
     participant_ids: list[int] = []
-    for username in participant_usernames:
-        user = db.query(User).filter(User.username == username, User.is_active.is_(True)).first()
-        if not user:
-            raise ValueError(f"参与者账号不存在或已禁用：{username}")
+    for user_name in participant_usernames:
+        user = _find_active_user_by_name(db, user_name, "参与人员")
         if user.id != owner.id and user.id not in participant_ids:
             participant_ids.append(user.id)
+    member_ids = {owner.id, *participant_ids}
 
     priority = str(row_data.get("priority") or "").strip().lower()
     if priority not in PRIORITY_LABELS:
@@ -427,12 +615,52 @@ def _build_task_create_from_import_row(row_data: dict[str, object], db: Session)
         "priority": priority,
         "remark": str(row_data.get("remark") or "").strip(),
         "milestones": _parse_import_milestones(row_data),
+        "subtasks": _parse_import_subtasks(row_data, db, member_ids),
     }
     if not payload["title"]:
         raise ValueError("任务标题不能为空")
     if not payload["content"]:
         raise ValueError("任务内容不能为空")
     return TaskCreate(**payload)
+
+
+def _record_task_import_history(
+    db: Session,
+    filename: str,
+    current_user: User,
+    row_signatures: list[str],
+    row_samples: list[dict[str, object]],
+    success_count: int,
+    failure_count: int,
+    overlap_count: int,
+    confirmed_duplicate: bool,
+    failures: list[dict[str, object]],
+    overlap_samples: list[dict[str, object]],
+    workbook_bytes: bytes,
+) -> TaskImportHistory:
+    """记录任务导入批次结果，供后续历史查询和重复检测。"""
+    history = TaskImportHistory(
+        filename=filename,
+        operator_id=current_user.id,
+        file_hash=hashlib.sha256(workbook_bytes).hexdigest(),
+        total_rows=len(row_signatures),
+        success_count=success_count,
+        failure_count=failure_count,
+        overlap_count=overlap_count,
+        confirmed_duplicate=confirmed_duplicate,
+        row_signatures_json=json.dumps(row_signatures, ensure_ascii=False),
+        summary_json=json.dumps(
+            {
+                "failures": failures[:20],
+                "rows": row_samples,
+                "overlap_samples": overlap_samples[:10],
+            },
+            ensure_ascii=False,
+        ),
+    )
+    db.add(history)
+    db.flush()
+    return history
 
 
 @router.post("/auth/login", response_model=TokenPair)
@@ -612,8 +840,8 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
     headers = [
         "任务标题(title)",
         "任务内容(content)",
-        "负责人账号(owner_username)",
-        "参与者账号(participant_usernames)",
+        "负责人姓名(owner_name)",
+        "参与人员姓名(participant_names)",
         "开始时间(start_at)",
         "结束时间(end_at)",
         "优先级(priority)",
@@ -622,12 +850,15 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
         "里程碑名称(milestone_names)",
         "里程碑时间(milestone_datetimes)",
         "里程碑提醒天数(remind_offsets)",
+        "子任务标题(subtask_titles)",
+        "子任务内容(subtask_contents)",
+        "子任务执行人姓名(subtask_assignee_names)",
     ]
     example_row = [
         "Q2 重点项目汇总",
         "完成季度重点项目进展汇总与风险登记。",
-        "admin",
-        "member,member2",
+        "系统管理员",
+        "默认成员,测试成员",
         "2026-04-23T09:00:00",
         "2026-04-30T18:00:00",
         "high",
@@ -636,6 +867,9 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
         "初稿整理|主管复核|正式提交",
         "2026-04-24T18:00:00|2026-04-27T18:00:00|2026-04-30T12:00:00",
         "1,2|1|1,3",
+        "汇总原始数据|复核内容|提交汇报",
+        "整理各部门数据|检查格式与风险项|输出最终稿",
+        "默认成员|测试成员|系统管理员",
     ]
 
     sheet.append(headers)
@@ -657,6 +891,9 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
         "J": 30,
         "K": 42,
         "L": 28,
+        "M": 30,
+        "N": 42,
+        "O": 30,
     }
     for column, width in column_widths.items():
         sheet.column_dimensions[column].width = width
@@ -666,8 +903,8 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
     instructions = [
         ["任务标题(title)", "是", "任务名称，建议直接对应业务事项标题。", "Q2 重点项目汇总"],
         ["任务内容(content)", "是", "任务详细说明。", "完成季度重点项目进展汇总与风险登记。"],
-        ["负责人账号(owner_username)", "是", "填写系统中的用户名。", "admin"],
-        ["参与者账号(participant_usernames)", "否", "多个账号用英文逗号分隔。", "member,member2"],
+        ["负责人姓名(owner_name)", "是", "填写系统中的姓名，不能重名。", "系统管理员"],
+        ["参与人员姓名(participant_names)", "否", "多个姓名用英文逗号分隔，不能重名。", "默认成员,测试成员"],
         ["开始时间(start_at)", "是", "使用 ISO 格式时间，精确到秒。", "2026-04-23T09:00:00"],
         ["结束时间(end_at)", "是", "使用 ISO 格式时间，必须晚于开始时间。", "2026-04-30T18:00:00"],
         ["优先级(priority)", "是", "仅支持 high、medium、low。", "high"],
@@ -676,6 +913,9 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
         ["里程碑名称(milestone_names)", "否", "多个里程碑用 | 分隔，顺序需与时间、提醒列一致。", "初稿整理|主管复核|正式提交"],
         ["里程碑时间(milestone_datetimes)", "否", "多个时间用 | 分隔，格式需与任务时间一致。", "2026-04-24T18:00:00|2026-04-27T18:00:00|2026-04-30T12:00:00"],
         ["里程碑提醒天数(remind_offsets)", "否", "每个里程碑的提醒天数用英文逗号分隔，多个里程碑之间用 | 分隔。", "1,2|1|1,3"],
+        ["子任务标题(subtask_titles)", "否", "多个子任务标题用 | 分隔。", "汇总原始数据|复核内容|提交汇报"],
+        ["子任务内容(subtask_contents)", "否", "多个子任务内容用 | 分隔，顺序需与子任务标题一致。", "整理各部门数据|检查格式与风险项|输出最终稿"],
+        ["子任务执行人姓名(subtask_assignee_names)", "否", "填写系统姓名，多个执行人用 | 分隔，且必须属于主任务成员，不能重名。", "默认成员|测试成员|系统管理员"],
     ]
     for row in instructions:
         instruction_sheet.append(row)
@@ -699,6 +939,59 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
     )
 
 
+@router.get("/tasks/import-histories", response_model=list[TaskImportHistoryOut])
+def list_task_import_histories(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[TaskImportHistoryOut]:
+    """返回最近的任务导入历史。"""
+    histories = db.query(TaskImportHistory).order_by(TaskImportHistory.id.desc()).limit(20).all()
+    return [serialize_task_import_history(item, db) for item in histories]
+
+
+@router.get("/tasks/{task_id}/notification-preview", response_model=NotificationPreviewOut)
+def get_task_notification_preview(
+    task_id: int,
+    channel: str = Query("email"),
+    notify_type: str = Query("task_created"),
+    recipient_user_id: int | None = Query(None),
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> NotificationPreviewOut:
+    """棰勮鏌愪釜浠诲姟鍦ㄦ寚瀹氭笭閬撱€佹寚瀹氭帴鏀朵汉涓嬫渶缁堜細鍙戦€佺殑閫氱煡鍐呭銆?"""
+    if channel not in {"email", "qax"}:
+        raise HTTPException(status_code=400, detail="浠呮敮鎸侀偖浠朵笌鍗虫椂娑堟伅棰勮")
+    if notify_type not in {"task_created", "manual_remind", "due_remind"}:
+        raise HTTPException(status_code=400, detail="褰撳墠棰勮浠呮敮鎸佷换鍔″垱寤恒€佹墜鍔ㄦ彁閱掑拰鍒版湡鎻愰啋")
+    task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="浠诲姟涓嶅瓨鍦?")
+    recipient = None
+    if recipient_user_id is not None:
+        membership = db.query(TaskMember).filter(TaskMember.task_id == task.id, TaskMember.user_id == recipient_user_id).first()
+        if not membership:
+            raise HTTPException(status_code=400, detail="棰勮鎺ユ敹浜哄繀椤诲睘浜庡綋鍓嶄换鍔℃垚鍛?")
+        recipient = membership.user if membership.user else db.query(User).filter(User.id == recipient_user_id).first()
+    preview = preview_notification_content(
+        db=db,
+        task=task,
+        channel=channel,
+        notify_type=notify_type,
+        recipient=recipient,
+    )
+    return NotificationPreviewOut(
+        channel=channel,
+        channel_text=notification_channel_text(channel),
+        notify_type=notify_type,
+        notify_type_text=NOTIFICATION_TYPE_LABELS.get(notify_type, notify_type),
+        recipient_user_id=recipient.id if recipient else None,
+        recipient_name=recipient.name if recipient else "",
+        recipient_email=recipient.email if recipient else "",
+        template_name=str(preview.get("template_name") or ""),
+        template_version=preview.get("template_version"),
+        subject=str(preview.get("subject") or ""),
+        content=str(preview.get("content") or ""),
+        context=preview.get("context") or {},
+    )
+
+
 @router.get("/tasks/{task_id}", response_model=TaskDetailOut)
 def get_task(task_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> TaskDetailOut:
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
@@ -710,6 +1003,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
             raise HTTPException(status_code=403, detail="无权访问该任务")
     members = db.query(TaskMember).filter(TaskMember.task_id == task.id).all()
     milestones = db.query(TaskMilestone).filter(TaskMilestone.task_id == task.id).order_by(TaskMilestone.sort_order.asc()).all()
+    subtasks = db.query(TaskSubtask).filter(TaskSubtask.task_id == task.id).order_by(TaskSubtask.sort_order.asc()).all()
     notifications = db.query(Notification).filter(Notification.task_id == task.id).order_by(Notification.id.desc()).all()
     delay_requests = db.query(DelayRequest).filter(DelayRequest.task_id == task.id).order_by(DelayRequest.id.desc()).all()
     events = db.query(TaskStatusEvent).filter(TaskStatusEvent.task_id == task.id).order_by(TaskStatusEvent.id.desc()).all()
@@ -736,6 +1030,20 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "status": item.status,
             }
             for item in milestones
+        ],
+        subtasks=[
+            {
+                "id": item.id,
+                "title": item.title,
+                "content": item.content,
+                "assignee_id": item.assignee_id,
+                "assignee_name": item.assignee.name if item.assignee else "",
+                "assignee_email": item.assignee.email if item.assignee else "",
+                "status": item.status,
+                "status_text": SUBTASK_STATUS_LABELS.get(item.status, item.status),
+                "sort_order": item.sort_order,
+            }
+            for item in subtasks
         ],
         notifications=[serialize_notification(item, db).model_dump() for item in notifications],
         delay_requests=[
@@ -779,6 +1087,14 @@ def update_task(task_id: int, payload: TaskCreate, current_user: User = Depends(
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    if payload.start_at > payload.end_at:
+        raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
+
+    member_ids = {payload.owner_id, *payload.participant_ids}
+    for subtask in payload.subtasks:
+        if subtask.assignee_id not in member_ids:
+            raise HTTPException(status_code=400, detail="子任务执行人必须从主任务参与成员中选择")
+
     before = {"title": task.title, "end_at": task.end_at.isoformat(), "priority": task.priority}
     task.title = payload.title
     task.content = payload.content
@@ -788,6 +1104,38 @@ def update_task(task_id: int, payload: TaskCreate, current_user: User = Depends(
     task.end_at = payload.end_at
     task.due_remind_days = max(payload.due_remind_days, 0)
     task.planned_minutes = int((payload.end_at - payload.start_at).total_seconds() // 60)
+
+    db.query(TaskMember).filter(TaskMember.task_id == task.id).delete()
+    for user_id in member_ids:
+        member_role = "owner" if user_id == payload.owner_id else "participant"
+        db.add(TaskMember(task_id=task.id, user_id=user_id, member_role=member_role))
+
+    db.query(TaskMilestone).filter(TaskMilestone.task_id == task.id).delete()
+    for milestone in payload.milestones:
+        if milestone.planned_at < payload.start_at or milestone.planned_at > payload.end_at:
+            raise HTTPException(status_code=400, detail="里程碑时间必须位于任务时间范围内")
+        db.add(
+            TaskMilestone(
+                task_id=task.id,
+                name=milestone.name,
+                planned_at=milestone.planned_at,
+                remind_offsets=",".join(str(item) for item in milestone.remind_offsets),
+                sort_order=milestone.sort_order,
+            )
+        )
+
+    db.query(TaskSubtask).filter(TaskSubtask.task_id == task.id).delete()
+    for subtask in payload.subtasks:
+        db.add(
+            TaskSubtask(
+                task_id=task.id,
+                title=subtask.title,
+                content=subtask.content,
+                assignee_id=subtask.assignee_id,
+                sort_order=subtask.sort_order,
+                status=subtask.status or "pending",
+            )
+        )
     write_audit(db, current_user.id, "UPDATE_TASK", "Task", task.id, before, {"title": task.title, "end_at": task.end_at.isoformat()})
     db.commit()
     db.refresh(task)
@@ -889,6 +1237,7 @@ def _validate_template_notify_type(template_kind: str, notify_type: str) -> None
 @router.post("/templates", response_model=dict)
 def create_template(payload: TemplateCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     _validate_template_notify_type(payload.template_kind, payload.notify_type)
+    validate_template_content(payload.template_kind, payload.notify_type, payload.content)
     template = Template(**payload.model_dump())
     db.add(template)
     db.flush()
@@ -903,6 +1252,7 @@ def update_template(template_id: int, payload: TemplateCreate, current_user: Use
     if not template:
         raise HTTPException(status_code=404, detail="模板不存在")
     _validate_template_notify_type(payload.template_kind, payload.notify_type)
+    validate_template_content(payload.template_kind, payload.notify_type, payload.content)
     before = {"name": template.name, "version": template.version}
     for key, value in payload.model_dump().items():
         setattr(template, key, value)
@@ -1116,10 +1466,11 @@ def decide_delay_request(delay_id: int, payload: DelayDecisionRequest, current_u
 @router.post("/tasks/import", response_model=dict)
 async def import_tasks(
     file: UploadFile = File(...),
+    confirm_duplicate: bool = Form(False),
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    """导入任务 Excel，并返回成功数与失败行明细。"""
+    """导入任务 Excel，并在高重叠时要求二次确认。"""
     filename = (file.filename or "").lower()
     if not filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="仅支持导入 .xlsx 格式文件")
@@ -1138,13 +1489,21 @@ async def import_tasks(
     if len(rows) < 2:
         raise HTTPException(status_code=400, detail="模板中没有可导入的数据行")
 
+    import_rows, row_signatures, row_samples = _collect_import_rows(rows)
+    overlap_count, overlap_rate, overlap_samples = _detect_import_overlap(db, row_signatures, row_samples)
+    if overlap_count >= 3 and overlap_rate >= 0.6 and not confirm_duplicate:
+        preview = TaskImportPreviewOut(
+            message=f"检测到本次导入与历史导入有 {overlap_count} 条高度重叠，请确认是否继续导入。",
+            needs_confirmation=True,
+            overlap_count=overlap_count,
+            overlap_rate=round(overlap_rate, 2),
+            overlap_samples=overlap_samples,
+        )
+        return preview.dict()
+
     created_task_ids: list[int] = []
     failures: list[dict[str, object]] = []
-    for index, row in enumerate(rows[1:], start=2):
-        if not any(cell not in (None, "") for cell in row):
-            continue
-
-        row_data = {field: row[position] if position < len(row) else None for position, field in enumerate(TASK_IMPORT_FIELDS)}
+    for index, row_data in import_rows:
         try:
             payload = _build_task_create_from_import_row(row_data, db)
             task = _create_task_record(payload, current_user, db, source="import")
@@ -1163,11 +1522,29 @@ async def import_tasks(
 
     success_count = len(created_task_ids)
     failure_count = len(failures)
+    _record_task_import_history(
+        db=db,
+        filename=file.filename or "未命名导入文件.xlsx",
+        current_user=current_user,
+        row_signatures=row_signatures,
+        row_samples=row_samples,
+        success_count=success_count,
+        failure_count=failure_count,
+        overlap_count=overlap_count,
+        confirmed_duplicate=confirm_duplicate,
+        failures=failures,
+        overlap_samples=overlap_samples,
+        workbook_bytes=workbook_bytes,
+    )
+    db.commit()
     return {
         "message": f"任务导入完成：成功 {success_count} 条，失败 {failure_count} 条",
+        "needs_confirmation": False,
         "success_count": success_count,
         "failure_count": failure_count,
         "created_task_ids": created_task_ids,
+        "overlap_count": overlap_count,
+        "overlap_samples": overlap_samples,
         "failures": failures,
     }
 
@@ -1176,9 +1553,11 @@ async def import_tasks(
 def export_report(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
-    writer.writerow(["task_id", "title", "status", "delay_days"])
+    writer.writerow(["task_id", "title", "status", "delay_days", "subtask_count", "subtask_summary"])
     for task in db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.id.asc()).all():
-        writer.writerow([task.id, task.title, task.main_status, task.delay_days])
+        subtasks = sorted(task.subtasks, key=lambda item: item.sort_order)
+        subtask_summary = "；".join(f"{item.title}({item.assignee.name if item.assignee else item.assignee_id})" for item in subtasks)
+        writer.writerow([task.id, task.title, task.main_status, task.delay_days, len(subtasks), subtask_summary])
     return StreamingResponse(iter([csv_buffer.getvalue().encode("utf-8")]), media_type="text/csv")
 
 

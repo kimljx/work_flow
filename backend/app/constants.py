@@ -7,6 +7,13 @@ TASK_STATUS_LABELS = {
     "canceled": "已取消",
 }
 
+SUBTASK_STATUS_LABELS = {
+    "pending": "待开始",
+    "in_progress": "进行中",
+    "done": "已完成",
+    "canceled": "已取消",
+}
+
 TASK_STATUS_OPTIONS = list(TASK_STATUS_LABELS.keys())
 
 ROLE_LABELS = {

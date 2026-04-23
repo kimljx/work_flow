@@ -69,6 +69,16 @@ class MilestonePayload(BaseModel):
     sort_order: int = 0
 
 
+class SubtaskPayload(BaseModel):
+    """任务子任务输入结构。"""
+    id: int | None = None
+    title: str
+    content: str = ""
+    assignee_id: int
+    sort_order: int = 0
+    status: str = "pending"
+
+
 class TaskCreate(BaseModel):
     """任务创建与编辑通用请求体。"""
     title: str
@@ -81,6 +91,7 @@ class TaskCreate(BaseModel):
     priority: str
     remark: str = ""
     milestones: list[MilestonePayload] = Field(default_factory=list)
+    subtasks: list[SubtaskPayload] = Field(default_factory=list)
 
 
 class TaskStatusUpdate(BaseModel):
@@ -108,16 +119,21 @@ class TaskOut(BaseModel):
     status_text: str = ""
     priority_text: str = ""
     owner_name: str = ""
+    creator_name: str = ""
     participant_count: int = 0
     notification_total: int = 0
     delivered_count: int = 0
     completed_member_count: int = 0
+    subtask_count: int = 0
+    subtask_status_summary: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
 
 
 class TaskDetailOut(TaskOut):
     """任务详情输出结构，补充成员、通知、延期与状态流水。"""
     members: list[dict] = Field(default_factory=list)
     milestones: list[dict] = Field(default_factory=list)
+    subtasks: list[dict] = Field(default_factory=list)
     notifications: list[dict] = Field(default_factory=list)
     delay_requests: list[dict] = Field(default_factory=list)
     events: list[dict] = Field(default_factory=list)
@@ -192,6 +208,7 @@ class NotificationRecipientOut(BaseModel):
     read_status: str
     read_status_text: str = ""
     retry_count: int = 0
+    content_snapshot: str = ""
     last_error: str = ""
 
 
@@ -199,6 +216,45 @@ class NotificationDetailOut(NotificationOut):
     """通知详情输出结构，包含正文快照与接收人明细。"""
     content_snapshot: str = ""
     recipients: list[NotificationRecipientOut] = Field(default_factory=list)
+
+
+class NotificationPreviewOut(BaseModel):
+    channel: str
+    channel_text: str = ""
+    notify_type: str
+    notify_type_text: str = ""
+    recipient_user_id: int | None = None
+    recipient_name: str = ""
+    recipient_email: str = ""
+    template_name: str = ""
+    template_version: int | None = None
+    subject: str = ""
+    content: str = ""
+    context: dict[str, str] = Field(default_factory=dict)
+
+
+class TaskImportHistoryOut(BaseModel):
+    """任务导入历史输出结构。"""
+    id: int
+    filename: str = ""
+    operator_name: str = ""
+    total_rows: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    overlap_count: int = 0
+    confirmed_duplicate: bool = False
+    overlap_samples: list[dict] = Field(default_factory=list)
+    failure_samples: list[dict] = Field(default_factory=list)
+    created_at: datetime | None = None
+
+
+class TaskImportPreviewOut(BaseModel):
+    """任务导入预检结果结构。"""
+    message: str
+    needs_confirmation: bool = False
+    overlap_count: int = 0
+    overlap_rate: float = 0
+    overlap_samples: list[dict] = Field(default_factory=list)
 
 
 class MailEventOut(BaseModel):

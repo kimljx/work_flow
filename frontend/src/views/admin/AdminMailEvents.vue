@@ -4,14 +4,14 @@
       <div>
         <div class="workspace-eyebrow">邮件列表</div>
         <h1 class="workspace-title">已匹配邮件</h1>
-        <p class="workspace-subtitle">这里仅展示命中模板的邮件记录，并提供详情页查看匹配内容和业务动作。</p>
+        <p class="workspace-subtitle">这里仅展示命中模板的邮件记录，并提供详情页查看匹配内容和业务动作。收件测试会根据当前启用的 IMAP 或 POP3 协议自动切换。</p>
       </div>
       <div class="toolbar">
         <button class="button secondary" @click="testMailSettings" :disabled="busy">
           测试 SMTP
         </button>
         <button class="button secondary" @click="testInboxSettings" :disabled="busy">
-          测试 IMAP
+          测试收件配置
         </button>
         <button class="button secondary" @click="initializeBaseline" :disabled="busy">
           设置扫描基准
@@ -23,6 +23,10 @@
     </div>
 
     <div class="stats">
+      <div class="stat-card compact">
+        <span class="metric-label">收件协议</span>
+        <strong>{{ pollState?.inbox_protocol_text || 'IMAP' }}</strong>
+      </div>
       <div class="stat-card compact">
         <span class="metric-label">自动收取</span>
         <strong>{{ pollState?.auto_poll_enabled ? '已开启' : '未开启' }}</strong>
@@ -171,9 +175,9 @@ async function testInboxSettings() {
   busy.value = true
   try {
     const { data } = await http.post('/admin/mail/inbox-test')
-    showFeedback('IMAP 测试结果', data.message, data.status === 'success' ? 'success' : 'error')
+    showFeedback('收件配置测试结果', data.message, data.status === 'success' ? 'success' : 'error')
   } catch (error) {
-    showFeedback('IMAP 测试结果', error.response?.data?.detail || 'IMAP 测试失败', 'error')
+    showFeedback('收件配置测试结果', error.response?.data?.detail || '收件配置测试失败', 'error')
   } finally {
     busy.value = false
   }

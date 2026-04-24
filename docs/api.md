@@ -64,3 +64,6 @@
 - 通知详情接口会返回通知正文快照，以及按成员拆分的送达状态、已读状态、重试次数、错误信息和成员专属正文。
 - `GET /tasks/{task_id}/notification-preview` 支持按渠道、通知类型和接收人预览最终渲染结果，方便直接核对负责人、任务创建人和接收人子任务等占位符。
 - 任务详情接口会返回子任务列表、子任务状态文案、通知记录、延期记录、状态时间线，以及任务创建人和创建时间等信息，供详情页直接展示。
+- `POST /admin/mail/test` 在遇到 SMTP SSL/TLS 握手错误时，会返回中文排障提示，明确提示 `465 / 587 / 25` 端口与 `SMTP_USE_SSL`、`SMTP_USE_TLS` 的推荐组合。
+- `POST /admin/mail/inbox-test` 与自动收件链路会读取 `IMAP_USE_SSL`、`IMAP_USE_TLS` 配置，支持明文、STARTTLS、SSL 三种收信连接方式。
+- `POST /admin/mail/inbox-test` 与 `POST /admin/mail/poll` 还会读取 `MAIL_INBOX_PROTOCOL`；当配置为 `pop3` 时，接口会按 `POP3_HOST / POP3_PORT / POP3_USER / POP3_PASSWORD / POP3_USE_SSL / POP3_USE_TLS` 工作。

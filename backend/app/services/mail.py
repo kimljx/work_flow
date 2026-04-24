@@ -7,9 +7,12 @@ from __future__ import annotations
 """
 
 import email
+import hashlib
 import imaplib
 import json
+import poplib
 import re
+import ssl
 import smtplib
 import socket
 from datetime import datetime
@@ -42,12 +45,122 @@ def _provider_hint() -> str:
     return ""
 
 
+def _inbox_protocol() -> str:
+    """返回当前启用的收件协议。"""
+    return "pop3" if settings.mail_inbox_protocol == "pop3" else "imap"
+
+
+def _inbox_protocol_text() -> str:
+    """返回当前收件协议的中文展示名称。"""
+    return "POP3" if _inbox_protocol() == "pop3" else "IMAP"
+
+
 def _generic_hint() -> str:
     """返回通用的 SMTP 排障建议。"""
     return (
         "请确认 SMTP_HOST 填写的是纯域名，不要包含 http:// 或 https:// 前缀；"
         "并检查 DNS 配置是否可解析该域名。"
     )
+
+
+def _smtp_security_mode_text() -> str:
+    """返回当前 SMTP 加密方式的中文说明。"""
+    if settings.smtp_use_ssl or settings.smtp_port == 465:
+        return "SSL 直连"
+    if settings.smtp_use_tls:
+        return "STARTTLS"
+    return "明文连接"
+
+
+def _smtp_security_recommendation() -> str:
+    """根据常见端口返回更贴近用户操作的配置建议。"""
+    if settings.smtp_port == 465:
+        return "465 端口通常需要设置 SMTP_USE_SSL=true 且 SMTP_USE_TLS=false。"
+    if settings.smtp_port == 587:
+        return "587 端口通常需要设置 SMTP_USE_TLS=true 且 SMTP_USE_SSL=false。"
+    if settings.smtp_port == 25:
+        return "25 端口通常保持 SMTP_USE_SSL=false，是否开启 SMTP_USE_TLS 取决于服务商是否要求 STARTTLS。"
+    return "请检查 SMTP 端口与 SMTP_USE_SSL、SMTP_USE_TLS 是否匹配，且不要同时开启两种加密方式。"
+
+
+def _smtp_ssl_error_hint(exc: ssl.SSLError) -> str:
+    """将底层 SSL 握手错误转换为更容易理解的中文提示。
+
+    说明:
+    - `_ssl.c:1007` 常见于 `WRONG_VERSION_NUMBER`，本质上多数是端口与加密方式不匹配；
+    - 这里统一转成“当前配置 + 推荐配置”的形式，便于运维直接修改 `.env`。
+    """
+    message = str(exc).lower()
+    if "wrong version number" in message:
+        return (
+            f"SMTP SSL/TLS 握手失败，当前使用的是“{_smtp_security_mode_text()}”，"
+            f"这通常不是协议版本真的错误，而是端口与加密方式不匹配。{_smtp_security_recommendation()}"
+        )
+    if "ssl" in message or "tls" in message:
+        return f"SMTP SSL/TLS 握手失败。{_smtp_security_recommendation()}"
+    return f"SMTP 建立安全连接失败：{exc}"
+
+
+def _imap_security_mode_text() -> str:
+    """返回当前 IMAP 加密方式的中文说明。"""
+    if settings.imap_use_ssl or settings.imap_port == 993:
+        return "SSL 直连"
+    if settings.imap_use_tls:
+        return "STARTTLS"
+    return "明文连接"
+
+
+def _imap_security_recommendation() -> str:
+    """根据常见 IMAP 端口返回推荐配置。"""
+    if settings.imap_port == 993:
+        return "993 端口通常需要设置 IMAP_USE_SSL=true 且 IMAP_USE_TLS=false。"
+    if settings.imap_port == 143:
+        return "143 端口通常需要设置 IMAP_USE_SSL=false，是否开启 IMAP_USE_TLS 取决于服务商是否要求 STARTTLS。"
+    return "请检查 IMAP 端口与 IMAP_USE_SSL、IMAP_USE_TLS 是否匹配，且不要同时开启两种加密方式。"
+
+
+def _imap_ssl_error_hint(exc: ssl.SSLError) -> str:
+    """将 IMAP 底层 SSL/TLS 错误转换为中文提示。"""
+    message = str(exc).lower()
+    if "wrong version number" in message:
+        return (
+            f"IMAP SSL/TLS 握手失败，当前使用的是“{_imap_security_mode_text()}”，"
+            f"这通常不是协议版本真的错误，而是端口与加密方式不匹配。{_imap_security_recommendation()}"
+        )
+    if "ssl" in message or "tls" in message:
+        return f"IMAP SSL/TLS 握手失败。{_imap_security_recommendation()}"
+    return f"IMAP 建立安全连接失败：{exc}"
+
+
+def _pop3_security_mode_text() -> str:
+    """返回当前 POP3 加密方式的中文说明。"""
+    if settings.pop3_use_ssl or settings.pop3_port == 995:
+        return "SSL 直连"
+    if settings.pop3_use_tls:
+        return "STLS"
+    return "明文连接"
+
+
+def _pop3_security_recommendation() -> str:
+    """根据常见 POP3 端口返回推荐配置。"""
+    if settings.pop3_port == 995:
+        return "995 端口通常需要设置 POP3_USE_SSL=true 且 POP3_USE_TLS=false。"
+    if settings.pop3_port == 110:
+        return "110 端口通常需要设置 POP3_USE_SSL=false，是否开启 POP3_USE_TLS 取决于服务商是否要求 STLS。"
+    return "请检查 POP3 端口与 POP3_USE_SSL、POP3_USE_TLS 是否匹配，且不要同时开启两种加密方式。"
+
+
+def _pop3_ssl_error_hint(exc: ssl.SSLError) -> str:
+    """将 POP3 底层 SSL/TLS 错误转换为中文提示。"""
+    message = str(exc).lower()
+    if "wrong version number" in message:
+        return (
+            f"POP3 SSL/TLS 握手失败，当前使用的是“{_pop3_security_mode_text()}”，"
+            f"这通常不是协议版本真的错误，而是端口与加密方式不匹配。{_pop3_security_recommendation()}"
+        )
+    if "ssl" in message or "tls" in message:
+        return f"POP3 SSL/TLS 握手失败。{_pop3_security_recommendation()}"
+    return f"POP3 建立安全连接失败：{exc}"
 
 
 def _decode_header_value(value: str | None) -> str:
@@ -113,6 +226,92 @@ def _open_smtp_connection() -> smtplib.SMTP:
     if use_ssl:
         return smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds)
     return smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds)
+
+
+def _open_imap_connection() -> imaplib.IMAP4:
+    """按配置自动选择普通 IMAP、STARTTLS 或 SSL IMAP 连接。"""
+    use_ssl = settings.imap_use_ssl or settings.imap_port == 993
+    if use_ssl:
+        return imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
+
+    mailbox = imaplib.IMAP4(settings.imap_host, settings.imap_port)
+    if settings.imap_use_tls:
+        # 仅在明确要求 STARTTLS 时升级连接，避免把纯明文端口误当成 SSL 端口处理。
+        mailbox.starttls()
+    return mailbox
+
+
+def _open_pop3_connection() -> poplib.POP3:
+    """按配置自动选择普通 POP3、STLS 或 SSL POP3 连接。"""
+    use_ssl = settings.pop3_use_ssl or settings.pop3_port == 995
+    if use_ssl:
+        return poplib.POP3_SSL(settings.pop3_host, settings.pop3_port, timeout=settings.smtp_timeout_seconds)
+
+    mailbox = poplib.POP3(settings.pop3_host, settings.pop3_port, timeout=settings.smtp_timeout_seconds)
+    if settings.pop3_use_tls:
+        # 仅在明确要求 STLS 时升级连接，避免把普通 110 端口误按 SSL 直连处理。
+        mailbox.stls()
+    return mailbox
+
+
+def _resolve_message_id(message: Message, raw_message: bytes, fallback_prefix: str) -> str:
+    """优先使用邮件头 Message-ID，缺失时退化为内容哈希，保证跨协议去重稳定。"""
+    header_message_id = _decode_header_value(message.get("Message-ID"))
+    if header_message_id:
+        return header_message_id
+    digest = hashlib.sha256(raw_message).hexdigest()[:24]
+    return f"{fallback_prefix}-{digest}"
+
+
+def _build_mail_event_from_message(
+    db: Session,
+    state: MailScanState,
+    raw_message: bytes,
+    fallback_prefix: str,
+) -> bool:
+    """将原始邮件落库并尝试匹配业务动作。
+
+    返回:
+    - `True` 表示本封邮件已新落库；
+    - `False` 表示该邮件因基线或重复被跳过。
+    """
+    message = email.message_from_bytes(raw_message)
+    message_time = _message_datetime(message)
+    if message_time and state.baseline_started_at and message_time <= state.baseline_started_at:
+        # 基线之前的历史邮件不参与自动处理，避免系统接入初期误操作旧数据。
+        return False
+
+    message_id = _resolve_message_id(message, raw_message, fallback_prefix)
+    existing = db.query(MailEvent).filter(MailEvent.message_id == message_id).first()
+    if existing:
+        return False
+
+    subject = _decode_header_value(message.get("Subject"))
+    from_addr = _decode_header_value(message.get("From"))
+    body = _extract_text_body(message)
+
+    matched_template = None
+    templates = sort_templates(db.query(Template).filter(Template.template_kind == "MAIL_REPLY", Template.enabled.is_(True)).all())
+    for template in templates:
+        if template_matches(template, subject, body):
+            matched_template = template
+            break
+
+    mail_event = MailEvent(
+        message_id=message_id,
+        from_addr=from_addr,
+        subject=subject,
+        body_digest=body[:1000],
+        resolved_template_id=matched_template.id if matched_template else None,
+        resolved_version=matched_template.version if matched_template else None,
+        process_status="MATCHED" if matched_template else "UNMATCHED",
+    )
+    db.add(mail_event)
+    db.flush()
+
+    if matched_template:
+        _apply_business_action(db, mail_event, matched_template, subject, body, from_addr)
+    return True
 
 
 def _mail_scan_state(db: Session) -> MailScanState:
@@ -224,6 +423,8 @@ def diagnose_mail_settings() -> dict[str, str]:
     """测试 SMTP 连通性与认证配置。"""
     if not settings.smtp_host or not settings.smtp_from_address:
         return {"status": "failed", "message": "请先配置 SMTP_HOST 与 SMTP_FROM_ADDRESS 后再测试。"}
+    if settings.smtp_use_ssl and settings.smtp_use_tls:
+        return {"status": "failed", "message": "SMTP_USE_SSL 与 SMTP_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
 
     try:
         with _open_smtp_connection() as server:
@@ -237,6 +438,8 @@ def diagnose_mail_settings() -> dict[str, str]:
         hint = _provider_hint()
         suffix = f" 提示：{hint}" if hint else ""
         return {"status": "success", "message": f"SMTP 连接与认证成功。{suffix}".strip()}
+    except ssl.SSLError as exc:
+        return {"status": "failed", "message": _smtp_ssl_error_hint(exc)}
     except socket.gaierror as exc:
         provider_hint = _provider_hint()
         hint = f"{_generic_hint()} {'提示：' + provider_hint if provider_hint else ''}".strip()
@@ -257,15 +460,47 @@ def diagnose_mail_settings() -> dict[str, str]:
         return {"status": "failed", "message": f"SMTP 测试失败：{exc}"}
 
 
-def diagnose_imap_settings() -> dict[str, str]:
-    """测试 IMAP 登录与收件箱访问能力。"""
+def diagnose_inbox_settings() -> dict[str, str]:
+    """测试当前收件协议的登录与访问能力。"""
+    if _inbox_protocol() == "pop3":
+        if not settings.pop3_host or not settings.pop3_user:
+            return {"status": "failed", "message": "请先配置 POP3_HOST 与 POP3_USER 后再测试。"}
+        if settings.pop3_use_ssl and settings.pop3_use_tls:
+            return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
+        mailbox = None
+        try:
+            mailbox = _open_pop3_connection()
+            mailbox.user(settings.pop3_user)
+            mailbox.pass_(settings.pop3_password)
+            return {"status": "success", "message": "POP3 连接与登录成功，可以正常读取收件箱。"}
+        except ssl.SSLError as exc:
+            return {"status": "failed", "message": _pop3_ssl_error_hint(exc)}
+        except socket.gaierror as exc:
+            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}。请确认 POP3_HOST 是否填写正确。"}
+        except socket.timeout:
+            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}"}
+        except poplib.error_proto as exc:
+            return {"status": "failed", "message": f"POP3 登录失败：{exc}"}
+        except Exception as exc:  # pragma: no cover
+            return {"status": "failed", "message": f"POP3 测试失败：{exc}"}
+        finally:
+            if mailbox is not None:
+                try:
+                    mailbox.quit()
+                except Exception:
+                    pass
+
     if not settings.imap_host or not settings.imap_user:
         return {"status": "failed", "message": "请先配置 IMAP_HOST 与 IMAP_USER 后再测试。"}
+    if settings.imap_use_ssl and settings.imap_use_tls:
+        return {"status": "failed", "message": "IMAP_USE_SSL 与 IMAP_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
     try:
-        with imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port) as mailbox:
+        with _open_imap_connection() as mailbox:
             mailbox.login(settings.imap_user, settings.imap_password)
             mailbox.select("INBOX")
         return {"status": "success", "message": "IMAP 连接与登录成功，可以正常读取收件箱。"}
+    except ssl.SSLError as exc:
+        return {"status": "failed", "message": _imap_ssl_error_hint(exc)}
     except socket.gaierror as exc:
         return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}。请确认 IMAP_HOST 是否填写正确。"}
     except socket.timeout:
@@ -274,6 +509,11 @@ def diagnose_imap_settings() -> dict[str, str]:
         return {"status": "failed", "message": f"IMAP 登录失败：{exc}"}
     except Exception as exc:  # pragma: no cover
         return {"status": "failed", "message": f"IMAP 测试失败：{exc}"}
+
+
+def diagnose_imap_settings() -> dict[str, str]:
+    """兼容旧调用名，内部统一转到当前收件协议诊断。"""
+    return diagnose_inbox_settings()
 
 
 def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type: str, sender: User, subject: str, body: str) -> None:
@@ -479,6 +719,73 @@ def _apply_business_action(db: Session, mail_event: MailEvent, template: Templat
         _append_mail_action(db, mail_event.id, template.notify_type, "SKIPPED", None, {"reason": "模板类型暂不支持"})
 
 
+def _poll_mailbox_via_imap(db: Session, state: MailScanState) -> dict[str, str | int]:
+    """使用 IMAP 扫描未读邮件。"""
+    if settings.imap_use_ssl and settings.imap_use_tls:
+        return {"status": "failed", "message": "IMAP_USE_SSL 与 IMAP_USE_TLS 不能同时开启，请修正配置后重试。", "count": 0}
+
+    with _open_imap_connection() as mailbox:
+        mailbox.login(settings.imap_user, settings.imap_password)
+        mailbox.select("INBOX")
+        status, data = mailbox.search(None, "UNSEEN")
+        if status != "OK":
+            return {"status": "failed", "message": "IMAP 未能查询未读邮件。", "count": 0}
+
+        message_numbers = [item for item in data[0].split() if item]
+        unread_total = len(message_numbers)
+        if settings.mail_inbox_max_scan > 0:
+            message_numbers = message_numbers[-settings.mail_inbox_max_scan :]
+
+        saved_count = 0
+        for imap_id in message_numbers:
+            fetch_status, raw_data = mailbox.fetch(imap_id, "(BODY.PEEK[])")
+            if fetch_status != "OK" or not raw_data or not raw_data[0]:
+                continue
+            raw_message = raw_data[0][1]
+            if _build_mail_event_from_message(db, state, raw_message, f"imap-{imap_id.decode()}"):
+                saved_count += 1
+
+        return {
+            "status": "success",
+            "message": f"本次通过 IMAP 扫描未读邮件 {len(message_numbers)} 封（总未读 {unread_total} 封），已落库 {saved_count} 封。",
+            "count": saved_count,
+        }
+
+
+def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str | int]:
+    """使用 POP3 拉取最近邮件。"""
+    if settings.pop3_use_ssl and settings.pop3_use_tls:
+        return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请修正配置后重试。", "count": 0}
+
+    mailbox = _open_pop3_connection()
+    try:
+        mailbox.user(settings.pop3_user)
+        mailbox.pass_(settings.pop3_password)
+        _, listings, _ = mailbox.list()
+        message_numbers = [int(line.split()[0]) for line in listings if line]
+        total_count = len(message_numbers)
+        if settings.mail_inbox_max_scan > 0:
+            message_numbers = message_numbers[-settings.mail_inbox_max_scan :]
+
+        saved_count = 0
+        for message_number in message_numbers:
+            _, lines, _ = mailbox.retr(message_number)
+            raw_message = b"\r\n".join(lines)
+            if _build_mail_event_from_message(db, state, raw_message, f"pop3-{message_number}"):
+                saved_count += 1
+
+        return {
+            "status": "success",
+            "message": f"本次通过 POP3 扫描最近邮件 {len(message_numbers)} 封（总邮件 {total_count} 封），已落库 {saved_count} 封。",
+            "count": saved_count,
+        }
+    finally:
+        try:
+            mailbox.quit()
+        except Exception:
+            pass
+
+
 def poll_mailbox(db: Session) -> dict[str, str | int]:
     """扫描邮箱未读邮件并写入系统。
 
@@ -487,7 +794,10 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
     - 仅扫描未读邮件，并限制单次最大扫描数量；
     - 邮件成功匹配回复模板后会尝试触发对应业务动作。
     """
-    if not settings.imap_host or not settings.imap_user:
+    if _inbox_protocol() == "pop3":
+        if not settings.pop3_host or not settings.pop3_user:
+            return {"status": "skipped", "message": "未配置 POP3，已跳过邮件收取。", "count": 0}
+    elif not settings.imap_host or not settings.imap_user:
         return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
 
     try:
@@ -503,74 +813,25 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
                 "count": 0,
             }
 
-        with imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port) as mailbox:
-            mailbox.login(settings.imap_user, settings.imap_password)
-            mailbox.select("INBOX")
-            status, data = mailbox.search(None, "UNSEEN")
-            if status != "OK":
-                return {"status": "failed", "message": "IMAP 未能查询未读邮件。", "count": 0}
-
-            message_ids = [item for item in data[0].split() if item]
-            unread_total = len(message_ids)
-            if settings.imap_max_unseen_scan > 0:
-                message_ids = message_ids[-settings.imap_max_unseen_scan :]
-            saved_count = 0
-            for imap_id in message_ids:
-                fetch_status, raw_data = mailbox.fetch(imap_id, "(BODY.PEEK[])")
-                if fetch_status != "OK" or not raw_data or not raw_data[0]:
-                    continue
-
-                raw_message = raw_data[0][1]
-                message = email.message_from_bytes(raw_message)
-                message_time = _message_datetime(message)
-                if message_time and state.baseline_started_at and message_time <= state.baseline_started_at:
-                    # 基线之前的历史邮件不参与自动处理，避免系统接入初期误操作旧数据。
-                    continue
-
-                message_id = _decode_header_value(message.get("Message-ID")) or f"imap-{imap_id.decode()}"
-                existing = db.query(MailEvent).filter(MailEvent.message_id == message_id).first()
-                if existing:
-                    continue
-
-                subject = _decode_header_value(message.get("Subject"))
-                from_addr = _decode_header_value(message.get("From"))
-                body = _extract_text_body(message)
-
-                matched_template = None
-                templates = sort_templates(db.query(Template).filter(Template.template_kind == "MAIL_REPLY", Template.enabled.is_(True)).all())
-                for template in templates:
-                    if template_matches(template, subject, body):
-                        matched_template = template
-                        break
-
-                mail_event = MailEvent(
-                    message_id=message_id,
-                    from_addr=from_addr,
-                    subject=subject,
-                    body_digest=body[:1000],
-                    resolved_template_id=matched_template.id if matched_template else None,
-                    resolved_version=matched_template.version if matched_template else None,
-                    process_status="MATCHED" if matched_template else "UNMATCHED",
-                )
-                db.add(mail_event)
-                db.flush()
-
-                if matched_template:
-                    _apply_business_action(db, mail_event, matched_template, subject, body, from_addr)
-
-                saved_count += 1
-
+        result = _poll_mailbox_via_pop3(db, state) if _inbox_protocol() == "pop3" else _poll_mailbox_via_imap(db, state)
+        if result.get("status") == "success":
             state.last_scan_at = shanghai_now_naive()
             db.commit()
-            return {
-                "status": "success",
-                "message": f"本次扫描未读邮件 {len(message_ids)} 封（总未读 {unread_total} 封），已落库 {saved_count} 封。",
-                "count": saved_count,
-            }
+        return result
     except socket.gaierror as exc:
+        if _inbox_protocol() == "pop3":
+            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}", "count": 0}
         return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}", "count": 0}
     except socket.timeout:
+        if _inbox_protocol() == "pop3":
+            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}", "count": 0}
         return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}", "count": 0}
+    except ssl.SSLError as exc:
+        if _inbox_protocol() == "pop3":
+            return {"status": "failed", "message": _pop3_ssl_error_hint(exc), "count": 0}
+        return {"status": "failed", "message": _imap_ssl_error_hint(exc), "count": 0}
+    except poplib.error_proto as exc:
+        return {"status": "failed", "message": f"POP3 登录失败：{exc}", "count": 0}
     except imaplib.IMAP4.error as exc:
         return {"status": "failed", "message": f"IMAP 登录失败：{exc}", "count": 0}
     except Exception as exc:  # pragma: no cover
@@ -584,6 +845,8 @@ def send_mail_notification(to_address: str, subject: str, content: str) -> dict[
         return {"status": "failed", "message": "未配置 SMTP，无法发送邮件。"}
     if not to_address:
         return {"status": "failed", "message": "缺少收件人地址，无法发送。"}
+    if settings.smtp_use_ssl and settings.smtp_use_tls:
+        return {"status": "failed", "message": "邮件发送失败：SMTP_USE_SSL 与 SMTP_USE_TLS 不能同时开启。"}
 
     message = EmailMessage()
     message["Subject"] = subject
@@ -602,6 +865,8 @@ def send_mail_notification(to_address: str, subject: str, content: str) -> dict[
                 server.login(settings.smtp_user, settings.smtp_password)
             server.send_message(message)
         return {"status": "sent", "message": "邮件发送成功"}
+    except ssl.SSLError as exc:
+        return {"status": "failed", "message": f"邮件发送失败：{_smtp_ssl_error_hint(exc)}"}
     except socket.gaierror as exc:
         return {"status": "failed", "message": f"邮件发送失败：SMTP 域名解析失败：{settings.smtp_host}，{exc}。{_generic_hint()}"}
     except socket.timeout:

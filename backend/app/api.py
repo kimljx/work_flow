@@ -68,7 +68,7 @@ from app.schemas import (
 from app.security import create_token, decode_token, get_current_user, require_admin, verify_password
 from app.services.audit import write_audit
 from app.services.delay import apply_delay_decision
-from app.services.mail import diagnose_imap_settings, diagnose_mail_settings, initialize_mail_scan_baseline, poll_mailbox
+from app.services.mail import diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline, poll_mailbox
 from app.services.notifications import create_due_reminders, create_notification_with_recipients, preview_notification_content
 from app.services.templates import sort_templates, template_matches, validate_template_content
 from app.timeutils import shanghai_now_naive
@@ -323,7 +323,10 @@ def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
     next_poll_at = None
     if settings.mail_auto_poll_enabled and last_scan_at:
         next_poll_at = last_scan_at + timedelta(seconds=interval_seconds)
+    protocol = settings.mail_inbox_protocol if settings.mail_inbox_protocol in {"imap", "pop3"} else "imap"
     return MailPollStateOut(
+        inbox_protocol=protocol,
+        inbox_protocol_text="POP3" if protocol == "pop3" else "IMAP",
         auto_poll_enabled=settings.mail_auto_poll_enabled,
         interval_seconds=interval_seconds,
         last_scan_at=last_scan_at,
@@ -1342,7 +1345,8 @@ def test_mail_settings(_: User = Depends(require_admin)) -> dict:
 
 @router.post("/admin/mail/inbox-test", response_model=dict)
 def test_mail_inbox(_: User = Depends(require_admin)) -> dict:
-    return diagnose_imap_settings()
+    """测试当前启用的收件协议配置。"""
+    return diagnose_inbox_settings()
 
 
 @router.post("/admin/mail/poll", response_model=dict)

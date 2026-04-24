@@ -64,10 +64,20 @@ class Settings:
     smtp_use_tls: bool
     smtp_use_ssl: bool
     smtp_timeout_seconds: int
+    mail_inbox_protocol: str
     imap_host: str
     imap_port: int
     imap_user: str
     imap_password: str
+    imap_use_tls: bool
+    imap_use_ssl: bool
+    pop3_host: str
+    pop3_port: int
+    pop3_user: str
+    pop3_password: str
+    pop3_use_tls: bool
+    pop3_use_ssl: bool
+    mail_inbox_max_scan: int
     imap_max_unseen_scan: int
     mail_auto_poll_enabled: bool
     mail_auto_poll_interval_seconds: int
@@ -93,10 +103,20 @@ settings = Settings(
     smtp_use_tls=os.getenv("SMTP_USE_TLS", "false").lower() == "true",
     smtp_use_ssl=os.getenv("SMTP_USE_SSL", "false").lower() == "true",
     smtp_timeout_seconds=int(os.getenv("SMTP_TIMEOUT_SECONDS", "20")),
+    mail_inbox_protocol=os.getenv("MAIL_INBOX_PROTOCOL", "imap").strip().lower() or "imap",
     imap_host=os.getenv("IMAP_HOST", ""),
     imap_port=int(os.getenv("IMAP_PORT", "993")),
     imap_user=os.getenv("IMAP_USER", ""),
     imap_password=os.getenv("IMAP_PASSWORD", ""),
+    imap_use_tls=os.getenv("IMAP_USE_TLS", "false").lower() == "true",
+    imap_use_ssl=os.getenv("IMAP_USE_SSL", "true").lower() == "true",
+    pop3_host=os.getenv("POP3_HOST", ""),
+    pop3_port=int(os.getenv("POP3_PORT", "110")),
+    pop3_user=os.getenv("POP3_USER", ""),
+    pop3_password=os.getenv("POP3_PASSWORD", ""),
+    pop3_use_tls=os.getenv("POP3_USE_TLS", "false").lower() == "true",
+    pop3_use_ssl=os.getenv("POP3_USE_SSL", "false").lower() == "true",
+    mail_inbox_max_scan=int(os.getenv("MAIL_INBOX_MAX_SCAN", os.getenv("IMAP_MAX_UNSEEN_SCAN", "20"))),
     imap_max_unseen_scan=int(os.getenv("IMAP_MAX_UNSEEN_SCAN", "20")),
     mail_auto_poll_enabled=os.getenv("MAIL_AUTO_POLL_ENABLED", "true").lower() == "true",
     mail_auto_poll_interval_seconds=int(os.getenv("MAIL_AUTO_POLL_INTERVAL_SECONDS", "300")),

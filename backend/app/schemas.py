@@ -287,6 +287,8 @@ class MailEventDetailOut(MailEventOut):
 
 class MailPollStateOut(BaseModel):
     """邮件轮询状态输出结构。"""
+    inbox_protocol: str = "imap"
+    inbox_protocol_text: str = "IMAP"
     auto_poll_enabled: bool
     interval_seconds: int
     last_scan_at: datetime | None = None

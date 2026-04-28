@@ -13,35 +13,56 @@
     </div>
 
     <div class="panel filter-shell">
-      <div class="filter-grid">
-        <input v-model="keyword" placeholder="搜索任务标题或负责人" />
-        <select v-model="status">
-          <option value="">全部状态</option>
-          <option value="not_started">未开始</option>
-          <option value="in_progress">进行中</option>
-          <option value="done">已完成</option>
-          <option value="canceled">已取消</option>
-        </select>
+      <div class="filter-grid task-filter-grid">
+        <div class="filter-field">
+          <span class="filter-label">关键词</span>
+          <input v-model="keyword" placeholder="搜索任务标题、负责人或备注" />
+        </div>
+        <div class="filter-field">
+          <span class="filter-label">主状态</span>
+          <select v-model="status">
+            <option value="">全部状态</option>
+            <option value="not_started">未开始</option>
+            <option value="in_progress">进行中</option>
+            <option value="done">已完成</option>
+            <option value="canceled">已取消</option>
+          </select>
+        </div>
+        <div class="filter-field">
+          <span class="filter-label">优先级</span>
+          <select v-model="priority">
+            <option value="">全部等级</option>
+            <option value="high">高</option>
+            <option value="medium">中</option>
+            <option value="low">低</option>
+          </select>
+        </div>
       </div>
-      <div class="filter-chip-group">
-        <button
-          v-for="item in subtaskFilterOptions"
-          :key="item.value"
-          :class="['button secondary small filter-chip', { active: subtaskStatusFilter === item.value }]"
-          @click="toggleSubtaskFilter(item.value)"
-        >
-          {{ item.label }}
-        </button>
+      <div class="filter-section">
+        <span class="filter-label">子任务筛选</span>
+        <div class="filter-chip-group">
+          <button
+            v-for="item in subtaskFilterOptions"
+            :key="item.value"
+            :class="['button secondary small filter-chip', { active: subtaskStatusFilter === item.value }]"
+            @click="toggleSubtaskFilter(item.value)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
       </div>
-      <div class="filter-chip-group">
-        <button
-          v-for="item in advancedFilterOptions"
-          :key="item.key"
-          :class="['button secondary small filter-chip', { active: advancedFilters[item.key] }]"
-          @click="toggleAdvancedFilter(item.key)"
-        >
-          {{ item.label }}
-        </button>
+      <div class="filter-section">
+        <span class="filter-label">高级筛选</span>
+        <div class="filter-chip-group">
+          <button
+            v-for="item in advancedFilterOptions"
+            :key="item.key"
+            :class="['button secondary small filter-chip', { active: advancedFilters[item.key] }]"
+            @click="toggleAdvancedFilter(item.key)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
       </div>
       <div class="filter-summary">
         当前展示 {{ filteredTasks.length }} 条任务
@@ -64,9 +85,7 @@
         <div class="task-work-main">
           <div class="task-work-heading">
             <div>
-              <div class="task-work-kicker">任务编号 #{{
-                task.id
-              }}</div>
+              <div class="task-work-kicker">任务编号 #{{ task.id }}</div>
               <h2>{{ task.title }}</h2>
               <p>{{ task.content }}</p>
             </div>
@@ -121,6 +140,7 @@
           <span :class="statusUi(task).tone">{{ statusUi(task).text }}</span>
           <div class="task-side-note">优先级 {{ task.priority_text }}</div>
           <div class="task-side-note">提醒设置 {{ task.due_remind_days > 0 ? `提前 ${task.due_remind_days} 天` : '未开启' }}</div>
+          <div class="task-side-note" v-if="Number(task.delay_days || 0) > 0">当前已延期 {{ task.delay_days }} 天</div>
           <div class="toolbar task-actions">
             <router-link class="button secondary" :to="{ path: `/admin/tasks/${task.id}`, query: { from: route.fullPath } }">详情</router-link>
             <button class="button secondary" @click="remind(task.id)">提醒</button>
@@ -147,6 +167,7 @@ const router = useRouter()
 const tasks = ref([])
 const keyword = ref('')
 const status = ref('')
+const priority = ref('')
 const subtaskStatusFilter = ref('')
 const page = ref(1)
 const pageSize = 8
@@ -172,21 +193,31 @@ const activeFilterTexts = computed(() => {
   const labels = []
   if (status.value) {
     const statusText = {
-      not_started: '主状态=未开始',
-      in_progress: '主状态=进行中',
-      done: '主状态=已完成',
-      canceled: '主状态=已取消',
+      not_started: '主状态: 未开始',
+      in_progress: '主状态: 进行中',
+      done: '主状态: 已完成',
+      canceled: '主状态: 已取消',
     }[status.value]
     if (statusText) {
       labels.push(statusText)
     }
   }
+  if (priority.value) {
+    const priorityText = {
+      high: '优先级: 高',
+      medium: '优先级: 中',
+      low: '优先级: 低',
+    }[priority.value]
+    if (priorityText) {
+      labels.push(priorityText)
+    }
+  }
   if (subtaskStatusFilter.value) {
     const subtaskText = {
-      in_progress: '子任务=进行中',
-      pending: '子任务=待开始',
-      done: '子任务=已完成',
-      canceled: '子任务=已取消',
+      in_progress: '子任务: 进行中',
+      pending: '子任务: 待开始',
+      done: '子任务: 已完成',
+      canceled: '子任务: 已取消',
       empty: '无子任务',
     }[subtaskStatusFilter.value]
     if (subtaskText) {
@@ -211,11 +242,13 @@ const filteredTasks = computed(() =>
     const matchKeyword =
       !query ||
       item.title.includes(query) ||
-      (item.owner_name || '').includes(query)
+      (item.owner_name || '').includes(query) ||
+      (item.remark || '').includes(query)
     const matchStatus = !status.value || item.main_status === status.value
+    const matchPriority = !priority.value || item.priority === priority.value
     const matchSubtask = matchSubtaskFilter(item)
     const matchAdvanced = matchAdvancedFilters(item)
-    return matchKeyword && matchStatus && matchSubtask && matchAdvanced
+    return matchKeyword && matchStatus && matchPriority && matchSubtask && matchAdvanced
   })
 )
 
@@ -224,12 +257,16 @@ const pagedTasks = computed(() => {
   return filteredTasks.value.slice(start, start + pageSize)
 })
 
-watch([keyword, status, subtaskStatusFilter, () => advancedFilters.delayedOnly, () => advancedFilters.lockedOnly, () => advancedFilters.lowDeliveryOnly], () => {
-  page.value = 1
-})
+watch(
+  [keyword, status, priority, subtaskStatusFilter, () => advancedFilters.delayedOnly, () => advancedFilters.lockedOnly, () => advancedFilters.lowDeliveryOnly],
+  () => {
+    page.value = 1
+  }
+)
 
 /**
  * 返回任务主状态的视觉展示配置。
+ * 左侧色条仅代表主状态，不再混入延期风险，避免用户把“延期”和“状态”混为一类。
  * @param {object} task 当前任务对象。
  * @returns {{tone: string, dot: string, text: string}} 列表卡片使用的状态样式与文案。
  */
@@ -263,7 +300,6 @@ function matchSubtaskFilter(task) {
 
 /**
  * 判断任务是否命中高级组合筛选条件。
- * 这些条件与主状态、子任务状态筛选叠加使用，用于快速定位“进行中且延期”等交叉场景。
  * @param {object} task 当前任务对象。
  * @returns {boolean} 是否满足当前高级筛选组合。
  */
@@ -281,8 +317,7 @@ function matchAdvancedFilters(task) {
 }
 
 /**
- * 切换列表顶部的子任务快捷筛选。
- * 再次点击同一项时会恢复为“全部子任务”，减少用户来回清空筛选的操作成本。
+ * 切换子任务快捷筛选。
  * @param {string} value 目标筛选值。
  * @returns {void}
  */
@@ -291,8 +326,7 @@ function toggleSubtaskFilter(value) {
 }
 
 /**
- * 切换高级组合筛选项。
- * 支持与主状态和子任务筛选同时生效，用于快速锁定复杂业务场景。
+ * 切换高级筛选项。
  * @param {'delayedOnly' | 'lockedOnly' | 'lowDeliveryOnly'} key 高级筛选键。
  * @returns {void}
  */
@@ -310,7 +344,7 @@ async function loadTasks() {
 }
 
 /**
- * 处理从导入页返回任务列表后的刷新提示。
+ * 处理导入任务后回到列表页时的刷新提示。
  * @returns {Promise<void>}
  */
 async function handleRouteRefresh() {

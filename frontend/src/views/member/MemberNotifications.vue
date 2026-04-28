@@ -25,9 +25,9 @@
           <tr>
             <th>任务</th>
             <th>渠道</th>
-            <th>通知类型</th>
+            <th>提醒场景</th>
             <th>状态</th>
-            <th>送达/已读</th>
+            <th>送达/反馈</th>
             <th>通知时间</th>
             <th>操作</th>
           </tr>
@@ -39,9 +39,12 @@
           <tr v-for="item in pagedNotifications" :key="item.id">
             <td>{{ item.task_title || '-' }}</td>
             <td>{{ item.channel_text }}</td>
-            <td>{{ item.notify_type_text || notifyTypeText(item.notify_type) }}</td>
+            <td>
+              <div>{{ item.notify_scene_text || item.notify_type_text || notifyTypeText(item.notify_type) }}</div>
+              <div class="subtle-text" v-if="item.remind_focus">{{ item.remind_focus }}</div>
+            </td>
             <td>{{ item.status_text }}</td>
-            <td>{{ item.delivered_count }}/{{ item.read_count }}</td>
+            <td>{{ item.delivered_count }}/{{ item.read_count }} {{ item.feedback_label }}</td>
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>
               <router-link class="button secondary small" :to="{ path: `/member/notifications/${item.id}`, query: { from: route.fullPath } }">查看详情</router-link>

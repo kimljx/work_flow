@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.constants import (
+    ADMIN_ROLES,
     DELAY_STATUS_LABELS,
     MAIL_ACTION_STATUS_LABELS,
     MAIL_EVENT_STATUS_LABELS,
@@ -30,6 +31,7 @@ from app.constants import (
     NOTIFICATION_TYPE_LABELS,
     PRIORITY_LABELS,
     READ_STATUS_LABELS,
+    REPLY_STATUS_LABELS,
     ROLE_LABELS,
     SUBTASK_STATUS_LABELS,
     TEMPLATE_NOTIFY_TYPE_OPTIONS,
@@ -94,6 +96,33 @@ TASK_IMPORT_FIELDS = (
 )
 
 
+def is_admin_role(role: str) -> bool:
+    """判断角色是否属于管理角色。"""
+    return role in ADMIN_ROLES
+
+
+def validate_user_role(role: str) -> None:
+    """校验用户角色编码，避免录入无法识别的权限角色。"""
+    if role not in ROLE_LABELS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户角色不存在")
+
+
+def cleanup_task_scheduled_notifications(db: Session, task_id: int) -> int:
+    """删除任务相关的定时提醒通知，并返回清理数量。
+
+    当前系统的定时任务由扫描器按任务配置生成 `due_remind` 通知记录；删除任务时同步清理这些待办提醒，
+    可避免列表与通知中心继续出现已经删除任务的定时提醒痕迹。
+    """
+    notifications = db.query(Notification).filter(Notification.task_id == task_id, Notification.notify_type == "due_remind").all()
+    notification_ids = [item.id for item in notifications]
+    if not notification_ids:
+        return 0
+    # 先清理接收人明细，避免保留指向已删除定时提醒的孤儿记录。
+    db.query(NotificationRecipient).filter(NotificationRecipient.notification_id.in_(notification_ids)).delete(synchronize_session=False)
+    db.query(Notification).filter(Notification.id.in_(notification_ids)).delete(synchronize_session=False)
+    return len(notification_ids)
+
+
 def task_status_text(status: str) -> str:
     """将任务状态编码转换为中文展示文案。"""
     return TASK_STATUS_LABELS.get(status, status)
@@ -125,8 +154,15 @@ def notification_status_text(status: str) -> str:
     return NOTIFICATION_STATUS_LABELS.get(status, status)
 
 
-def read_status_text(status: str) -> str:
-    return READ_STATUS_LABELS.get(status, status)
+def read_status_text(status: str, channel: str) -> str:
+    """按渠道返回“已读/已回复”状态文案。"""
+    labels = REPLY_STATUS_LABELS if channel == "email" else READ_STATUS_LABELS
+    return labels.get(status, status)
+
+
+def feedback_label_text(channel: str) -> str:
+    """按渠道返回列表与详情页应展示的反馈口径。"""
+    return "回复" if channel == "email" else "已读"
 
 
 def serialize_user(user: User) -> UserOut:
@@ -197,6 +233,28 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
     )
 
 
+def extract_remind_focus(content_snapshot: str) -> str:
+    """从通知正文快照中提取“当前提醒重点”，兼容历史已落库通知正文。"""
+    if not content_snapshot:
+        return ""
+    marker = "当前提醒重点："
+    for line in content_snapshot.replace("\r\n", "\n").split("\n"):
+        if line.startswith(marker):
+            return line.replace(marker, "", 1).strip()
+    return ""
+
+
+def notification_scene_text(notify_type: str, remind_focus: str) -> str:
+    """将提醒场景转换为更贴近业务的中文文案，方便列表和详情快速识别。"""
+    if notify_type != "manual_remind":
+        return NOTIFICATION_TYPE_LABELS.get(notify_type, notify_type)
+    if remind_focus.startswith("请优先跟进子任务"):
+        return "子任务提醒"
+    if remind_focus.startswith("请围绕里程碑"):
+        return "里程碑提醒"
+    return "任务提醒"
+
+
 def serialize_notification(notification: Notification, db: Session) -> NotificationOut:
     """将通知主记录扩展为包含统计信息的列表项。"""
     recipients = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).all()
@@ -205,6 +263,7 @@ def serialize_notification(notification: Notification, db: Session) -> Notificat
         task = db.query(Task).filter(Task.id == notification.task_id).first()
         if task:
             task_title = task.title
+    remind_focus = extract_remind_focus(notification.content_snapshot)
     return NotificationOut(
         id=notification.id,
         task_id=notification.task_id,
@@ -212,6 +271,8 @@ def serialize_notification(notification: Notification, db: Session) -> Notificat
         channel=notification.channel,
         notify_type=notification.notify_type,
         notify_type_text=NOTIFICATION_TYPE_LABELS.get(notification.notify_type, notification.notify_type),
+        notify_scene_text=notification_scene_text(notification.notify_type, remind_focus),
+        feedback_label=feedback_label_text(notification.channel),
         status=notification.status,
         channel_text=notification_channel_text(notification.channel),
         status_text=notification_status_text(notification.status),
@@ -220,6 +281,7 @@ def serialize_notification(notification: Notification, db: Session) -> Notificat
         read_count=sum(1 for item in recipients if item.read_status == "read"),
         retry_total=sum(item.retry_count for item in recipients),
         last_error=next((item.last_error for item in recipients if item.last_error), ""),
+        remind_focus=remind_focus,
         created_at=notification.created_at,
     )
 
@@ -227,6 +289,8 @@ def serialize_notification(notification: Notification, db: Session) -> Notificat
 def serialize_notification_recipient(recipient: NotificationRecipient, db: Session) -> NotificationRecipientOut:
     """序列化通知接收人明细。"""
     user = db.query(User).filter(User.id == recipient.user_id).first()
+    notification = db.query(Notification).filter(Notification.id == recipient.notification_id).first()
+    channel = notification.channel if notification else "email"
     return NotificationRecipientOut(
         user_id=recipient.user_id,
         name=user.name if user else "",
@@ -236,7 +300,8 @@ def serialize_notification_recipient(recipient: NotificationRecipient, db: Sessi
         delivery_status=recipient.delivery_status,
         delivery_status_text=notification_status_text(recipient.delivery_status),
         read_status=recipient.read_status,
-        read_status_text=read_status_text(recipient.read_status),
+        read_status_text=read_status_text(recipient.read_status, channel),
+        feedback_label=feedback_label_text(channel),
         retry_count=recipient.retry_count,
         content_snapshot=recipient.content_snapshot,
         last_error=recipient.last_error,
@@ -312,6 +377,7 @@ def serialize_mail_event_detail(mail_event: MailEvent, db: Session) -> MailEvent
         template_id=template.id if template else None,
         template_kind=template.template_kind if template else "",
         content=template.content if template else "",
+        original_body=mail_event.original_body,
     )
 
 
@@ -336,7 +402,7 @@ def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
 
 def ensure_notification_access(notification: Notification, current_user: User, db: Session) -> None:
     """校验当前用户是否允许查看某条通知详情。"""
-    if current_user.role == "admin":
+    if is_admin_role(current_user.role):
         return
     if notification.task_id is None:
         raise HTTPException(status_code=403, detail="无权访问该通知")
@@ -710,6 +776,7 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
 
 @router.post("/admin/users", response_model=UserOut)
 def create_user(payload: UserCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> UserOut:
+    validate_user_role(payload.role)
     user = User(
         username=payload.username,
         password_hash=build_default_password_hash(settings.default_password),
@@ -729,6 +796,7 @@ def create_user(payload: UserCreate, current_user: User = Depends(require_admin)
 
 @router.put("/admin/users/{user_id}", response_model=UserOut)
 def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> UserOut:
+    validate_user_role(payload.role)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -813,7 +881,7 @@ def list_tasks(current_user: User = Depends(get_current_user), db: Session = Dep
     管理员可查看全部未删除任务，成员仅可查看自己参与的任务。
     """
     query = db.query(Task).filter(Task.deleted_at.is_(None))
-    if current_user.role != "admin":
+    if not is_admin_role(current_user.role):
         task_ids = [tm.task_id for tm in db.query(TaskMember).filter(TaskMember.user_id == current_user.id).all()]
         query = query.filter(Task.id.in_(task_ids))
     return [serialize_task(task, db) for task in query.order_by(Task.id.desc()).all()]
@@ -1000,7 +1068,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if current_user.role != "admin":
+    if not is_admin_role(current_user.role):
         membership = db.query(TaskMember).filter(TaskMember.task_id == task_id, TaskMember.user_id == current_user.id).first()
         if not membership:
             raise HTTPException(status_code=403, detail="无权访问该任务")
@@ -1150,8 +1218,18 @@ def delete_task(task_id: int, current_user: User = Depends(require_admin), db: S
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    cleaned_reminders = cleanup_task_scheduled_notifications(db, task.id)
+    task.due_remind_days = 0
     task.deleted_at = shanghai_now_naive()
-    write_audit(db, current_user.id, "DELETE_TASK", "Task", task.id, {"deleted_at": None}, {"deleted_at": task.deleted_at.isoformat()})
+    write_audit(
+        db,
+        current_user.id,
+        "DELETE_TASK",
+        "Task",
+        task.id,
+        {"deleted_at": None},
+        {"deleted_at": task.deleted_at.isoformat(), "cleaned_due_reminders": cleaned_reminders},
+    )
     db.commit()
     return ApiMessage(message="任务已删除")
 
@@ -1190,6 +1268,34 @@ def unlock_task(task_id: int, current_user: User = Depends(require_admin), db: S
     task.state_locked = False
     db.commit()
     return ApiMessage(message="任务状态已解锁")
+
+
+def _send_task_reminders(
+    db: Session,
+    task: Task,
+    notify_type: str,
+    extra_context: dict[str, str] | None = None,
+    recipient_user_ids: list[int] | None = None,
+) -> None:
+    """统一发送任务相关提醒，保证邮件与即时消息正文保持同一份上下文。"""
+    create_notification_with_recipients(
+        db,
+        task.id,
+        "email",
+        notify_type,
+        "",
+        recipient_user_ids=recipient_user_ids,
+        extra_context=extra_context,
+    )
+    create_notification_with_recipients(
+        db,
+        task.id,
+        "qax",
+        notify_type,
+        "",
+        recipient_user_ids=recipient_user_ids,
+        extra_context=extra_context,
+    )
 
 
 @router.get("/templates", response_model=list[dict])
@@ -1295,7 +1401,7 @@ def preview_match(payload: TemplatePreviewRequest, _: User = Depends(require_adm
 @router.get("/notifications", response_model=list[NotificationOut])
 def list_notifications(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[NotificationOut]:
     query = db.query(Notification)
-    if current_user.role != "admin":
+    if not is_admin_role(current_user.role):
         task_ids = [tm.task_id for tm in db.query(TaskMember).filter(TaskMember.user_id == current_user.id).all()]
         query = query.filter(Notification.task_id.in_(task_ids))
     return [serialize_notification(item, db) for item in query.order_by(Notification.id.desc()).all()]
@@ -1364,11 +1470,115 @@ def remind_task(task_id: int, current_user: User = Depends(require_admin), db: S
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    create_notification_with_recipients(db, task.id, "email", "manual_remind", "")
-    create_notification_with_recipients(db, task.id, "qax", "manual_remind", "")
-    write_audit(db, current_user.id, "REMIND_TASK", "Task", task.id, {}, {"notification_created": True})
+    _send_task_reminders(
+        db,
+        task,
+        "manual_remind",
+        extra_context={"remind_focus": "主任务整体进度跟进"},
+    )
+    write_audit(
+        db,
+        current_user.id,
+        "REMIND_TASK",
+        "Task",
+        task.id,
+        {},
+        {"notification_created": True, "remind_focus": "主任务整体进度跟进"},
+    )
     db.commit()
     return ApiMessage(message="已创建提醒通知")
+
+
+@router.post("/tasks/{task_id}/subtasks/{subtask_id}/remind", response_model=ApiMessage)
+def remind_task_subtask(
+    task_id: int,
+    subtask_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ApiMessage:
+    """按子任务定向发送提醒，仅触达当前子任务执行人。"""
+    task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    subtask = (
+        db.query(TaskSubtask)
+        .filter(TaskSubtask.id == subtask_id, TaskSubtask.task_id == task.id)
+        .first()
+    )
+    if not subtask:
+        raise HTTPException(status_code=404, detail="子任务不存在")
+    if subtask.status == "done":
+        raise HTTPException(status_code=400, detail="已完成的子任务无需再次提醒")
+
+    assignee_name = subtask.assignee.name if subtask.assignee else f"成员#{subtask.assignee_id}"
+    focus_text = f"请优先跟进子任务“{subtask.title}”"
+    subtask_summary = f"1. {subtask.title}（执行人：{assignee_name}）"
+    if subtask.content:
+        subtask_summary = f"{subtask_summary}：{subtask.content}"
+    _send_task_reminders(
+        db,
+        task,
+        "manual_remind",
+        recipient_user_ids=[subtask.assignee_id],
+        extra_context={
+            "remind_focus": focus_text,
+            "subtask_summary": subtask_summary,
+            "subtask_brief": subtask_summary,
+        },
+    )
+    write_audit(
+        db,
+        current_user.id,
+        "REMIND_SUBTASK",
+        "TaskSubtask",
+        subtask.id,
+        {},
+        {"task_id": task.id, "notification_created": True, "remind_focus": focus_text},
+    )
+    db.commit()
+    return ApiMessage(message="已向子任务执行人发送提醒")
+
+
+@router.post("/tasks/{task_id}/milestones/{milestone_id}/remind", response_model=ApiMessage)
+def remind_task_milestone(
+    task_id: int,
+    milestone_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ApiMessage:
+    """按里程碑节点发送提醒，帮助成员聚焦当前阶段目标。"""
+    task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    milestone = (
+        db.query(TaskMilestone)
+        .filter(TaskMilestone.id == milestone_id, TaskMilestone.task_id == task.id)
+        .first()
+    )
+    if not milestone:
+        raise HTTPException(status_code=404, detail="里程碑不存在")
+    if milestone.status == "done":
+        raise HTTPException(status_code=400, detail="已完成的里程碑无需再次提醒")
+
+    planned_text = milestone.planned_at.strftime("%Y-%m-%d %H:%M") if milestone.planned_at else "未设置"
+    focus_text = f"请围绕里程碑“{milestone.name}”推进，节点时间：{planned_text}"
+    _send_task_reminders(
+        db,
+        task,
+        "manual_remind",
+        extra_context={"remind_focus": focus_text},
+    )
+    write_audit(
+        db,
+        current_user.id,
+        "REMIND_MILESTONE",
+        "TaskMilestone",
+        milestone.id,
+        {},
+        {"task_id": task.id, "notification_created": True, "remind_focus": focus_text},
+    )
+    db.commit()
+    return ApiMessage(message="已向任务成员发送里程碑提醒")
 
 
 @router.post("/tasks/due-remind/run", response_model=ApiMessage)
@@ -1393,7 +1603,7 @@ def create_delay_request(payload: DelayRequestCreate, current_user: User = Depen
     )
     db.add(request_obj)
     db.flush()
-    admin_ids = [item.id for item in db.query(User).filter(User.role == "admin", User.is_active.is_(True)).all()]
+    admin_ids = [item.id for item in db.query(User).filter(User.role.in_(tuple(ADMIN_ROLES)), User.is_active.is_(True)).all()]
     extra_context = {
         "delay_request_id": request_obj.id,
         "applicant_name": current_user.name,

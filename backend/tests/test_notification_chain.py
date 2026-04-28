@@ -51,9 +51,9 @@ class NotificationChainTestCase(unittest.TestCase):
 
             task = Task(
                 title="链路测试任务",
-                content="测试",
+                content="主任务正文说明",
                 priority="medium",
-                remark="",
+                remark="主任务备注说明",
                 start_at=datetime(2026, 4, 1, 9, 0, 0),
                 end_at=datetime(2026, 4, 2, 18, 0, 0),
                 planned_minutes=33 * 60,
@@ -109,6 +109,9 @@ class NotificationChainTestCase(unittest.TestCase):
             db.commit()
             self.assertIn("负责人：任务负责人", notification.content_snapshot)
             self.assertIn("任务创建人：系统管理员", notification.content_snapshot)
+            self.assertIn("主任务详情：主任务正文说明", notification.content_snapshot)
+            self.assertIn("主任务备注：主任务备注说明", notification.content_snapshot)
+            self.assertEqual(notification.notify_type, "task_created")
             recipient_record = (
                 db.query(NotificationRecipient)
                 .filter(NotificationRecipient.notification_id == notification.id, NotificationRecipient.user_id == 3)
@@ -118,6 +121,7 @@ class NotificationChainTestCase(unittest.TestCase):
             self.assertIn("整理测试子任务", recipient_record.content_snapshot)
             self.assertIn("任务创建人：系统管理员", recipient_record.content_snapshot)
             self.assertIn("负责人：任务负责人", recipient_record.content_snapshot)
+            self.assertIn("当前提醒重点：主任务整体进度跟进", recipient_record.content_snapshot)
 
     def test_preview_notification_content_returns_correct_context(self) -> None:
         """预览链路应与真实发送链路保持一致，方便管理员直接排查占位符问题。"""
@@ -134,10 +138,14 @@ class NotificationChainTestCase(unittest.TestCase):
             self.assertEqual(preview["template_name"], "默认邮件发送模板")
             self.assertIn("任务创建人：系统管理员", preview["content"])
             self.assertIn("负责人：任务负责人", preview["content"])
+            self.assertIn("主任务详情：主任务正文说明", preview["content"])
+            self.assertIn("主任务备注：主任务备注说明", preview["content"])
             self.assertIn("整理测试子任务", preview["content"])
             self.assertEqual(preview["context"]["recipient_name"], "默认成员")
             self.assertEqual(preview["context"]["owner_name"], "任务负责人")
             self.assertEqual(preview["context"]["creator_name"], "系统管理员")
+            self.assertEqual(preview["context"]["task_remark"], "主任务备注说明")
+            self.assertEqual(preview["context"]["remind_focus"], "主任务整体进度跟进")
 
     def test_preview_uses_database_rows_instead_of_task_relationship_cache(self) -> None:
         """创建任务瞬间即使关系缓存还没挂到 task 对象上，也要能渲染出负责人和子任务。"""

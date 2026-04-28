@@ -15,6 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.constants import ADMIN_ROLES
 from app.db import get_db
 from app.models import User
 from app.timeutils import shanghai_now
@@ -69,7 +70,10 @@ def get_current_user(
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """要求当前用户必须是管理员，否则返回 403。"""
-    if current_user.role != "admin":
+    """要求当前用户必须属于管理角色，否则返回 403。
+
+    系统管理员与普通管理员都可以调用管理接口；两者的差异主要体现在前端菜单展示范围。
+    """
+    if current_user.role not in ADMIN_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return current_user

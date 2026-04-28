@@ -185,6 +185,8 @@ class NotificationOut(BaseModel):
     channel: str
     notify_type: str
     notify_type_text: str = ""
+    notify_scene_text: str = ""
+    feedback_label: str = ""
     status: str
     channel_text: str = ""
     status_text: str = ""
@@ -193,11 +195,12 @@ class NotificationOut(BaseModel):
     read_count: int = 0
     retry_total: int = 0
     last_error: str = ""
+    remind_focus: str = ""
     created_at: datetime | None = None
 
 
 class NotificationRecipientOut(BaseModel):
-    """通知详情中的成员送达状态结构。"""
+    """通知详情中的成员送达与回复状态结构。"""
     user_id: int
     name: str = ""
     email: str = ""
@@ -207,6 +210,7 @@ class NotificationRecipientOut(BaseModel):
     delivery_status_text: str = ""
     read_status: str
     read_status_text: str = ""
+    feedback_label: str = ""
     retry_count: int = 0
     content_snapshot: str = ""
     last_error: str = ""
@@ -283,6 +287,7 @@ class MailEventDetailOut(MailEventOut):
     template_id: int | None = None
     template_kind: str = ""
     content: str = ""
+    original_body: str = ""
 
 
 class MailPollStateOut(BaseModel):

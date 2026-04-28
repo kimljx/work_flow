@@ -14,6 +14,7 @@
         <div>
           <label>角色</label>
           <select v-model="form.role">
+            <option value="system_admin">系统管理员</option>
             <option value="admin">管理员</option>
             <option value="member">成员</option>
           </select>

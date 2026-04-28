@@ -8,13 +8,13 @@
       <nav>
         <router-link v-if="auth.isAdmin" to="/admin/dashboard">{{ labels.dashboard }}</router-link>
         <router-link v-if="auth.isAdmin" to="/admin/tasks">{{ labels.tasks }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/templates">{{ labels.templates }}</router-link>
+        <router-link v-if="auth.isSystemAdmin" to="/admin/templates">{{ labels.templates }}</router-link>
         <router-link v-if="auth.isAdmin" to="/admin/notifications">{{ labels.notifications }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/mail-events">{{ labels.mailEvents }}</router-link>
+        <router-link v-if="auth.isSystemAdmin" to="/admin/mail-events">{{ labels.mailEvents }}</router-link>
         <router-link v-if="auth.isAdmin" to="/admin/delay-requests">{{ labels.delayRequests }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/users">{{ labels.users }}</router-link>
+        <router-link v-if="auth.isSystemAdmin" to="/admin/users">{{ labels.users }}</router-link>
         <router-link v-if="auth.isAdmin" to="/admin/import-export">{{ labels.importExport }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/audit-logs">{{ labels.auditLogs }}</router-link>
+        <router-link v-if="auth.isSystemAdmin" to="/admin/audit-logs">{{ labels.auditLogs }}</router-link>
         <router-link v-if="auth.isMember" to="/member/tasks">{{ labels.memberTasks }}</router-link>
         <router-link v-if="auth.isMember" to="/member/notifications">{{ labels.memberNotifications }}</router-link>
       </nav>
@@ -22,7 +22,7 @@
     <main class="content" :class="{ 'content-full': !auth.isLoggedIn }">
       <div v-if="auth.isLoggedIn" class="top-note">
         <span>{{ labels.currentUser }}{{ auth.profile?.name || auth.profile?.username }}</span>
-        <span class="top-note-role">{{ auth.profile?.role_text || (auth.isAdmin ? labels.admin : labels.member) }}</span>
+        <span class="top-note-role">{{ auth.profile?.role_text || fallbackRoleText }}</span>
         <button class="button secondary small" :disabled="loading.isBusy" @click="handleLogout">{{ labels.logout }}</button>
       </div>
       <router-view />
@@ -57,6 +57,7 @@ const labels = {
   memberTasks: '我的任务',
   memberNotifications: '我的通知',
   currentUser: '当前登录：',
+  systemAdmin: '系统管理员',
   admin: '管理员',
   member: '成员',
   logout: '退出登录',
@@ -67,6 +68,10 @@ const loading = useLoadingStore()
 const route = useRoute()
 const router = useRouter()
 const isPublicPage = computed(() => Boolean(route.meta.public))
+const fallbackRoleText = computed(() => {
+  if (auth.isSystemAdmin) return labels.systemAdmin
+  return auth.isAdmin ? labels.admin : labels.member
+})
 
 function handleLogout() {
   auth.logout()

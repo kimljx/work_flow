@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import email
 import hashlib
+import html as html_lib
 import imaplib
 import json
 import poplib
@@ -24,7 +25,8 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
+from app.constants import ADMIN_ROLES
+from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
 from app.services.templates import sort_templates, template_matches
 from app.timeutils import shanghai_now_naive, to_shanghai_naive
@@ -33,6 +35,42 @@ from app.timeutils import shanghai_now_naive, to_shanghai_naive
 DATE_PATTERN = re.compile(r"(20\d{2})(?:-|/|年)(\d{1,2})(?:-|/|月)(\d{1,2})(?:日)?")
 TASK_ID_PATTERN = re.compile(r"(?:任务\s*(?:ID|编号)\s*[#:：]?\s*|任务\s*#\s*)(\d+)", re.IGNORECASE)
 DELAY_REQUEST_ID_PATTERN = re.compile(r"(?:延期申请\s*(?:ID|编号)\s*[#:：]?\s*|延期申请\s*#\s*)(\d+)", re.IGNORECASE)
+
+
+def _mark_notification_recipient_replied(
+    db: Session,
+    task_id: int | None,
+    user_id: int,
+    mail_event: MailEvent,
+    notify_types: tuple[str, ...],
+) -> int | None:
+    """在收到回复邮件后，将最匹配的邮件通知接收人标记为“已回复”。
+
+    说明：
+    - 这里只处理邮件渠道，因为“回复”动作来源于回信；
+    - 同一成员可能收到多封同任务通知，这里优先回写回复邮件发生前最近的一封；
+    - 返回命中的通知接收人编号，方便后续写入动作结果或测试断言。
+    """
+    if task_id is None:
+        return None
+    recipient = (
+        db.query(NotificationRecipient)
+        .join(Notification, NotificationRecipient.notification_id == Notification.id)
+        .filter(
+            Notification.task_id == task_id,
+            Notification.channel == "email",
+            Notification.notify_type.in_(notify_types),
+            NotificationRecipient.user_id == user_id,
+            Notification.created_at <= mail_event.created_at,
+        )
+        .order_by(Notification.created_at.desc(), Notification.id.desc(), NotificationRecipient.id.desc())
+        .first()
+    )
+    if not recipient:
+        return None
+    # 收到成员回信后，无论业务动作是否真正推进，都说明这封通知已经得到成员反馈。
+    recipient.read_status = "read"
+    return recipient.id
 
 
 def _provider_hint() -> str:
@@ -202,22 +240,70 @@ def _decode_bytes(payload: bytes, charset: str | None) -> str:
 
 
 def _extract_text_body(message: Message) -> str:
-    """优先提取纯文本正文，并跳过附件。"""
+    """优先提取纯文本正文，并在必要时退回 HTML 正文。
+
+    有些邮箱客户端只返回 `text/html`，如果这里直接忽略会导致落库邮件没有正文，
+    既影响模板匹配，也会让详情页只能看到零碎摘要。
+    """
     if message.is_multipart():
         texts: list[str] = []
+        html_texts: list[str] = []
         for part in message.walk():
             content_type = part.get_content_type()
             disposition = str(part.get("Content-Disposition", ""))
             if "attachment" in disposition.lower():
                 continue
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset()
             if content_type == "text/plain":
-                payload = part.get_payload(decode=True) or b""
-                charset = part.get_content_charset()
                 texts.append(_decode_bytes(payload, charset))
-        return "\n".join(texts).strip()
+            elif content_type == "text/html":
+                html_texts.append(_html_to_plain_text(_decode_bytes(payload, charset)))
+        if texts:
+            return "\n".join(texts).strip()
+        return "\n".join(html_texts).strip()
     payload = message.get_payload(decode=True) or b""
     charset = message.get_content_charset()
-    return _decode_bytes(payload, charset).strip()
+    content = _decode_bytes(payload, charset).strip()
+    if message.get_content_type() == "text/html":
+        return _html_to_plain_text(content)
+    return content
+
+
+def _html_to_plain_text(content: str) -> str:
+    """把 HTML 正文转换为适合匹配和展示的纯文本。
+
+    - 先把常见换行标签转成真正换行，避免整段内容黏成一行。
+    - 再去掉剩余标签并解码 `&nbsp;` 等实体，统一输出可读文本。
+    """
+    normalized = re.sub(r"(?i)<br\s*/?>", "\n", content or "")
+    normalized = re.sub(r"(?i)</p\s*>", "\n", normalized)
+    normalized = re.sub(r"(?i)<p[^>]*>", "", normalized)
+    normalized = re.sub(r"(?i)</div\s*>", "\n", normalized)
+    normalized = re.sub(r"(?i)<div[^>]*>", "", normalized)
+    normalized = re.sub(r"(?is)<style.*?>.*?</style>", "", normalized)
+    normalized = re.sub(r"(?is)<script.*?>.*?</script>", "", normalized)
+    normalized = re.sub(r"(?s)<[^>]+>", "", normalized)
+    normalized = html_lib.unescape(normalized).replace("\xa0", " ")
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def _plain_text_to_html(content: str) -> str:
+    """把系统正文转成兼容邮件客户端的 HTML 版本。
+
+    仅发送 `text/plain` 时，部分邮箱会自行按 HTML 渲染并折叠空格与换行。
+    这里补充 HTML alternative，让客户端按预期保留段落和空白。
+    """
+    escaped = html_lib.escape(content or "")
+    escaped = escaped.replace(" ", "&nbsp;").replace("\n", "<br>")
+    return (
+        "<html><body>"
+        "<div style=\"font-family:Microsoft YaHei,Segoe UI,sans-serif;"
+        "font-size:14px;line-height:1.8;color:#172033;\">"
+        f"{escaped}"
+        "</div></body></html>"
+    )
 
 
 def _open_smtp_connection() -> smtplib.SMTP:
@@ -302,6 +388,7 @@ def _build_mail_event_from_message(
         from_addr=from_addr,
         subject=subject,
         body_digest=body[:1000],
+        original_body=body,
         resolved_template_id=matched_template.id if matched_template else None,
         resolved_version=matched_template.version if matched_template else None,
         process_status="MATCHED" if matched_template else "UNMATCHED",
@@ -536,6 +623,13 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
         _append_mail_action(db, mail_event.id, notify_type, "FAILED", task_id, {"reason": "发送人不是任务成员"})
         return
 
+    replied_recipient_id = _mark_notification_recipient_replied(
+        db,
+        task.id,
+        sender.id,
+        mail_event,
+        ("task_created", "manual_remind", "due_remind"),
+    )
     if task.state_locked:
         mail_event.process_status = "SKIPPED"
         _append_mail_action(db, mail_event.id, notify_type, "SKIPPED", task_id, {"reason": "任务状态已锁定"})
@@ -588,6 +682,7 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
             "from_status": previous_status,
             "to_status": task.main_status,
             "updated_subtask_ids": updated_subtask_ids,
+            "replied_notification_recipient_id": replied_recipient_id,
         },
     )
 
@@ -620,12 +715,19 @@ def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: U
         original_deadline=task.end_at,
         proposed_deadline=proposed_deadline,
     )
+    replied_recipient_id = _mark_notification_recipient_replied(
+        db,
+        task.id,
+        sender.id,
+        mail_event,
+        ("task_created", "manual_remind", "due_remind"),
+    )
     db.add(request_obj)
     db.flush()
 
     from app.services.notifications import create_notification_with_recipients
 
-    admin_ids = [item.id for item in db.query(User).filter(User.role == "admin", User.is_active.is_(True)).all()]
+    admin_ids = [item.id for item in db.query(User).filter(User.role.in_(tuple(ADMIN_ROLES)), User.is_active.is_(True)).all()]
     extra_context = {
         "delay_request_id": request_obj.id,
         "applicant_name": sender.name,
@@ -636,7 +738,18 @@ def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: U
     create_notification_with_recipients(db, task.id, "qax", "delay_approval", "", recipient_user_ids=admin_ids, extra_context=extra_context)
 
     mail_event.process_status = "APPLIED"
-    _append_mail_action(db, mail_event.id, "delay_request", "APPLIED", task.id, {"delay_request_id": request_obj.id, "proposed_deadline": proposed_deadline.strftime("%Y-%m-%d")})
+    _append_mail_action(
+        db,
+        mail_event.id,
+        "delay_request",
+        "APPLIED",
+        task.id,
+        {
+            "delay_request_id": request_obj.id,
+            "proposed_deadline": proposed_deadline.strftime("%Y-%m-%d"),
+            "replied_notification_recipient_id": replied_recipient_id,
+        },
+    )
 
 
 def _parse_delay_approval(body: str, subject: str) -> tuple[str | None, datetime | None, str]:
@@ -651,7 +764,7 @@ def _parse_delay_approval(body: str, subject: str) -> tuple[str | None, datetime
 
 def _apply_delay_approval_from_mail(db: Session, mail_event: MailEvent, sender: User, subject: str, body: str) -> None:
     """根据管理员邮件执行延期审批。"""
-    if sender.role != "admin":
+    if sender.role not in ADMIN_ROLES:
         mail_event.process_status = "FAILED"
         _append_mail_action(db, mail_event.id, "delay_approve", "FAILED", None, {"reason": "发送人不是管理员"})
         return
@@ -679,6 +792,13 @@ def _apply_delay_approval_from_mail(db: Session, mail_event: MailEvent, sender: 
         return
 
     try:
+        replied_recipient_id = _mark_notification_recipient_replied(
+            db,
+            request_obj.task_id,
+            sender.id,
+            mail_event,
+            ("delay_approval",),
+        )
         result, updated = apply_delay_decision(
             db=db,
             request_obj=request_obj,
@@ -691,7 +811,19 @@ def _apply_delay_approval_from_mail(db: Session, mail_event: MailEvent, sender: 
             approved_deadline=approved_deadline,
         )
         mail_event.process_status = "APPLIED" if result in {"APPLIED", "IDEMPOTENT_REPLAY"} else "SKIPPED"
-        _append_mail_action(db, mail_event.id, "delay_approve", "APPLIED" if result in {"APPLIED", "IDEMPOTENT_REPLAY"} else "SKIPPED", updated.task_id, {"result": result, "delay_request_id": updated.id, "approval_status": updated.approval_status})
+        _append_mail_action(
+            db,
+            mail_event.id,
+            "delay_approve",
+            "APPLIED" if result in {"APPLIED", "IDEMPOTENT_REPLAY"} else "SKIPPED",
+            updated.task_id,
+            {
+                "result": result,
+                "delay_request_id": updated.id,
+                "approval_status": updated.approval_status,
+                "replied_notification_recipient_id": replied_recipient_id,
+            },
+        )
     except HTTPException as exc:
         mail_event.process_status = "FAILED"
         _append_mail_action(db, mail_event.id, "delay_approve", "FAILED", request_obj.task_id, {"reason": exc.detail})
@@ -853,6 +985,8 @@ def send_mail_notification(to_address: str, subject: str, content: str) -> dict[
     message["From"] = settings.smtp_from_address
     message["To"] = to_address
     message.set_content(content)
+    # 同时补充 HTML 正文，兼容会默认按 HTML 渲染的邮箱客户端，避免换行与空格被吞掉。
+    message.add_alternative(_plain_text_to_html(content), subtype="html")
 
     try:
         with _open_smtp_connection() as server:

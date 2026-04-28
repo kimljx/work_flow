@@ -135,7 +135,7 @@ class Notification(Base, TimestampMixin):
 
 
 class NotificationRecipient(Base, TimestampMixin):
-    """通知接收人表，按成员拆分送达、已读与重试情况。"""
+    """通知接收人表，按成员拆分送达、回复与重试情况。"""
     __tablename__ = "notification_recipients"
     __table_args__ = (UniqueConstraint("notification_id", "user_id", name="uq_notification_recipient"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -205,6 +205,7 @@ class MailEvent(Base, TimestampMixin):
     from_addr: Mapped[str] = mapped_column(String(255), nullable=False)
     subject: Mapped[str] = mapped_column(Text, nullable=False)
     body_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    original_body: Mapped[str] = mapped_column(Text, nullable=False, default="")
     resolved_template_id: Mapped[int | None] = mapped_column(ForeignKey("templates.id"), nullable=True)
     resolved_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     process_status: Mapped[str] = mapped_column(String(32), nullable=False, default="NEW")

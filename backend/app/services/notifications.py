@@ -94,6 +94,7 @@ def _build_context(
         "task_id": task.id if task else "",
         "task_title": task.title if task else "",
         "task_content": task.content if task else "",
+        "task_remark": task.remark if task else "",
         "start_at": task.start_at.strftime("%Y-%m-%d %H:%M") if task else "",
         "end_at": task.end_at.strftime("%Y-%m-%d %H:%M") if task else "",
         "owner_name": owner_name,
@@ -101,6 +102,7 @@ def _build_context(
         "recipient_name": recipient.name if recipient else "",
         "subtask_summary": "\n".join(subtask_lines) if subtask_lines else empty_text,
         "subtask_brief": "；".join(subtask_lines[:3]) if subtask_lines else empty_text,
+        "remind_focus": "主任务整体进度跟进",
         "reply_guide": "请按“任务ID + 状态关键词 + 可选说明内容 / 日期 / 原因”回复。",
     }
     if extra_context:
@@ -147,6 +149,9 @@ def _default_content(
         f"任务创建人：{context.get('creator_name', '')}\n"
         f"开始时间：{context.get('start_at', '')}\n"
         f"结束时间：{context.get('end_at', '')}\n"
+        f"主任务详情：{context.get('task_content', '') or '暂无'}\n"
+        f"主任务备注：{context.get('task_remark', '') or '暂无'}\n"
+        f"当前提醒重点：{context.get('remind_focus', '') or '主任务整体进度跟进'}\n"
         f"子任务安排：\n{context.get('subtask_summary', '暂无子任务')}\n"
         f"{context.get('reply_guide', '')}"
     )

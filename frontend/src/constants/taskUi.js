@@ -54,14 +54,6 @@ export const priorityMeta = {
 }
 
 export function resolveTaskStatusTone(task) {
-  // 延期中的任务优先使用风险态展示，即使主状态仍然是“进行中”。
-  if (task?.delay_days > 0 && task?.main_status !== 'done' && task?.main_status !== 'canceled') {
-    return {
-      tone: 'status-tone status-tone-danger',
-      dot: 'task-dot task-dot-danger',
-      text: `延迟 ${task.delay_days} 天`,
-    }
-  }
   const meta = taskStatusMeta[task?.main_status] || taskStatusMeta.not_started
   return {
     ...meta,

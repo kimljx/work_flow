@@ -296,6 +296,23 @@ button:disabled {
   gap: 8px;
 }
 
+.filter-section,
+.filter-field {
+  display: grid;
+  gap: 8px;
+}
+
+.filter-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.task-filter-grid {
+  grid-template-columns: minmax(220px, 1.5fr) repeat(2, minmax(160px, 0.7fr));
+}
+
 .filter-chip.active {
   background: linear-gradient(90deg, var(--primary), #3b82f6);
   color: #ffffff;
@@ -651,6 +668,16 @@ textarea:focus {
   box-shadow: 0 32px 80px rgba(15, 23, 42, 0.18);
 }
 
+.mail-original-modal {
+  width: min(1040px, 100%);
+}
+
+.mail-original-pre {
+  min-height: 320px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
 .modal-actions {
   justify-content: flex-end;
   margin-top: 18px;
@@ -948,6 +975,10 @@ textarea:focus {
   font-size: 15px;
 }
 
+.notification-recipient-filters {
+  justify-content: flex-end;
+}
+
 .subtask-summary-row {
   display: flex;
   flex-wrap: wrap;
@@ -1120,14 +1151,9 @@ textarea:focus {
   margin-bottom: 0;
 }
 
-.task-detail-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.95fr);
-  gap: 18px;
-}
-
-.task-detail-header-main,
-.task-detail-header-side,
+.task-detail-hero,
+.task-detail-hero-main,
+.task-detail-hero-side,
 .task-detail-board,
 .task-detail-primary,
 .task-detail-secondary,
@@ -1136,14 +1162,38 @@ textarea:focus {
   gap: 18px;
 }
 
-.task-detail-title-row,
+.task-detail-topbar,
+.task-detail-topbar-info,
 .task-progress-head,
-.task-progress-foot,
-.task-detail-meta-row {
+.task-progress-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.task-detail-topbar {
+  align-items: flex-start;
+}
+
+.task-detail-topbar-info {
+  flex-wrap: wrap;
+}
+
+.task-detail-top-actions {
+  justify-content: flex-end;
+}
+
+.task-detail-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.task-detail-heading-block {
+  display: grid;
+  gap: 10px;
 }
 
 .task-detail-id-chip {
@@ -1171,7 +1221,8 @@ textarea:focus {
 }
 
 .task-progress-board,
-.task-detail-meta-card,
+.task-detail-status-card,
+.task-member-chip-card,
 .task-preview-context-card {
   padding: 18px;
   border-radius: 18px;
@@ -1212,7 +1263,8 @@ textarea:focus {
 
 .task-detail-metric-grid,
 .task-overview-grid,
-.task-preview-meta-grid {
+.task-preview-meta-grid,
+.task-detail-meta-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
@@ -1239,60 +1291,19 @@ textarea:focus {
   gap: 10px;
 }
 
-.task-detail-action-panel {
-  display: grid;
-  gap: 16px;
-}
-
-.task-detail-action-grid {
-  display: grid;
-  grid-template-columns: 1.05fr 1.2fr 0.9fr;
-  gap: 16px;
-}
-
-.task-detail-action-block {
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-  border-radius: 18px;
-  border: 1px solid var(--line);
-  background: linear-gradient(180deg, #ffffff, #fbfdff);
-}
-
-.task-detail-meta-card {
-  align-content: start;
-}
-
-.task-detail-meta-row {
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.task-detail-meta-row:last-of-type {
-  border-bottom: 0;
-}
-
-.task-detail-meta-row span {
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .task-member-chip-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 16px;
+}
+
+.task-member-chip-card {
+  display: grid;
+  gap: 12px;
 }
 
 .task-detail-board {
   grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.95fr);
-}
-
-.task-detail-work-grid {
-  display: grid;
-  grid-template-columns: minmax(320px, 0.92fr) minmax(0, 1.08fr);
-  gap: 18px;
-  align-items: start;
 }
 
 .task-detail-double-grid {
@@ -1317,16 +1328,15 @@ textarea:focus {
   line-height: 1.8;
 }
 
-.task-milestone-panel,
-.task-subtask-panel {
+.task-subtask-panel,
+.task-timeline-panel {
   align-content: start;
 }
 
 .task-milestone-summary-grid {
   display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1.3fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 14px;
 }
 
 .task-board-list {
@@ -1359,6 +1369,9 @@ textarea:focus {
 }
 
 .task-board-item-side {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
   text-align: right;
   color: var(--muted);
   font-size: 13px;
@@ -1366,6 +1379,73 @@ textarea:focus {
 
 .task-detail-subtask-card {
   background: #ffffff;
+}
+
+.task-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.task-timeline-section {
+  display: grid;
+  gap: 14px;
+}
+
+.task-timeline-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-timeline-subhead h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.task-timeline-divider {
+  height: 1px;
+  background: linear-gradient(90deg, rgba(203, 215, 230, 0), rgba(203, 215, 230, 0.9), rgba(203, 215, 230, 0));
+}
+
+.task-status-timeline {
+  padding-left: 22px;
+}
+
+.task-status-timeline li {
+  padding-left: 4px;
+}
+
+.task-status-timeline-cards {
+  gap: 14px;
+}
+
+.task-status-timeline-item {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #fbfdff;
+}
+
+.task-status-timeline-top,
+.task-status-timeline-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-status-timeline-top strong {
+  font-size: 16px;
+}
+
+.task-status-timeline-body {
+  color: #1e293b;
+  line-height: 1.8;
+  white-space: pre-line;
 }
 
 .task-preview-shell {
@@ -1395,11 +1475,9 @@ textarea:focus {
   .task-split-grid,
   .task-work-card,
   .history-detail-layout,
-  .task-detail-header,
+  .task-detail-hero-grid,
   .task-detail-board,
-  .task-detail-work-grid,
-  .task-detail-double-grid,
-  .task-detail-action-grid {
+  .task-detail-double-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1434,7 +1512,11 @@ textarea:focus {
 
   .workspace-header,
   .hero,
-  .section-head {
+  .section-head,
+  .task-detail-topbar,
+  .task-timeline-subhead,
+  .task-status-timeline-top,
+  .task-status-timeline-meta {
     flex-direction: column;
     align-items: stretch;
   }
@@ -1445,8 +1527,10 @@ textarea:focus {
   .task-detail-metric-grid,
   .task-overview-grid,
   .task-preview-meta-grid,
+  .task-detail-meta-grid,
   .task-detail-status-grid,
-  .task-preview-control-grid {
+  .task-preview-control-grid,
+  .task-milestone-summary-grid {
     grid-template-columns: 1fr;
   }
 

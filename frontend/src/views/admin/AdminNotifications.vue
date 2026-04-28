@@ -4,7 +4,7 @@
       <div>
         <div class="workspace-eyebrow">通知模块</div>
         <h1 class="workspace-title">通知中心</h1>
-        <p class="workspace-subtitle">按任务查看邮件与即时消息通知，并进入详情页核对成员送达和已读状态。</p>
+        <p class="workspace-subtitle">按任务查看邮件与即时消息通知，并进入详情页核对成员送达、邮件回复和即时消息已读状态。</p>
       </div>
       <div class="toolbar">
         <router-link class="button secondary" to="/admin/mail-events">查看邮件列表</router-link>
@@ -21,7 +21,7 @@
         <strong>{{ deliveredTotal }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">已读</span>
+        <span class="metric-label">成员反馈</span>
         <strong>{{ readTotal }}</strong>
       </div>
       <div class="stat-card compact">
@@ -47,10 +47,10 @@
           <tr>
             <th>任务</th>
             <th>渠道</th>
-            <th>通知类型</th>
+            <th>提醒场景</th>
             <th>状态</th>
             <th>送达</th>
-            <th>已读</th>
+            <th>反馈</th>
             <th>创建时间</th>
             <th>操作</th>
           </tr>
@@ -62,10 +62,13 @@
           <tr v-for="item in pagedNotifications" :key="item.id">
             <td>{{ item.task_title || '-' }}</td>
             <td>{{ item.channel_text }}</td>
-            <td>{{ item.notify_type_text || notifyTypeText(item.notify_type) }}</td>
+            <td>
+              <div>{{ item.notify_scene_text || item.notify_type_text || notifyTypeText(item.notify_type) }}</div>
+              <div class="subtle-text" v-if="item.remind_focus">{{ item.remind_focus }}</div>
+            </td>
             <td>{{ item.status_text }}</td>
             <td>{{ item.delivered_count }}/{{ item.recipient_total }}</td>
-            <td>{{ item.read_count }}</td>
+            <td>{{ item.read_count }} {{ item.feedback_label }}</td>
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>
               <router-link class="button secondary small" :to="{ path: `/admin/notifications/${item.id}`, query: { from: route.fullPath } }">查看详情</router-link>

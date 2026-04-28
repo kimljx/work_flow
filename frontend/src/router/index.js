@@ -68,11 +68,19 @@ router.beforeEach(async (to) => {
       return '/auth/login'
     }
   }
-  if (to.meta.role && auth.profile?.role !== to.meta.role) {
+  if (to.meta.role && !canAccessRole(auth.profile?.role, to.meta.role)) {
     // 登录成功但角色不匹配时跳到统一 403 页面，而不是简单回登录页。
     return '/403'
   }
   return true
 })
+
+function canAccessRole(currentRole, requiredRole) {
+  // 系统管理员与管理员都可以进入管理路由；菜单差异由主布局控制。
+  if (requiredRole === 'admin') {
+    return ['system_admin', 'admin'].includes(currentRole)
+  }
+  return currentRole === requiredRole
+}
 
 export default router

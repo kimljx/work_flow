@@ -38,8 +38,14 @@
 
     <div class="detail-grid">
       <div class="panel">
-        <h2>匹配内容</h2>
-        <pre class="detail-pre">{{ detail.body_digest || '暂无内容摘要' }}</pre>
+        <div class="section-head">
+          <div>
+            <h2>匹配内容</h2>
+            <p>默认先看结构化摘要，避免原始邮件正文直接铺满页面。</p>
+          </div>
+          <button class="button secondary small" @click="showOriginalMail = true">查看原始邮件</button>
+        </div>
+        <pre class="detail-pre">{{ decodedBodyDigest || '暂无内容摘要' }}</pre>
       </div>
       <div class="panel">
         <h2>命中模板</h2>
@@ -61,13 +67,26 @@
             <strong>{{ detail.action_status_text || '-' }}</strong>
           </div>
         </div>
-        <pre class="detail-pre detail-pre-subtle">{{ detail.content || '当前没有可展示的模板正文' }}</pre>
+        <pre class="detail-pre detail-pre-subtle">{{ decodedTemplateContent || '当前没有可展示的模板正文' }}</pre>
       </div>
     </div>
 
     <div class="panel">
       <h2>业务动作结果</h2>
       <pre class="detail-pre dark">{{ prettyActionResult }}</pre>
+    </div>
+
+    <div v-if="showOriginalMail" class="modal-mask" @click.self="showOriginalMail = false">
+      <div class="modal-card mail-original-modal">
+        <div class="section-head">
+          <div>
+            <h2>原始邮件</h2>
+            <p>这里展示系统收件后解析出的完整正文，默认隐藏以减少详情页干扰。</p>
+          </div>
+          <button class="button secondary small" @click="showOriginalMail = false">关闭</button>
+        </div>
+        <pre class="detail-pre mail-original-pre">{{ decodedOriginalBody || '当前没有可展示的原始邮件正文' }}</pre>
+      </div>
     </div>
   </section>
 </template>
@@ -81,6 +100,7 @@ import { formatDateTime } from '../../utils/format'
 
 const route = useRoute()
 const detail = ref(null)
+const showOriginalMail = ref(false)
 
 const prettyActionResult = computed(() => {
   if (!detail.value?.action_result_json) return '暂无业务动作结果'
@@ -90,6 +110,18 @@ const prettyActionResult = computed(() => {
     return detail.value.action_result_json
   }
 })
+
+const decodedBodyDigest = computed(() => decodeMailText(detail.value?.body_digest || ''))
+const decodedTemplateContent = computed(() => decodeMailText(detail.value?.content || ''))
+const decodedOriginalBody = computed(() => decodeMailText(detail.value?.original_body || ''))
+
+function decodeMailText(content) {
+  // 邮件正文可能混入 HTML 实体，这里统一转回普通文本，避免把 &nbsp; 直接展示给用户。
+  if (!content) return ''
+  const container = document.createElement('textarea')
+  container.innerHTML = content
+  return container.value.replace(/\u00a0/g, ' ')
+}
 
 async function loadDetail() {
   const { data } = await http.get(`/admin/mail/events/${route.params.id}`)

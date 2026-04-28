@@ -23,7 +23,7 @@ DEFAULT_TEMPLATES = [
         "is_default": True,
         "subject_rule": "",
         "body_rule": "",
-        "content": "您好，{recipient_name}。\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n开始时间：{start_at}\n结束时间：{end_at}\n子任务安排：\n{subtask_summary}\n\n回复指引：\n1. 回复“进行中 + 备注”可更新任务状态。\n2. 回复“已完成 + 备注”可将任务标记为完成。\n3. 如需延期，请回复“延期 + 新日期 + 原因”。",
+        "content": "您好，{recipient_name}。\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n开始时间：{start_at}\n结束时间：{end_at}\n主任务详情：{task_content}\n主任务备注：{task_remark}\n当前提醒重点：{remind_focus}\n子任务安排：\n{subtask_summary}\n\n回复指引：\n1. 回复“进行中 + 备注”可更新任务状态。\n2. 回复“已完成 + 备注”可将任务标记为完成。\n3. 如需延期，请回复“延期 + 新日期 + 原因”。",
     },
     {
         "name": "默认邮件提醒模板",
@@ -35,7 +35,7 @@ DEFAULT_TEMPLATES = [
         "is_default": True,
         "subject_rule": "",
         "body_rule": "",
-        "content": "任务提醒：\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n子任务安排：\n{subtask_summary}\n请尽快处理并按模板回复邮件反馈状态。",
+        "content": "任务提醒：\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n主任务详情：{task_content}\n主任务备注：{task_remark}\n当前提醒重点：{remind_focus}\n子任务安排：\n{subtask_summary}\n请尽快处理并按模板回复邮件反馈状态。",
     },
     {
         "name": "默认延期审批邮件模板",
@@ -59,7 +59,7 @@ DEFAULT_TEMPLATES = [
         "is_default": True,
         "subject_rule": "",
         "body_rule": "",
-        "content": "任务到期提醒：\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n结束时间：{end_at}\n子任务安排：\n{subtask_summary}\n请尽快处理。",
+        "content": "任务到期提醒：\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n结束时间：{end_at}\n主任务详情：{task_content}\n主任务备注：{task_remark}\n当前提醒重点：{remind_focus}\n子任务安排：\n{subtask_summary}\n请尽快处理。",
     },
     {
         "name": "默认即时消息发送模板",
@@ -71,7 +71,7 @@ DEFAULT_TEMPLATES = [
         "is_default": True,
         "subject_rule": "",
         "body_rule": "",
-        "content": "您好，{recipient_name}。任务创建人：{creator_name}，负责人：{owner_name}。您有新的任务通知，任务编号：{task_id}，任务名称：{task_title}，子任务：{subtask_brief}",
+        "content": "您好，{recipient_name}。任务创建人：{creator_name}，负责人：{owner_name}。您有新的任务通知，任务编号：{task_id}，任务名称：{task_title}，主任务详情：{task_content}，主任务备注：{task_remark}，当前提醒重点：{remind_focus}，子任务：{subtask_brief}",
     },
     {
         "name": "默认即时消息提醒模板",
@@ -83,7 +83,7 @@ DEFAULT_TEMPLATES = [
         "is_default": True,
         "subject_rule": "",
         "body_rule": "",
-        "content": "任务提醒：{task_title}（任务编号：{task_id}），任务创建人：{creator_name}，负责人：{owner_name}，子任务：{subtask_brief}，请尽快处理。",
+        "content": "任务提醒：{task_title}（任务编号：{task_id}），任务创建人：{creator_name}，负责人：{owner_name}，主任务详情：{task_content}，主任务备注：{task_remark}，当前提醒重点：{remind_focus}，子任务：{subtask_brief}，请尽快处理。",
     },
     {
         "name": "默认延期审批即时消息模板",
@@ -107,7 +107,7 @@ DEFAULT_TEMPLATES = [
         "is_default": True,
         "subject_rule": "",
         "body_rule": "",
-        "content": "任务“{task_title}”即将到期（{end_at}），负责人：{owner_name}，子任务：{subtask_brief}。",
+        "content": "任务“{task_title}”即将到期（{end_at}），负责人：{owner_name}，主任务详情：{task_content}，主任务备注：{task_remark}，当前提醒重点：{remind_focus}，子任务：{subtask_brief}。",
     },
     {
         "name": "回复模板-已完成",
@@ -159,6 +159,15 @@ DEFAULT_TEMPLATES = [
     },
 ]
 
+LEGACY_DEFAULT_TEMPLATE_CONTENTS = {
+    ("MAIL_SEND", "task_created"): "您好，{recipient_name}。\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n开始时间：{start_at}\n结束时间：{end_at}\n子任务安排：\n{subtask_summary}\n\n回复指引：\n1. 回复“进行中 + 备注”可更新任务状态。\n2. 回复“已完成 + 备注”可将任务标记为完成。\n3. 如需延期，请回复“延期 + 新日期 + 原因”。",
+    ("MAIL_SEND", "manual_remind"): "任务提醒：\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n子任务安排：\n{subtask_summary}\n请尽快处理并按模板回复邮件反馈状态。",
+    ("MAIL_SEND", "due_remind"): "任务到期提醒：\n任务创建人：{creator_name}\n负责人：{owner_name}\n任务编号：{task_id}\n任务名称：{task_title}\n结束时间：{end_at}\n子任务安排：\n{subtask_summary}\n请尽快处理。",
+    ("QAX_SEND", "task_created"): "您好，{recipient_name}。任务创建人：{creator_name}，负责人：{owner_name}。您有新的任务通知，任务编号：{task_id}，任务名称：{task_title}，子任务：{subtask_brief}",
+    ("QAX_SEND", "manual_remind"): "任务提醒：{task_title}（任务编号：{task_id}），任务创建人：{creator_name}，负责人：{owner_name}，子任务：{subtask_brief}，请尽快处理。",
+    ("QAX_SEND", "due_remind"): "任务“{task_title}”即将到期（{end_at}），负责人：{owner_name}，子任务：{subtask_brief}。",
+}
+
 
 def _ensure_schema_columns() -> None:
     """在 SQLite 场景下补齐历史库缺失字段。"""
@@ -171,6 +180,9 @@ def _ensure_schema_columns() -> None:
         recipient_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(notification_recipients)")).fetchall()}
         if "content_snapshot" not in recipient_columns:
             conn.execute(text("ALTER TABLE notification_recipients ADD COLUMN content_snapshot TEXT NOT NULL DEFAULT ''"))
+        mail_event_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(mail_events)")).fetchall()}
+        if "original_body" not in mail_event_columns:
+            conn.execute(text("ALTER TABLE mail_events ADD COLUMN original_body TEXT NOT NULL DEFAULT ''"))
 
 
 def bootstrap_database() -> None:
@@ -187,7 +199,7 @@ def bootstrap_database() -> None:
                     User(
                         username="admin",
                         password_hash=hash_password(settings.default_password),
-                        role="admin",
+                        role="system_admin",
                         name="系统管理员",
                         email="admin@example.com",
                         ip_address="10.0.0.1",
@@ -206,6 +218,11 @@ def bootstrap_database() -> None:
             )
             db.commit()
 
+        admin_user = db.query(User).filter(User.username == "admin").first()
+        if admin_user and admin_user.role == "admin":
+            # 首个内置账号升级为系统管理员，确保新增系统级菜单后仍可维护用户和模板配置。
+            admin_user.role = "system_admin"
+
         existing_keys = {(item.template_kind, item.notify_type, item.name) for item in db.query(Template).all()}
         for template_data in DEFAULT_TEMPLATES:
             key = (template_data["template_kind"], template_data["notify_type"], template_data["name"])
@@ -213,4 +230,21 @@ def bootstrap_database() -> None:
                 continue
             # 仅补齐缺失模板，避免覆盖管理员在线调整过的模板内容。
             db.add(Template(**template_data))
+
+        latest_default_contents = {
+            (item["template_kind"], item["notify_type"]): item["content"]
+            for item in DEFAULT_TEMPLATES
+            if item["template_kind"] in {"MAIL_SEND", "QAX_SEND"}
+        }
+        for template in (
+            db.query(Template)
+            .filter(Template.is_default.is_(True), Template.template_kind.in_(("MAIL_SEND", "QAX_SEND")))
+            .all()
+        ):
+            key = (template.template_kind, template.notify_type)
+            legacy_content = LEGACY_DEFAULT_TEMPLATE_CONTENTS.get(key)
+            latest_content = latest_default_contents.get(key)
+            if legacy_content and latest_content and template.content == legacy_content:
+                # 仅在模板仍保持旧版默认正文时自动升级，避免覆盖管理员的自定义编辑。
+                template.content = latest_content
         db.commit()

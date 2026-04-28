@@ -4,7 +4,7 @@
       <div>
         <div class="workspace-eyebrow">通知详情</div>
         <h1 class="workspace-title">{{ detail.task_title || `通知 #${detail.id}` }}</h1>
-        <p class="workspace-subtitle">查看通知正文，以及每位成员的送达、已读和重试状态。</p>
+        <p class="workspace-subtitle">查看通知正文，以及每位成员的送达、邮件回复或即时消息已读状态。</p>
       </div>
       <div class="toolbar">
         <router-link class="button secondary" :to="backPath">返回列表</router-link>
@@ -24,8 +24,8 @@
         <strong>{{ detail.channel_text }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">通知类型</span>
-        <strong>{{ detail.notify_type_text || notifyTypeText(detail.notify_type) }}</strong>
+        <span class="metric-label">提醒场景</span>
+        <strong>{{ detail.notify_scene_text || detail.notify_type_text || notifyTypeText(detail.notify_type) }}</strong>
       </div>
       <div class="stat-card compact">
         <span class="metric-label">当前状态</span>
@@ -46,6 +46,10 @@
         <h2>汇总情况</h2>
         <div class="detail-summary-list">
           <div class="detail-summary-item">
+            <span>提醒重点</span>
+            <strong>{{ detail.remind_focus || '主任务整体进度跟进' }}</strong>
+          </div>
+          <div class="detail-summary-item">
             <span>总接收人</span>
             <strong>{{ detail.recipient_total }}</strong>
           </div>
@@ -54,7 +58,7 @@
             <strong>{{ detail.delivered_count }}</strong>
           </div>
           <div class="detail-summary-item">
-            <span>已读</span>
+            <span>{{ detail.feedback_label || '反馈' }}</span>
             <strong>{{ detail.read_count }}</strong>
           </div>
           <div class="detail-summary-item">
@@ -69,7 +73,17 @@
       <div class="section-head">
         <div>
           <h2>成员回执</h2>
-          <p>按成员逐条查看送达、已读和错误信息。</p>
+          <p>按成员逐条查看送达、邮件回复或即时消息已读情况，以及错误信息。</p>
+        </div>
+        <div class="filter-chip-group notification-recipient-filters">
+          <button
+            v-for="item in recipientFilterOptions"
+            :key="item.value"
+            :class="['button secondary small filter-chip', { active: recipientFilter === item.value }]"
+            @click="recipientFilter = item.value"
+          >
+            {{ item.label }}
+          </button>
         </div>
       </div>
       <table class="table">
@@ -79,16 +93,16 @@
             <th>角色</th>
             <th>接收内容</th>
             <th>送达状态</th>
-            <th>已读状态</th>
+            <th>{{ detail.feedback_label || '反馈' }}状态</th>
             <th>重试次数</th>
             <th>最后错误</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="detail.recipients.length === 0">
+          <tr v-if="filteredRecipients.length === 0">
             <td colspan="7">当前没有成员回执记录。</td>
           </tr>
-          <tr v-for="recipient in detail.recipients" :key="`${detail.id}-${recipient.user_id}`">
+          <tr v-for="recipient in filteredRecipients" :key="`${detail.id}-${recipient.user_id}`">
             <td>
               <div>{{ recipient.name || '-' }}</div>
               <div class="subtle-text">{{ recipient.email || '未配置邮箱' }}</div>
@@ -119,6 +133,7 @@ import { formatDateTime } from '../../utils/format'
 const route = useRoute()
 const auth = useAuthStore()
 const detail = ref(null)
+const recipientFilter = ref('all')
 
 const defaultBackPath = computed(() => (auth.isAdmin ? '/admin/notifications' : '/member/notifications'))
 const backPath = computed(() => route.query.from || defaultBackPath.value)
@@ -132,9 +147,32 @@ const taskPath = computed(() => {
   }
 })
 
+const recipientFilterOptions = computed(() => {
+  const recipients = detail.value?.recipients || []
+  const pendingFeedbackCount = recipients.filter((item) => item.read_status !== 'read').length
+  const deliveryFailedCount = recipients.filter((item) => item.delivery_status !== 'delivered').length
+  return [
+    { value: 'all', label: `全部 ${recipients.length}` },
+    { value: 'pending_feedback', label: `未${detail.value?.feedback_label || '反馈'} ${pendingFeedbackCount}` },
+    { value: 'delivery_failed', label: `送达异常 ${deliveryFailedCount}` },
+  ]
+})
+
+const filteredRecipients = computed(() => {
+  const recipients = detail.value?.recipients || []
+  if (recipientFilter.value === 'pending_feedback') {
+    return recipients.filter((item) => item.read_status !== 'read')
+  }
+  if (recipientFilter.value === 'delivery_failed') {
+    return recipients.filter((item) => item.delivery_status !== 'delivered')
+  }
+  return recipients
+})
+
 async function loadDetail() {
   const { data } = await http.get(`/notifications/${route.params.id}`)
   detail.value = data
+  recipientFilter.value = 'all'
 }
 
 onMounted(loadDetail)

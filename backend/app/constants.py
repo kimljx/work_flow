@@ -16,7 +16,10 @@ SUBTASK_STATUS_LABELS = {
 
 TASK_STATUS_OPTIONS = list(TASK_STATUS_LABELS.keys())
 
+ADMIN_ROLES = {"system_admin", "admin"}
+
 ROLE_LABELS = {
+    "system_admin": "系统管理员",
     "admin": "管理员",
     "member": "成员",
 }
@@ -24,6 +27,7 @@ ROLE_LABELS = {
 MEMBER_ROLE_LABELS = {
     "owner": "负责人",
     "participant": "参与者",
+    "system_admin": "系统管理员",
     "admin": "管理员",
 }
 
@@ -59,6 +63,11 @@ NOTIFICATION_STATUS_LABELS = {
 READ_STATUS_LABELS = {
     "unread": "未读",
     "read": "已读",
+}
+
+REPLY_STATUS_LABELS = {
+    "unread": "未回复",
+    "read": "已回复",
 }
 
 DELAY_STATUS_LABELS = {

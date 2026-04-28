@@ -8,11 +8,13 @@ from email.message import EmailMessage
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine
-from app.models import DelayRequest, MailAction, MailScanState, Notification, Task, TaskMember, Template, User
+from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, Template, User
 from app.security import hash_password
 from app.services.mail import (
+    _mark_notification_recipient_replied,
     _extract_text_body,
     _find_task_id,
+    _plain_text_to_html,
     diagnose_imap_settings,
     diagnose_mail_settings,
     initialize_mail_scan_baseline,
@@ -370,6 +372,23 @@ class MailServiceTestCase(unittest.TestCase):
 
         self.assertIn("测试邮件", body)
 
+    def test_extract_text_body_falls_back_to_html_and_decodes_entities(self) -> None:
+        message = EmailMessage()
+        message.set_type("text/html")
+        message.set_payload("<div>第一行&nbsp;内容</div><div>第二行<br>继续</div>".encode("utf-8"))
+        message.set_param("charset", "utf-8")
+
+        body = _extract_text_body(message)
+
+        self.assertIn("第一行 内容", body)
+        self.assertIn("第二行", body)
+        self.assertIn("继续", body)
+
+    def test_plain_text_to_html_preserves_line_breaks_and_spaces(self) -> None:
+        html_content = _plain_text_to_html("第一行  两个空格\n第二行")
+
+        self.assertIn("第一行&nbsp;&nbsp;两个空格<br>第二行", html_content)
+
     def test_find_task_id_prefers_explicit_id_marker(self) -> None:
         subject = "回复：任务通知提醒#2：任务1 进行中+任务1开始执行"
         body = "任务编号：2 任务名称：任务1 请尽快处理。"
@@ -592,6 +611,51 @@ class MailServiceTestCase(unittest.TestCase):
             settings.imap_password = original_password
             settings.imap_use_ssl = original_ssl
             settings.imap_use_tls = original_tls
+
+    def test_mark_notification_recipient_replied_updates_latest_email_notification(self) -> None:
+        with SessionLocal() as db:
+            member = User(username="member", password_hash=hash_password("x"), role="member", name="成员", email="member@example.com", ip_address="10.0.0.2", is_active=True)
+            db.add(member)
+            db.flush()
+            task = Task(title="测试任务", content="内容", priority="medium", remark="", start_at=datetime(2026, 4, 20, 9, 0, 0), end_at=datetime(2026, 4, 25, 18, 0, 0), planned_minutes=60, actual_minutes=0, main_status="not_started", delay_days=0, state_locked=False, created_by=member.id)
+            db.add(task)
+            db.flush()
+
+            earlier_notification = Notification(task_id=task.id, channel="email", notify_type="task_created", content_snapshot="创建通知", status="delivered")
+            latest_notification = Notification(task_id=task.id, channel="email", notify_type="manual_remind", content_snapshot="提醒通知", status="delivered")
+            db.add_all([earlier_notification, latest_notification])
+            db.flush()
+            db.add_all(
+                [
+                    NotificationRecipient(notification_id=earlier_notification.id, user_id=member.id, recipient_role="owner", delivery_status="delivered", read_status="unread", retry_count=0, content_snapshot="创建通知", last_error=""),
+                    NotificationRecipient(notification_id=latest_notification.id, user_id=member.id, recipient_role="owner", delivery_status="delivered", read_status="unread", retry_count=0, content_snapshot="提醒通知", last_error=""),
+                ]
+            )
+            mail_event = MailEvent(
+                message_id="<reply-1@example.com>",
+                from_addr="member@example.com",
+                subject="任务#1 已完成",
+                body_digest="任务#1 已完成",
+                original_body="任务#1 已完成",
+                process_status="MATCHED",
+            )
+            db.add(mail_event)
+            db.commit()
+            db.refresh(mail_event)
+
+            recipient_id = _mark_notification_recipient_replied(
+                db,
+                task.id,
+                member.id,
+                mail_event,
+                ("task_created", "manual_remind", "due_remind"),
+            )
+            db.commit()
+
+            self.assertIsNotNone(recipient_id)
+            recipients = db.query(NotificationRecipient).order_by(NotificationRecipient.id.asc()).all()
+            self.assertEqual(recipients[0].read_status, "unread")
+            self.assertEqual(recipients[1].read_status, "read")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@
         <button class="button secondary" @click="initializeBaseline" :disabled="busy">
           设置扫描基准
         </button>
+        <button class="button secondary" @click="collectQaxStatus" :disabled="busy">
+          手动采集 QAX
+        </button>
         <button class="button" @click="pollInbox" :disabled="busy">
           手动收取邮件
         </button>
@@ -204,6 +207,21 @@ async function pollInbox() {
     await Promise.all([loadEvents(), loadPollState()])
   } catch (error) {
     showFeedback('邮件收取结果', error.response?.data?.detail || '邮件收取失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function collectQaxStatus() {
+  busy.value = true
+  try {
+    const { data } = await http.post('/admin/qax/collect')
+    const statusType = data.status === 'success' ? 'success' : 'error'
+    const summary = `本次采集：更新 ${data.updated_count || 0} 条，失败 ${data.failed_count || 0} 条`
+    showFeedback('QAX 状态采集结果', `${data.message}；${summary}`, statusType)
+    await loadAll()
+  } catch (error) {
+    showFeedback('QAX 状态采集结果', error.response?.data?.detail || 'QAX 状态采集失败', 'error')
   } finally {
     busy.value = false
   }

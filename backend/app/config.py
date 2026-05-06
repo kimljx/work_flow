@@ -55,7 +55,15 @@ class Settings:
     database_url: str
     default_password: str
     qax_collect_cron: str
+    qax_base_url: str
+    qax_username: str
+    qax_password: str
+    qax_group_name: str
+    qax_browser_headless: bool
+    qax_ignore_https_errors: bool
     remind_daily_run_at: str
+    system_log_retention_days: int
+    system_log_cleanup_interval_seconds: int
     smtp_host: str
     smtp_port: int
     smtp_user: str
@@ -94,7 +102,15 @@ settings = Settings(
     database_url=os.getenv("DATABASE_URL", "sqlite:///./backend/data/app.db"),
     default_password=os.getenv("DEFAULT_PASSWORD", "ChangeMe123"),
     qax_collect_cron=os.getenv("QAX_COLLECT_CRON", "0 * * * *"),
+    qax_base_url=os.getenv("QAX_BASE_URL", "").strip(),
+    qax_username=os.getenv("QAX_USERNAME", "").strip(),
+    qax_password=os.getenv("QAX_PASSWORD", "").strip(),
+    qax_group_name=os.getenv("QAX_GROUP_NAME", "普通分组").strip() or "普通分组",
+    qax_browser_headless=os.getenv("QAX_BROWSER_HEADLESS", "true").lower() == "true",
+    qax_ignore_https_errors=os.getenv("QAX_IGNORE_HTTPS_ERRORS", "true").lower() == "true",
     remind_daily_run_at=os.getenv("REMIND_DAILY_RUN_AT", "09:00"),
+    system_log_retention_days=max(int(os.getenv("SYSTEM_LOG_RETENTION_DAYS", "60")), 1),
+    system_log_cleanup_interval_seconds=max(int(os.getenv("SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS", "86400")), 300),
     smtp_host=os.getenv("SMTP_HOST", ""),
     smtp_port=int(os.getenv("SMTP_PORT", "25")),
     smtp_user=os.getenv("SMTP_USER", ""),

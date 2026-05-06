@@ -183,6 +183,15 @@ def _ensure_schema_columns() -> None:
         mail_event_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(mail_events)")).fetchall()}
         if "original_body" not in mail_event_columns:
             conn.execute(text("ALTER TABLE mail_events ADD COLUMN original_body TEXT NOT NULL DEFAULT ''"))
+        audit_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(audit_logs)")).fetchall()}
+        if "log_level" not in audit_columns:
+            conn.execute(text("ALTER TABLE audit_logs ADD COLUMN log_level VARCHAR(16) NOT NULL DEFAULT 'INFO'"))
+        if "module_name" not in audit_columns:
+            conn.execute(text("ALTER TABLE audit_logs ADD COLUMN module_name VARCHAR(64) NOT NULL DEFAULT 'system'"))
+        if "message" not in audit_columns:
+            conn.execute(text("ALTER TABLE audit_logs ADD COLUMN message TEXT NOT NULL DEFAULT ''"))
+        if "detail_json" not in audit_columns:
+            conn.execute(text("ALTER TABLE audit_logs ADD COLUMN detail_json TEXT NOT NULL DEFAULT '{}'"))
 
 
 def bootstrap_database() -> None:

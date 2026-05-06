@@ -41,21 +41,24 @@
 - `POST /admin/mail/inbox-test`
 - `POST /admin/mail/poll`
 - `POST /admin/mail/baseline`
+- `POST /admin/qax/collect`
 - `POST /delay-requests`
 - `GET /delay-requests/pending`
 - `POST /delay-requests/{delay_id}/approve`
 
-## 导入导出与审计
+## 导入导出与系统日志
 
 - `GET /tasks/import-template`
 - `POST /tasks/import`
 - `GET /tasks/import-histories`
 - `GET /reports/export`
 - `GET /audit-logs`
+- `GET /system-logs`
+- `POST /system-logs/cleanup`
 
 ## 补充说明
 
-- 系统管理员与管理员都可以调用管理接口；系统管理员在前端展示完整系统配置菜单，管理员隐藏模板、用户管理、邮件列表、审计日志入口。
+- 系统管理员与管理员都可以调用管理接口；系统管理员在前端展示完整系统配置菜单，管理员隐藏模板、用户管理、邮件列表、系统日志入口。
 - 任务创建与编辑接口现在按具体时间提交 `start_at`、`end_at`，前端默认会传入当天 `09:00` 到 `18:00`。
 - 任务导入模板返回 `.xlsx` 文件，负责人、参与人员和子任务执行人统一使用系统姓名，不使用用户名。
 - 任务导入接口支持高重叠检测；当历史重叠较高时，会先返回 `needs_confirmation=true`，前端确认后再继续导入。
@@ -74,3 +77,8 @@
 - `POST /admin/mail/test` 在遇到 SMTP SSL/TLS 握手错误时，会返回中文排障提示，明确提示 `465 / 587 / 25` 端口与 `SMTP_USE_SSL`、`SMTP_USE_TLS` 的推荐组合。
 - `POST /admin/mail/inbox-test` 与自动收件链路会读取 `IMAP_USE_SSL`、`IMAP_USE_TLS` 配置，支持明文、STARTTLS、SSL 三种收信连接方式。
 - `POST /admin/mail/inbox-test` 与 `POST /admin/mail/poll` 还会读取 `MAIL_INBOX_PROTOCOL`；当配置为 `pop3` 时，接口会按 `POP3_HOST / POP3_PORT / POP3_USER / POP3_PASSWORD / POP3_USE_SSL / POP3_USE_TLS` 工作。
+- `POST /admin/qax/collect` 会按通知 ID、接收人 ID、通知类型和任务标题拼出的 QAX 任务名回查状态，并把送达 / 已读结果写回通知接收人记录。
+- `POST /admin/qax/collect` 现在会同时返回 `processed_count`、`updated_count`、`failed_count` 统计字段，便于前端直接展示本次采集摘要。
+- `GET /system-logs` 会返回更适合运维排障的系统日志明细，包括等级、模块、摘要、操作人、来源 IP、变更前后快照与扩展详情。
+- `GET /audit-logs` 仍保留为兼容入口，实际返回内容与 `GET /system-logs` 一致。
+- `POST /system-logs/cleanup` 会按 `SYSTEM_LOG_RETENTION_DAYS` 手动清理过期系统日志，并补记一条清理结果日志。

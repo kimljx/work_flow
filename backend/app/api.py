@@ -68,10 +68,11 @@ from app.schemas import (
     UserUpdate,
 )
 from app.security import create_token, decode_token, get_current_user, require_admin, verify_password
-from app.services.audit import write_audit
+from app.services.audit import cleanup_system_logs, write_audit
 from app.services.delay import apply_delay_decision
 from app.services.mail import diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline, poll_mailbox
 from app.services.notifications import create_due_reminders, create_notification_with_recipients, preview_notification_content
+from app.services.qax import collect_qax_status
 from app.services.templates import sort_templates, template_matches, validate_template_content
 from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
@@ -469,7 +470,25 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
     # 创建任务后立即生成邮件和即时消息通知，确保成员在多个渠道都能收到任务分发信息。
     create_notification_with_recipients(db, task.id, "email", "task_created", "")
     create_notification_with_recipients(db, task.id, "qax", "task_created", "")
-    write_audit(db, current_user.id, "CREATE_TASK", "Task", task.id, {}, {"title": task.title, "source": source})
+    write_audit(
+        db,
+        current_user.id,
+        "CREATE_TASK",
+        "Task",
+        task.id,
+        {},
+        {"title": task.title, "source": source},
+        module_name="api.task",
+        message=f"创建任务《{task.title}》",
+        detail={
+            "source": source,
+            # 这里直接复用入参中的负责人 ID，避免依赖当前作用域之外的临时变量。
+            "owner_id": payload.owner_id,
+            "participant_ids": [item.user_id for item in task.members if item.member_role != "owner"],
+            "subtask_total": len(payload.subtasks),
+            "milestone_total": len(payload.milestones),
+        },
+    )
     return task
 
 
@@ -788,7 +807,18 @@ def create_user(payload: UserCreate, current_user: User = Depends(require_admin)
     )
     db.add(user)
     db.flush()
-    write_audit(db, current_user.id, "CREATE_USER", "User", user.id, {}, {"username": user.username, "role": user.role})
+    write_audit(
+        db,
+        current_user.id,
+        "CREATE_USER",
+        "User",
+        user.id,
+        {},
+        {"username": user.username, "role": user.role},
+        module_name="api.user",
+        message=f"创建用户「{user.name}」",
+        detail={"username": user.username, "role": user.role, "email": user.email, "ip_address": user.ip_address},
+    )
     db.commit()
     db.refresh(user)
     return serialize_user(user)
@@ -807,7 +837,18 @@ def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(
     user.email = payload.email
     user.ip_address = payload.ip_address
     user.is_active = payload.is_active
-    write_audit(db, current_user.id, "UPDATE_USER", "User", user.id, before, {"role": user.role, "is_active": user.is_active})
+    write_audit(
+        db,
+        current_user.id,
+        "UPDATE_USER",
+        "User",
+        user.id,
+        before,
+        {"role": user.role, "is_active": user.is_active},
+        module_name="api.user",
+        message=f"更新用户「{user.name}」信息",
+        detail={"email": user.email, "ip_address": user.ip_address, "is_active": user.is_active},
+    )
     db.commit()
     db.refresh(user)
     return serialize_user(user)
@@ -815,28 +856,237 @@ def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(
 
 @router.get("/dashboard/summary", response_model=DashboardSummary)
 def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> DashboardSummary:
+    now = shanghai_now_naive()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    open_statuses = {"not_started", "in_progress"}
     tasks = db.query(Task).filter(Task.deleted_at.is_(None)).all()
     notifications = db.query(Notification).all()
     recipients = db.query(NotificationRecipient).all()
+    delay_requests = db.query(DelayRequest).all()
+    mail_events = db.query(MailEvent).all()
+    status_events = db.query(TaskStatusEvent).all()
     email_notifications = [item for item in notifications if item.channel == "email"]
     qax_ids = {item.id for item in notifications if item.channel == "qax"}
     qax_recipients = [item for item in recipients if item.notification_id in qax_ids]
     email_success = sum(1 for item in email_notifications if item.status in ("sent", "delivered"))
+    pending_total = sum(1 for item in tasks if item.main_status == "not_started")
+    in_progress_total = sum(1 for item in tasks if item.main_status == "in_progress")
+    done_total = sum(1 for item in tasks if item.main_status == "done")
+    canceled_total = sum(1 for item in tasks if item.main_status == "canceled")
+    delayed_total = sum(1 for item in tasks if item.delay_days > 0)
+    due_soon_total = sum(
+        1
+        for item in tasks
+        if item.main_status in open_statuses and 0 <= (item.end_at - now).days <= 3
+    )
+    pending_delay_requests = sum(1 for item in delay_requests if item.approval_status == "PENDING")
+    failed_recipients = sum(1 for item in recipients if item.delivery_status == "failed")
+    failed_mail_events = sum(1 for item in mail_events if item.process_status == "FAILED")
+    mail_failure_total = failed_recipients + failed_mail_events
+    completion_rate = round(done_total * 100 / len(tasks), 2) if tasks else 0.0
+    healthy_task_base = max(len(tasks) - canceled_total, 1)
+    healthy_task_rate = round((healthy_task_base - delayed_total) * 100 / healthy_task_base, 2) if tasks else 0.0
+    email_success_rate = round(email_success * 100 / len(email_notifications), 2) if email_notifications else 0.0
+    qax_delivery_rate = round(sum(1 for item in qax_recipients if item.delivery_status == "delivered") * 100 / len(qax_recipients), 2) if qax_recipients else 0.0
+    qax_read_rate = round(sum(1 for item in qax_recipients if item.read_status == "read") * 100 / len(qax_recipients), 2) if qax_recipients else 0.0
+    retry_total = sum(item.retry_count for item in recipients)
+
+    task_trend = []
+    for offset in range(6, -1, -1):
+        day_start = today_start - timedelta(days=offset)
+        day_end = day_start + timedelta(days=1)
+        created_total = sum(1 for item in tasks if day_start <= item.created_at < day_end)
+        completed_total = sum(
+            1
+            for event in status_events
+            if event.to_status == "done" and day_start <= event.created_at < day_end
+        )
+        delayed_stock_total = sum(
+            1
+            for item in tasks
+            if item.main_status in open_statuses and item.end_at < day_end
+        )
+        task_trend.append(
+            {
+                "label": day_start.strftime("%m-%d"),
+                "created_total": created_total,
+                "completed_total": completed_total,
+                "delayed_total": delayed_stock_total,
+            }
+        )
+
+    status_distribution = []
+    for status in ("not_started", "in_progress", "done", "canceled"):
+        status_distribution.append(
+            {
+                "key": status,
+                "label": TASK_STATUS_LABELS.get(status, status),
+                "value": sum(1 for item in tasks if item.main_status == status),
+            }
+        )
+
+    priority_distribution = []
+    for priority in ("high", "medium", "low"):
+        priority_distribution.append(
+            {
+                "key": priority,
+                "label": PRIORITY_LABELS.get(priority, priority),
+                "value": sum(1 for item in tasks if item.priority == priority),
+            }
+        )
+
+    kpis = [
+        {
+            "label": "任务完成率",
+            "value": completion_rate,
+            "unit": "%",
+            "detail": f"已完成 {done_total} / 全部 {len(tasks)}",
+            "tone": "success" if completion_rate >= 70 else "warning" if completion_rate >= 40 else "danger",
+        },
+        {
+            "label": "在途任务",
+            "value": in_progress_total,
+            "unit": "",
+            "detail": f"未开始 {pending_total}，即将到期 {due_soon_total}",
+            "tone": "primary",
+        },
+        {
+            "label": "延期风险",
+            "value": delayed_total,
+            "unit": "",
+            "detail": f"健康任务率 {healthy_task_rate}%",
+            "tone": "danger" if delayed_total > 0 else "success",
+        },
+        {
+            "label": "审批积压",
+            "value": pending_delay_requests,
+            "unit": "",
+            "detail": f"沟通异常 {mail_failure_total}，重试 {retry_total}",
+            "tone": "warning" if pending_delay_requests > 0 or mail_failure_total > 0 else "neutral",
+        },
+    ]
+
+    attention_items = []
+    if pending_delay_requests > 0:
+        attention_items.append(
+            {
+                "title": "延期审批待处理",
+                "description": "成员提交的延期申请还在等待管理员决策，优先清空积压可避免任务继续失真。",
+                "value": f"{pending_delay_requests} 条",
+                "tone": "warning",
+                "route": "/admin/delay-requests",
+                "action_label": "前往审批",
+            }
+        )
+    if due_soon_total > 0:
+        attention_items.append(
+            {
+                "title": "即将到期任务",
+                "description": "未来 3 天内到期且仍未完结的任务需要尽快提醒或改派。",
+                "value": f"{due_soon_total} 项",
+                "tone": "danger",
+                "route": "/admin/tasks",
+                "action_label": "查看任务",
+            }
+        )
+    if mail_failure_total > 0 or retry_total > 0:
+        attention_items.append(
+            {
+                "title": "通知链路异常",
+                "description": "存在发送失败、收件处理失败或重试累计，建议优先检查邮件与通知记录。",
+                "value": f"{mail_failure_total} 异常 / {retry_total} 重试",
+                "tone": "primary",
+                "route": "/admin/notifications",
+                "action_label": "检查通知",
+            }
+        )
+    if delayed_total > 0:
+        attention_items.append(
+            {
+                "title": "延期任务需要复盘",
+                "description": "延期任务说明排期或协作存在阻塞，适合从高优先级任务先做排障。",
+                "value": f"{delayed_total} 项",
+                "tone": "danger",
+                "route": "/admin/tasks",
+                "action_label": "聚焦风险",
+            }
+        )
+    if not attention_items:
+        attention_items.append(
+            {
+                "title": "当前没有高优先级阻塞",
+                "description": "审批、到期风险和通知异常都处在较平稳状态，可以继续推进计划型工作。",
+                "value": "状态稳定",
+                "tone": "success",
+                "route": "/admin/tasks/new",
+                "action_label": "新建任务",
+            }
+        )
+
+    quick_actions = [
+        {
+            "title": "创建任务",
+            "description": "直接发起新任务并同步通知成员。",
+            "route": "/admin/tasks/new",
+            "action_label": "立即创建",
+            "tone": "primary",
+        },
+        {
+            "title": "导入任务",
+            "description": "批量导入计划，适合周计划或跨部门分发。",
+            "route": "/admin/import-export",
+            "action_label": "批量导入",
+            "tone": "neutral",
+        },
+        {
+            "title": "处理延期审批",
+            "description": "优先消化待审批事项，避免任务时间继续漂移。",
+            "route": "/admin/delay-requests",
+            "action_label": "处理审批",
+            "tone": "warning",
+        },
+        {
+            "title": "检查通知链路",
+            "description": "查看通知记录与发送反馈，确认成员是否真正收到提醒。",
+            "route": "/admin/notifications",
+            "action_label": "查看通知",
+            "tone": "soft",
+        },
+    ]
+
+    health_score = round(
+        max(
+            0,
+            min(
+                100,
+                completion_rate * 0.35 + healthy_task_rate * 0.35 + email_success_rate * 0.15 + qax_delivery_rate * 0.15,
+            ),
+        )
+    )
 
     return DashboardSummary(
         task_total=len(tasks),
-        in_progress_total=sum(1 for item in tasks if item.main_status == "in_progress"),
-        done_total=sum(1 for item in tasks if item.main_status == "done"),
-        canceled_total=sum(1 for item in tasks if item.main_status == "canceled"),
-        delayed_total=sum(1 for item in tasks if item.delay_days > 0),
-        email_success_rate=round(email_success * 100 / len(email_notifications), 2) if email_notifications else 0.0,
-        qax_delivery_rate=round(sum(1 for item in qax_recipients if item.delivery_status == "delivered") * 100 / len(qax_recipients), 2)
-        if qax_recipients
-        else 0.0,
-        qax_read_rate=round(sum(1 for item in qax_recipients if item.read_status == "read") * 100 / len(qax_recipients), 2)
-        if qax_recipients
-        else 0.0,
-        retry_total=sum(item.retry_count for item in recipients),
+        in_progress_total=in_progress_total,
+        done_total=done_total,
+        canceled_total=canceled_total,
+        delayed_total=delayed_total,
+        pending_total=pending_total,
+        due_soon_total=due_soon_total,
+        completion_rate=completion_rate,
+        healthy_task_rate=healthy_task_rate,
+        email_success_rate=email_success_rate,
+        qax_delivery_rate=qax_delivery_rate,
+        qax_read_rate=qax_read_rate,
+        retry_total=retry_total,
+        pending_delay_requests=pending_delay_requests,
+        mail_failure_total=mail_failure_total,
+        health_score=health_score,
+        kpis=kpis,
+        status_distribution=status_distribution,
+        priority_distribution=priority_distribution,
+        task_trend=task_trend,
+        attention_items=attention_items,
+        quick_actions=quick_actions,
     )
 
 
@@ -847,7 +1097,18 @@ def disable_user(user_id: int, current_user: User = Depends(require_admin), db: 
         raise HTTPException(status_code=404, detail="用户不存在")
     ensure_last_admin_not_removed(db, user, user.role, False)
     user.is_active = False
-    write_audit(db, current_user.id, "DISABLE_USER", "User", user.id, {"is_active": True}, {"is_active": False})
+    write_audit(
+        db,
+        current_user.id,
+        "DISABLE_USER",
+        "User",
+        user.id,
+        {"is_active": True},
+        {"is_active": False},
+        module_name="api.user",
+        message=f"禁用用户「{user.name}」",
+        detail={"username": user.username},
+    )
     db.commit()
     return ApiMessage(message="用户已禁用")
 
@@ -858,7 +1119,18 @@ def enable_user(user_id: int, current_user: User = Depends(require_admin), db: S
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     user.is_active = True
-    write_audit(db, current_user.id, "ENABLE_USER", "User", user.id, {"is_active": False}, {"is_active": True})
+    write_audit(
+        db,
+        current_user.id,
+        "ENABLE_USER",
+        "User",
+        user.id,
+        {"is_active": False},
+        {"is_active": True},
+        module_name="api.user",
+        message=f"启用用户「{user.name}」",
+        detail={"username": user.username},
+    )
     db.commit()
     return ApiMessage(message="用户已启用")
 
@@ -869,7 +1141,18 @@ def reset_password(user_id: int, current_user: User = Depends(require_admin), db
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     user.password_hash = build_default_password_hash(settings.default_password)
-    write_audit(db, current_user.id, "RESET_PASSWORD", "User", user.id, {}, {"default_password_applied": True})
+    write_audit(
+        db,
+        current_user.id,
+        "RESET_PASSWORD",
+        "User",
+        user.id,
+        {},
+        {"default_password_applied": True},
+        module_name="api.user",
+        message=f"重置用户「{user.name}」密码",
+        detail={"username": user.username},
+    )
     db.commit()
     return ApiMessage(message="密码已重置")
 
@@ -1207,7 +1490,23 @@ def update_task(task_id: int, payload: TaskCreate, current_user: User = Depends(
                 status=subtask.status or "pending",
             )
         )
-    write_audit(db, current_user.id, "UPDATE_TASK", "Task", task.id, before, {"title": task.title, "end_at": task.end_at.isoformat()})
+    write_audit(
+        db,
+        current_user.id,
+        "UPDATE_TASK",
+        "Task",
+        task.id,
+        before,
+        {"title": task.title, "end_at": task.end_at.isoformat()},
+        module_name="api.task",
+        message=f"更新任务《{task.title}》",
+        detail={
+            "start_at": task.start_at.isoformat(),
+            "end_at": task.end_at.isoformat(),
+            "owner_id": next((item.user_id for item in task.members if item.member_role == "owner"), None),
+            "participant_total": sum(1 for item in task.members if item.member_role != "owner"),
+        },
+    )
     db.commit()
     db.refresh(task)
     return serialize_task(task, db)
@@ -1229,6 +1528,9 @@ def delete_task(task_id: int, current_user: User = Depends(require_admin), db: S
         task.id,
         {"deleted_at": None},
         {"deleted_at": task.deleted_at.isoformat(), "cleaned_due_reminders": cleaned_reminders},
+        module_name="api.task",
+        message=f"删除任务《{task.title}》",
+        detail={"cleaned_due_reminders": cleaned_reminders, "due_remind_days": task.due_remind_days},
     )
     db.commit()
     return ApiMessage(message="任务已删除")
@@ -1244,7 +1546,18 @@ def change_status(task_id: int, payload: TaskStatusUpdate, current_user: User = 
     if payload.main_status == "done" and task.actual_minutes == 0:
         task.actual_minutes = int((shanghai_now_naive() - task.start_at).total_seconds() // 60)
     db.add(TaskStatusEvent(task_id=task.id, from_status=before["main_status"], to_status=task.main_status, source="web", remark=payload.remark, operator_id=current_user.id))
-    write_audit(db, current_user.id, "CHANGE_TASK_STATUS", "Task", task.id, before, {"main_status": task.main_status})
+    write_audit(
+        db,
+        current_user.id,
+        "CHANGE_TASK_STATUS",
+        "Task",
+        task.id,
+        before,
+        {"main_status": task.main_status},
+        module_name="api.task",
+        message=f"更新任务《{task.title}》状态为 {task.main_status}",
+        detail={"remark": payload.remark},
+    )
     db.commit()
     db.refresh(task)
     return serialize_task(task, db)
@@ -1350,7 +1663,18 @@ def create_template(payload: TemplateCreate, current_user: User = Depends(requir
     template = Template(**payload.model_dump())
     db.add(template)
     db.flush()
-    write_audit(db, current_user.id, "CREATE_TEMPLATE", "Template", template.id, {}, {"name": template.name})
+    write_audit(
+        db,
+        current_user.id,
+        "CREATE_TEMPLATE",
+        "Template",
+        template.id,
+        {},
+        {"name": template.name},
+        module_name="api.template",
+        message=f"创建模板《{template.name}》",
+        detail={"template_kind": template.template_kind, "notify_type": template.notify_type, "version": template.version},
+    )
     db.commit()
     return {"id": template.id}
 
@@ -1365,7 +1689,18 @@ def update_template(template_id: int, payload: TemplateCreate, current_user: Use
     before = {"name": template.name, "version": template.version}
     for key, value in payload.model_dump().items():
         setattr(template, key, value)
-    write_audit(db, current_user.id, "UPDATE_TEMPLATE", "Template", template.id, before, {"name": template.name, "version": template.version})
+    write_audit(
+        db,
+        current_user.id,
+        "UPDATE_TEMPLATE",
+        "Template",
+        template.id,
+        before,
+        {"name": template.name, "version": template.version},
+        module_name="api.template",
+        message=f"更新模板《{template.name}》",
+        detail={"template_kind": template.template_kind, "notify_type": template.notify_type, "enabled": template.enabled},
+    )
     db.commit()
     return {"id": template.id}
 
@@ -1381,7 +1716,18 @@ def set_default_template(template_id: int, current_user: User = Depends(require_
         Template.is_default.is_(True),
     ).update({"is_default": False})
     template.is_default = True
-    write_audit(db, current_user.id, "SET_TEMPLATE_DEFAULT", "Template", template.id, {}, {"is_default": True})
+    write_audit(
+        db,
+        current_user.id,
+        "SET_TEMPLATE_DEFAULT",
+        "Template",
+        template.id,
+        {},
+        {"is_default": True},
+        module_name="api.template",
+        message=f"设置模板《{template.name}》为默认模板",
+        detail={"template_kind": template.template_kind, "notify_type": template.notify_type},
+    )
     db.commit()
     return ApiMessage(message="模板默认项已更新")
 
@@ -1463,6 +1809,27 @@ def poll_mail_inbox(_: User = Depends(require_admin), db: Session = Depends(get_
 @router.post("/admin/mail/baseline", response_model=dict)
 def reset_mail_baseline(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     return initialize_mail_scan_baseline(db)
+
+
+@router.post("/admin/qax/collect", response_model=dict)
+def run_qax_collect(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """手动触发一次 QAX 状态采集。"""
+    result = collect_qax_status(db)
+    write_audit(
+        db,
+        current_user.id,
+        "MANUAL_COLLECT_QAX_STATUS",
+        "Notification",
+        None,
+        {},
+        {"status": result.get("status"), "updated_count": result.get("updated_count", 0)},
+        log_level="INFO" if result.get("status") == "success" else "WARNING",
+        module_name="api.qax",
+        message=f"手动采集 QAX 状态完成，结果：{result.get('status')}",
+        detail=result,
+    )
+    db.commit()
+    return result
 
 
 @router.post("/tasks/{task_id}/remind", response_model=ApiMessage)
@@ -1777,7 +2144,49 @@ def export_report(_: User = Depends(require_admin), db: Session = Depends(get_db
 
 @router.get("/audit-logs", response_model=list[AuditOut])
 def list_audit_logs(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[AuditOut]:
+    user_name_map = {item.id: item.name for item in db.query(User).all()}
     return [
-        AuditOut(id=item.id, action_type=item.action_type, target_type=item.target_type, target_id=item.target_id, created_at=item.created_at)
+        AuditOut(
+            id=item.id,
+            log_level=getattr(item, "log_level", "INFO"),
+            module_name=getattr(item, "module_name", "system"),
+            action_type=item.action_type,
+            message=getattr(item, "message", item.action_type),
+            operator_id=item.operator_id,
+            operator_name=user_name_map.get(item.operator_id or 0, ""),
+            target_type=item.target_type,
+            target_id=item.target_id,
+            source_ip=item.source_ip,
+            before_json=getattr(item, "before_json", "{}") or "{}",
+            after_json=getattr(item, "after_json", "{}") or "{}",
+            detail_json=getattr(item, "detail_json", "{}") or "{}",
+            created_at=item.created_at,
+        )
         for item in db.query(AuditLog).order_by(AuditLog.id.desc()).all()
     ]
+
+
+@router.get("/system-logs", response_model=list[AuditOut])
+def list_system_logs(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[AuditOut]:
+    """系统日志新入口，兼容旧的 `/audit-logs` 路由。"""
+    return list_audit_logs(_, db)
+
+
+@router.post("/system-logs/cleanup", response_model=ApiMessage)
+def cleanup_expired_system_logs(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    """手动清理超过保留期的系统日志。"""
+    deleted_count = cleanup_system_logs(db, settings.system_log_retention_days)
+    write_audit(
+        db,
+        current_user.id,
+        "CLEANUP_SYSTEM_LOG",
+        "SystemLog",
+        None,
+        {},
+        {"deleted_count": deleted_count, "retention_days": settings.system_log_retention_days},
+        module_name="api.system-log",
+        message=f"手动清理系统日志，删除 {deleted_count} 条过期记录",
+        detail={"retention_days": settings.system_log_retention_days},
+    )
+    db.commit()
+    return ApiMessage(message=f"已清理 {deleted_count} 条超过 {settings.system_log_retention_days} 天的系统日志")

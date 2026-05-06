@@ -3,10 +3,9 @@ from __future__ import annotations
 """构建 Windows 内网离线发布包。
 
 发布包目标：
-1. 内网电脑只需具备 Python 3.10，无需 Node.js；
-2. 所有后端依赖均提前下载为离线安装包；
-3. 前端使用构建后的静态资源，由 FastAPI 统一托管；
-4. 输出“目录版发布包 + zip 压缩包”，便于复制与归档。
+1. 目标电脑无需预装 Python、Node.js 或 Playwright 浏览器。
+2. 后端依赖、QAX 所需 Chromium 浏览器和前端静态资源全部提前打入包内。
+3. 输出“目录版发布包 + zip 压缩包”，方便复制、归档和升级。
 """
 
 import shutil
@@ -26,42 +25,44 @@ PYTHON_EMBED_URL = (
     f"https://www.python.org/ftp/python/{PYTHON_EMBED_VERSION}/"
     f"python-{PYTHON_EMBED_VERSION}-embed-amd64.zip"
 )
+PYTHON_DOWNLOAD_CMD = ["py", "-3.10"]
+BROWSER_NAME = "chromium"
 RELEASE_NAME = f"work_flow_windows_offline_py310_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 RELEASE_ROOT = DIST_ROOT / RELEASE_NAME
 
 
-def run_command(command: list[str], cwd: Path | None = None) -> None:
-    """执行外部命令并在失败时直接中断。"""
+def run_command(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    """执行外部命令，并在失败时直接中断构建。"""
+
     print(f"[执行] {' '.join(command)}")
-    subprocess.run(command, cwd=cwd, check=True)
+    subprocess.run(command, cwd=cwd, check=True, env=env)
 
 
 def ensure_clean_directory(path: Path) -> None:
     """确保输出目录为空目录。"""
+
     if path.exists():
         shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
 
 
 def copy_windows_text_file(source: Path, destination: Path, encoding: str = "gbk") -> None:
-    """按 Windows 文本习惯复制脚本与说明文件。
+    """以 Windows 文本格式复制脚本和说明文件。"""
 
-    这里统一转换为 CRLF 行尾，并默认使用 GBK 编码，确保在中文 Windows
-    的 `cmd` 与记事本里直接打开时都能正常显示和执行。
-    """
     content = source.read_text(encoding="utf-8")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(content, encoding=encoding, newline="\r\n")
 
 
 def build_frontend_dist() -> None:
-    """重新构建前端静态资源，确保离线包中的页面与代码一致。"""
-    npm_command = "npm.cmd" if sys.platform.startswith("win") else "npm"
-    run_command([npm_command, "run", "build"], cwd=PROJECT_ROOT / "frontend")
+    """重新构建前端静态资源，确保离线包内容与当前代码一致。"""
+
+    run_command(["npm.cmd", "run", "build"], cwd=PROJECT_ROOT / "frontend")
 
 
 def download_embedded_python(target_zip: Path) -> None:
-    """下载官方 Windows 嵌入式 Python 运行时压缩包。"""
+    """下载官方 Windows 嵌入式 Python 运行时。"""
+
     print(f"[下载] {PYTHON_EMBED_URL}")
     target_zip.parent.mkdir(parents=True, exist_ok=True)
     urlretrieve(PYTHON_EMBED_URL, target_zip)
@@ -69,14 +70,11 @@ def download_embedded_python(target_zip: Path) -> None:
 
 def download_python_packages(target_dir: Path) -> None:
     """下载 Python 3.10 对应的离线依赖包。"""
-    target_dir.mkdir(parents=True, exist_ok=True)
 
-    # 使用本机 Python 3.10 环境下载与目标环境一致的依赖包，
-    # 避免离线电脑安装时因为 Python 小版本或 ABI 不匹配而失败。
+    target_dir.mkdir(parents=True, exist_ok=True)
     run_command(
         [
-            "py",
-            "-3.10",
+            *PYTHON_DOWNLOAD_CMD,
             "-m",
             "pip",
             "download",
@@ -88,8 +86,7 @@ def download_python_packages(target_dir: Path) -> None:
     )
     run_command(
         [
-            "py",
-            "-3.10",
+            *PYTHON_DOWNLOAD_CMD,
             "-m",
             "pip",
             "download",
@@ -102,12 +99,9 @@ def download_python_packages(target_dir: Path) -> None:
     )
 
 
-def prepare_embedded_runtime(release_root: Path) -> None:
-    """准备内置 Python 3.10 运行时并预装依赖。
+def prepare_embedded_runtime(release_root: Path) -> Path:
+    """准备内置 Python 运行时并预装依赖，返回运行时 Python 路径。"""
 
-    发布包内直接附带嵌入式 Python 解释器，目标机无需额外安装 Python，
-    同时把后端依赖预装到运行时目录，确保开箱即可启动。
-    """
     runtime_root = release_root / "runtime" / "python"
     embed_zip = release_root / "runtime" / f"python-{PYTHON_EMBED_VERSION}-embed-amd64.zip"
     site_packages_dir = runtime_root / "Lib" / "site-packages"
@@ -129,8 +123,7 @@ def prepare_embedded_runtime(release_root: Path) -> None:
 
     run_command(
         [
-            "py",
-            "-3.10",
+            *PYTHON_DOWNLOAD_CMD,
             "-m",
             "pip",
             "install",
@@ -144,27 +137,54 @@ def prepare_embedded_runtime(release_root: Path) -> None:
             str(PROJECT_ROOT / "backend" / "requirements.txt"),
         ]
     )
+    return runtime_root / "python.exe"
+
+
+def install_playwright_browser(runtime_python: Path, release_root: Path) -> None:
+    """把 QAX 依赖的 Chromium 浏览器直接安装到发布包内。"""
+
+    browser_root = release_root / "runtime" / "ms-playwright"
+    browser_root.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os_environ())
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_root)
+    env["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
+
+    run_command([str(runtime_python), "-m", "playwright", "install", BROWSER_NAME], env=env)
+
+
+def copytree_filtered(source: Path, destination: Path) -> None:
+    """复制目录，同时排除缓存文件，避免把构建噪音带入发布包。"""
+
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.log"),
+    )
 
 
 def copy_release_files(release_root: Path) -> None:
-    """复制发布包需要的应用、脚本与文档。"""
+    """复制发布包所需的应用、脚本与文档。"""
+
     app_root = release_root / "app"
     backend_root = app_root / "backend"
     frontend_root = app_root / "frontend"
     docs_root = release_root / "docs"
     config_root = release_root / "config"
     tools_root = release_root / "tools"
+    backup_root = release_root / "backup"
 
-    shutil.copytree(PROJECT_ROOT / "backend" / "app", backend_root / "app")
+    copytree_filtered(PROJECT_ROOT / "backend" / "app", backend_root / "app")
     shutil.copy2(PROJECT_ROOT / "backend" / "requirements.txt", backend_root / "requirements.txt")
     shutil.copy2(PROJECT_ROOT / "backend" / "run.py", backend_root / "run.py")
     (backend_root / "data").mkdir(parents=True, exist_ok=True)
 
-    shutil.copytree(PROJECT_ROOT / "frontend" / "dist", frontend_root / "dist")
-    shutil.copytree(PROJECT_ROOT / "docs", docs_root)
-    shutil.copytree(WINDOWS_TEMPLATE_ROOT / "tools", tools_root)
+    copytree_filtered(PROJECT_ROOT / "frontend" / "dist", frontend_root / "dist")
+    copytree_filtered(PROJECT_ROOT / "docs", docs_root)
+    copytree_filtered(WINDOWS_TEMPLATE_ROOT / "tools", tools_root)
 
     config_root.mkdir(parents=True, exist_ok=True)
+    backup_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(WINDOWS_TEMPLATE_ROOT / ".env.offline.example", config_root / ".env.offline.example")
     copy_windows_text_file(WINDOWS_TEMPLATE_ROOT / "install_offline.bat", release_root / "install_offline.bat")
     copy_windows_text_file(WINDOWS_TEMPLATE_ROOT / "start_system.bat", release_root / "start_system.bat")
@@ -177,6 +197,7 @@ def copy_release_files(release_root: Path) -> None:
 
 def zip_release_directory(release_root: Path) -> Path:
     """将目录版发布包压缩为 zip 文件。"""
+
     zip_path = release_root.with_suffix(".zip")
     if zip_path.exists():
         zip_path.unlink()
@@ -188,20 +209,28 @@ def zip_release_directory(release_root: Path) -> Path:
     return zip_path
 
 
+def os_environ() -> dict[str, str]:
+    """返回当前环境变量副本，便于构建过程追加临时变量。"""
+
+    return dict(__import__("os").environ)
+
+
 def main() -> int:
-    """构建离线发布包主流程。"""
+    """执行 Windows 离线发布包构建主流程。"""
+
     DIST_ROOT.mkdir(parents=True, exist_ok=True)
     ensure_clean_directory(RELEASE_ROOT)
     ensure_clean_directory(RELEASE_ROOT / "packages")
 
     build_frontend_dist()
     download_python_packages(RELEASE_ROOT / "packages")
-    prepare_embedded_runtime(RELEASE_ROOT)
+    runtime_python = prepare_embedded_runtime(RELEASE_ROOT)
+    install_playwright_browser(runtime_python, RELEASE_ROOT)
     copy_release_files(RELEASE_ROOT)
     zip_path = zip_release_directory(RELEASE_ROOT)
 
     print()
-    print("离线发布包已生成：")
+    print("Windows 离线发布包已生成：")
     print(f"- 目录版：{RELEASE_ROOT}")
     print(f"- 压缩包：{zip_path}")
     return 0

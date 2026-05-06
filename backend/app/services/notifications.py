@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Notification, NotificationRecipient, Task, TaskMember, TaskSubtask, Template, User
 from app.services.mail import send_mail_notification
+from app.services.qax import sanitize_qax_content, send_qax_notification
 from app.timeutils import shanghai_now_naive
 
 
@@ -198,6 +199,18 @@ def _resolve_template_content(
     return subject, content
 
 
+def _normalize_outbound_content(channel: str, content: str) -> str:
+    """按渠道清洗最终发送正文。
+
+    邮件保留原始换行与回复指引；QAX 会移除邮件专属回复说明，
+    保证通知详情页展示的快照与接收人实际看到的即时消息正文一致。
+    """
+
+    if channel == "qax":
+        return sanitize_qax_content(content)
+    return content
+
+
 def preview_notification_content(
     db: Session,
     task: Task | None,
@@ -236,11 +249,13 @@ def create_notification_with_recipients(
     """创建通知及其接收人记录。"""
     task = db.query(Task).filter(Task.id == task_id).first()
     _, _, _, rendered_content = _resolve_template_payload(db, channel, notify_type, task, extra_context=extra_context)
+    default_snapshot = _normalize_outbound_content(channel, content_snapshot or rendered_content)
+    _, creator_name = _owner_and_creator_names(task, db)
     notification = Notification(
         task_id=task_id,
         channel=channel,
         notify_type=notify_type,
-        content_snapshot=content_snapshot or rendered_content,
+        content_snapshot=default_snapshot,
         status="pending",
     )
     db.add(notification)
@@ -268,6 +283,7 @@ def create_notification_with_recipients(
             recipient=user,
             extra_context=extra_context,
         )
+        outbound_content = _normalize_outbound_content(channel, content_snapshot or personalized_content)
         delivery_status = "pending"
         read_status = "unread"
         last_error = ""
@@ -276,7 +292,7 @@ def create_notification_with_recipients(
             result = send_mail_notification(
                 to_address=user.email if user else "",
                 subject=subject,
-                content=content_snapshot or personalized_content,
+                content=outbound_content,
             )
             if result["status"] == "sent":
                 delivery_status = "delivered"
@@ -285,6 +301,35 @@ def create_notification_with_recipients(
                 delivery_status = "failed"
                 last_error = result["message"]
                 failure_count += 1
+        elif channel == "qax":
+            recipient_row = NotificationRecipient(
+                notification_id=notification.id,
+                user_id=user_id,
+                recipient_role=recipient_role,
+                delivery_status=delivery_status,
+                read_status=read_status,
+                retry_count=0,
+                content_snapshot=outbound_content,
+                last_error=last_error,
+            )
+            db.add(recipient_row)
+            db.flush()
+            result = send_qax_notification(
+                notification=notification,
+                recipient=recipient_row,
+                task=task,
+                user=user,
+                subject=subject,
+                content=outbound_content,
+                publisher_name=creator_name,
+            )
+            if result["status"] != "queued":
+                delivery_status = "failed"
+                last_error = result["message"]
+                failure_count += 1
+            recipient_row.delivery_status = delivery_status
+            recipient_row.last_error = last_error
+            continue
 
         db.add(
             NotificationRecipient(
@@ -294,7 +339,7 @@ def create_notification_with_recipients(
                 delivery_status=delivery_status,
                 read_status=read_status,
                 retry_count=0,
-                content_snapshot=content_snapshot or personalized_content,
+                content_snapshot=outbound_content,
                 last_error=last_error,
             )
         )
@@ -306,6 +351,8 @@ def create_notification_with_recipients(
             notification.status = "delivered"
         else:
             notification.status = "pending"
+    elif channel == "qax":
+        notification.status = "failed" if success_count == 0 and failure_count > 0 else "pending"
     else:
         notification.status = "pending"
 

@@ -612,6 +612,102 @@ class MailServiceTestCase(unittest.TestCase):
             settings.imap_use_ssl = original_ssl
             settings.imap_use_tls = original_tls
 
+    def test_poll_mailbox_does_not_treat_system_notification_as_member_reply(self) -> None:
+        import app.services.mail as mail_module
+
+        original_host = settings.imap_host
+        original_user = settings.imap_user
+        original_password = settings.imap_password
+        original_ssl = settings.imap_use_ssl
+        original_tls = settings.imap_use_tls
+        settings.imap_host = "imap.example.com"
+        settings.imap_user = "user"
+        settings.imap_password = "pass"
+        settings.imap_use_ssl = True
+        settings.imap_use_tls = False
+
+        class DummyImap:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def login(self, user, password):
+                return "OK", []
+
+            def select(self, mailbox):
+                return "OK", []
+
+            def search(self, *args):
+                return "OK", [b"11"]
+
+            def fetch(self, imap_id, _):
+                message = EmailMessage()
+                message["Message-ID"] = "<system-task-created@example.com>"
+                message["Subject"] = "回复：任务通知提醒#1：测试任务"
+                message["From"] = "admin@example.com"
+                message["Date"] = "Wed, 23 Apr 2026 11:30:00 +0800"
+                message.set_content(
+                    "您好，系统管理员\n"
+                    "任务创建人：系统管理员\n"
+                    "负责人：系统管理员\n"
+                    "任务编号：1\n"
+                    "任务名称：测试任务\n"
+                    "开始时间：2026-04-20 09:00\n"
+                    "结束时间：2026-04-25 18:00\n"
+                    "主任务详情：内容\n"
+                    "当前提醒重点：主任务整体进度跟进\n"
+                    "子任务安排：\n"
+                    "当前接收人暂无分配子任务\n\n"
+                    "回复指引：\n"
+                    "1. 回复“进行中 + 备注”可更新任务状态。\n"
+                    "2. 回复“已完成 + 备注”可将任务标记为完成。\n"
+                    "3. 如需延期，请回复“延期 + 新日期 + 原因”。\n"
+                )
+                return "OK", [(None, message.as_bytes())]
+
+        original_imap = mail_module.imaplib.IMAP4_SSL
+        mail_module.imaplib.IMAP4_SSL = lambda host, port: DummyImap()
+        try:
+            with SessionLocal() as db:
+                admin = User(username="admin", password_hash=hash_password("x"), role="system_admin", name="系统管理员", email="admin@example.com", ip_address="10.0.0.1", is_active=True)
+                db.add(admin)
+                db.flush()
+                task = Task(title="测试任务", content="内容", priority="medium", remark="", start_at=datetime(2026, 4, 20, 9, 0, 0), end_at=datetime(2026, 4, 25, 18, 0, 0), planned_minutes=60, actual_minutes=0, main_status="not_started", delay_days=0, state_locked=False, created_by=admin.id)
+                db.add(task)
+                db.flush()
+                db.add(TaskMember(task_id=task.id, user_id=admin.id, member_role="owner"))
+                db.add(Template(name="完成模板", template_kind="MAIL_REPLY", notify_type="task_done", priority=120, version=1, enabled=True, is_default=True, subject_rule="已完成|完成", body_rule="已完成|完成", content=""))
+                db.add(Template(name="延期模板", template_kind="MAIL_REPLY", notify_type="delay_request", priority=130, version=1, enabled=True, is_default=True, subject_rule="延期", body_rule="延期", content=""))
+                notification = Notification(task_id=task.id, channel="email", notify_type="task_created", content_snapshot="任务创建通知", status="delivered")
+                db.add(notification)
+                db.flush()
+                recipient = NotificationRecipient(notification_id=notification.id, user_id=admin.id, recipient_role="owner", delivery_status="delivered", read_status="unread", retry_count=0, content_snapshot="任务创建通知", last_error="")
+                db.add(recipient)
+                initialize_mail_scan_baseline(db)
+                db.query(MailScanState).filter(MailScanState.id == 1).update({"baseline_started_at": datetime(2026, 4, 21, 0, 0, 0), "last_scan_at": datetime(2026, 4, 21, 0, 0, 0)})
+                db.commit()
+
+                result = poll_mailbox(db)
+
+                db.refresh(task)
+                db.refresh(recipient)
+                self.assertEqual(result["status"], "success")
+                self.assertEqual(task.main_status, "not_started")
+                self.assertEqual(recipient.read_status, "unread")
+                action = db.query(MailAction).order_by(MailAction.id.desc()).first()
+                self.assertIsNotNone(action)
+                self.assertEqual(action.action_status, "FAILED")
+                self.assertEqual(db.query(DelayRequest).count(), 0)
+        finally:
+            mail_module.imaplib.IMAP4_SSL = original_imap
+            settings.imap_host = original_host
+            settings.imap_user = original_user
+            settings.imap_password = original_password
+            settings.imap_use_ssl = original_ssl
+            settings.imap_use_tls = original_tls
+
     def test_mark_notification_recipient_replied_updates_latest_email_notification(self) -> None:
         with SessionLocal() as db:
             member = User(username="member", password_hash=hash_password("x"), role="member", name="成员", email="member@example.com", ip_address="10.0.0.2", is_active=True)

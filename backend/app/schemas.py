@@ -300,6 +300,44 @@ class MailPollStateOut(BaseModel):
     next_poll_at: datetime | None = None
 
 
+class DashboardKpi(BaseModel):
+    label: str
+    value: float | int
+    unit: str = ""
+    detail: str = ""
+    tone: str = "neutral"
+
+
+class DashboardDistributionItem(BaseModel):
+    key: str
+    label: str
+    value: int
+
+
+class DashboardTrendPoint(BaseModel):
+    label: str
+    created_total: int = 0
+    completed_total: int = 0
+    delayed_total: int = 0
+
+
+class DashboardAttentionItem(BaseModel):
+    title: str
+    description: str
+    value: str = ""
+    tone: str = "neutral"
+    route: str = ""
+    action_label: str = ""
+
+
+class DashboardQuickAction(BaseModel):
+    title: str
+    description: str
+    route: str
+    action_label: str
+    tone: str = "neutral"
+
+
 class DashboardSummary(BaseModel):
     """管理员看板汇总指标。"""
     task_total: int
@@ -307,16 +345,38 @@ class DashboardSummary(BaseModel):
     done_total: int
     canceled_total: int
     delayed_total: int
+    pending_total: int = 0
+    due_soon_total: int = 0
+    completion_rate: float = 0
+    healthy_task_rate: float = 0
     email_success_rate: float
     qax_delivery_rate: float
     qax_read_rate: float
     retry_total: int
+    pending_delay_requests: int = 0
+    mail_failure_total: int = 0
+    health_score: int = 0
+    kpis: list[DashboardKpi] = Field(default_factory=list)
+    status_distribution: list[DashboardDistributionItem] = Field(default_factory=list)
+    priority_distribution: list[DashboardDistributionItem] = Field(default_factory=list)
+    task_trend: list[DashboardTrendPoint] = Field(default_factory=list)
+    attention_items: list[DashboardAttentionItem] = Field(default_factory=list)
+    quick_actions: list[DashboardQuickAction] = Field(default_factory=list)
 
 
 class AuditOut(BaseModel):
-    """审计日志输出结构。"""
+    """系统日志输出结构。"""
     id: int
+    log_level: str = ""
+    module_name: str = ""
     action_type: str
+    message: str = ""
+    operator_id: int | None = None
+    operator_name: str = ""
     target_type: str
     target_id: int | None
+    source_ip: str = ""
+    before_json: str = "{}"
+    after_json: str = "{}"
+    detail_json: str = "{}"
     created_at: datetime

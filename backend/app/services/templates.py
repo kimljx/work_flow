@@ -53,8 +53,12 @@ def _split_rule(rule: str) -> list[str]:
     return [item.strip() for item in normalized.split("|") if item.strip()]
 
 
-def _strip_reply_guides(body: str) -> str:
-    """剔除系统下发邮件中的回复指引与引用原文，避免误触发回复模板。"""
+def strip_reply_guides(body: str) -> str:
+    """剔除正文中的回复指引与引用原文。
+
+    该能力既用于邮件回执匹配，也用于将邮件模板改造成 QAX 正文时移除“请按邮件回复”的提示，
+    避免即时消息正文里混入无法执行的交互说明。
+    """
     normalized_lines: list[str] = []
     skip_guide_block = False
     for raw_line in (body or "").splitlines():
@@ -78,7 +82,7 @@ def _strip_reply_guides(body: str) -> str:
 def template_matches(template: Template, subject: str, body: str) -> bool:
     """判断邮件主题或正文是否命中某个模板。"""
     subject_text = (subject or "").lower()
-    body_text = _strip_reply_guides(body).lower()
+    body_text = strip_reply_guides(body).lower()
     subject_rules = _split_rule(template.subject_rule)
     body_rules = _split_rule(template.body_rule)
 

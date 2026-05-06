@@ -403,9 +403,16 @@
                   <span :class="item.sourceTone">{{ item.sourceText }}</span>
                   <span class="subtle-text">{{ item.summaryLabel }}</span>
                 </div>
-                <div class="task-status-timeline-body">{{ item.summary }}</div>
-                <div v-if="item.hasOriginalMail" class="task-inline-actions">
-                  <button class="button secondary small" @click="openOriginalMail(item)">查看原始邮件</button>
+                <div class="task-status-timeline-body task-status-timeline-body-clamp">{{ item.summary }}</div>
+                <div class="task-inline-actions">
+                  <button
+                    v-if="item.hasSummaryDetail"
+                    class="button secondary small"
+                    @click="openTimelineRemark(item)"
+                  >
+                    查看备注详情
+                  </button>
+                  <button v-if="item.hasOriginalMail" class="button secondary small" @click="openOriginalMail(item)">查看原始邮件</button>
                 </div>
               </li>
             </ul>
@@ -426,6 +433,19 @@
         <pre class="detail-pre mail-original-pre">{{ originalMailModal.content || '当前没有可展示的原始邮件正文' }}</pre>
       </div>
     </div>
+
+    <div v-if="timelineRemarkModal.visible" class="modal-mask" @click.self="closeTimelineRemark">
+      <div class="modal-card">
+        <div class="section-head">
+          <div>
+            <h2>备注详情</h2>
+            <p>这里展示当前状态时间线节点的完整备注内容。</p>
+          </div>
+          <button class="button secondary small" @click="closeTimelineRemark">关闭</button>
+        </div>
+        <pre class="detail-pre">{{ timelineRemarkModal.content || '当前没有可展示的备注内容' }}</pre>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -442,6 +462,10 @@ const router = useRouter()
 const task = ref(null)
 const actionLoading = ref(false)
 const originalMailModal = reactive({
+  visible: false,
+  content: '',
+})
+const timelineRemarkModal = reactive({
   visible: false,
   content: '',
 })
@@ -526,6 +550,7 @@ const timelineItems = computed(() => {
       sourceTone: sourceTone(item.source),
       summaryLabel: parsed.hasOriginalMail ? '已隐藏原始邮件正文' : '状态备注',
       summary: parsed.summary || '无备注',
+      hasSummaryDetail: shouldShowTimelineRemarkDetail(parsed.summary),
       hasOriginalMail: parsed.hasOriginalMail,
       rawMail: parsed.rawMail,
     }
@@ -625,6 +650,24 @@ function closeOriginalMail() {
   originalMailModal.content = ''
 }
 
+function shouldShowTimelineRemarkDetail(summary) {
+  if (!summary) return false
+  const normalized = summary.replace(/\r\n/g, '\n').trim()
+  if (!normalized) return false
+  const lines = normalized.split('\n').filter((line) => line.trim())
+  return lines.length > 3 || normalized.length > 120
+}
+
+function openTimelineRemark(item) {
+  timelineRemarkModal.visible = true
+  timelineRemarkModal.content = item.summary || ''
+}
+
+function closeTimelineRemark() {
+  timelineRemarkModal.visible = false
+  timelineRemarkModal.content = ''
+}
+
 function progressStyle(percent) {
   return { width: `${Math.max(0, Math.min(percent, 100))}%` }
 }
@@ -694,7 +737,7 @@ async function remindMilestone(item) {
 }
 
 async function changeStatus() {
-  if (!window.confirm('确认要修改任务状态吗？本操作将写入审计日志。')) return
+  if (!window.confirm('确认要修改任务状态吗？本操作将写入系统日志。')) return
   actionLoading.value = true
   try {
     await http.post(`/tasks/${route.params.id}/status`, statusForm)
@@ -716,7 +759,7 @@ async function toggleLock(shouldLock) {
 }
 
 async function removeTask() {
-  if (!window.confirm('确认删除该任务吗？删除后仍会保留审计日志。')) return
+  if (!window.confirm('确认删除该任务吗？删除后仍会保留系统日志。')) return
   actionLoading.value = true
   try {
     await http.delete(`/tasks/${route.params.id}`)

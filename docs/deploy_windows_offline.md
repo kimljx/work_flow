@@ -4,17 +4,18 @@
 
 将系统部署到内网 Windows 电脑上，部署后具备以下特征：
 
-- 目标电脑无需安装 Node.js。
-- 目标电脑无需联网安装 Python 依赖。
-- 目标电脑无需预装 Python 解释器。
-- 浏览器访问 `http://部署电脑IP:8000/` 即可打开系统。
-- 后续升级可通过“备份脚本 + 一键升级脚本”平滑迁移数据。
+- 目标电脑无需安装 Node.js
+- 目标电脑无需联网安装 Python 依赖
+- 目标电脑无需预装 Python 解释器
+- 目标电脑无需单独安装 Playwright Chromium 浏览器
+- 浏览器访问 `http://部署电脑IP:8000/` 即可打开系统
+- 后续升级可通过“备份脚本 + 一键升级脚本”平滑迁移数据
 
 ## 2. 目标电脑要求
 
 - Windows 10 / Windows 11 或同类 Windows Server
-- 浏览器
-- 建议至少 2GB 可用磁盘空间
+- 可用浏览器
+- 建议至少 3GB 可用磁盘空间
 
 ## 3. 开发电脑打包步骤
 
@@ -36,10 +37,11 @@ deploy\offline\build_windows_offline_package.bat
 
 1. 重新执行前端构建，生成最新 `frontend/dist`
 2. 下载 Python 3.10 对应的离线依赖包
-3. 下载官方 Python 3.10 嵌入式运行时
-4. 将依赖预装到发布包内置运行时中
-5. 复制后端代码、前端静态资源、部署脚本与文档
-6. 生成目录版发布包与 zip 压缩包
+3. 下载官方 Python 3.10 Windows 嵌入式运行时
+4. 将后端依赖预装到发布包内置运行时
+5. 安装 QAX 所需的 Playwright Chromium 浏览器到 `runtime/ms-playwright`
+6. 复制后端代码、前端静态资源、部署脚本与文档
+7. 生成目录版发布包与 zip 压缩包
 
 构建产物目录：
 
@@ -61,7 +63,8 @@ work_flow_windows_offline_py310_xxxxxxxx/
 ├─ docs/
 ├─ packages/
 ├─ runtime/
-│  └─ python/
+│  ├─ python/
+│  └─ ms-playwright/
 ├─ tools/
 ├─ install_offline.bat
 ├─ start_system.bat
@@ -77,9 +80,10 @@ work_flow_windows_offline_py310_xxxxxxxx/
 - `app/backend`：后端代码、数据库目录、运行入口
 - `app/frontend/dist`：前端构建后的静态资源
 - `runtime/python`：发布包自带的 Python 3.10 运行时
+- `runtime/ms-playwright`：QAX 模块使用的 Playwright Chromium 浏览器
 - `packages`：离线依赖包备份
 - `config/.env.offline.example`：离线环境配置模板
-- `backup/`：备份脚本生成的数据库与配置备份目录
+- `backup/`：备份脚本生成的数据与配置备份目录
 
 ## 5. 目标电脑安装步骤
 
@@ -95,40 +99,24 @@ D:\work_flow_release\
 
 如果复制的是 zip 包，先解压。
 
-### 5.3 首次启动与初始化
+### 5.3 首次初始化
 
-推荐直接双击：
-
-```text
-start_system.bat
-```
-
-脚本会在首次启动前自动静默完成初始化，然后继续启动系统。初始化过程会自动完成：
-
-1. 检查发布包自带的 Python 运行时
-2. 在发布包内创建 `local/` 本地运行目录
-3. 自动生成 `app\.env`
-4. 初始化数据库目录
-5. 校验后端依赖是否完整
-
-`local/` 目录中会保存：
-
-- Python 运行期缓存
-- 临时文件
-- 本地用户目录映射
-- 日志目录
-
-这样安装和运行都只发生在当前发布包目录内，不写入系统 Python 环境。
-
-如需单独查看初始化日志或排查环境问题，也可以手动双击：
+推荐先执行：
 
 ```text
 install_offline.bat
 ```
 
+脚本会自动完成：
+
+1. 创建 `local/` 本地运行目录
+2. 生成 `app\.env`
+3. 校验内置 Python 运行时
+4. 校验 Playwright 浏览器目录是否完整
+
 ### 5.4 修改配置
 
-如需修改系统名称、默认密码、SMTP、IMAP 等配置，请编辑：
+按需编辑：
 
 ```text
 app\.env
@@ -138,10 +126,12 @@ app\.env
 
 - `APP_NAME`：系统名称
 - `DEFAULT_PASSWORD`：默认密码
+- `QAX_BASE_URL` / `QAX_USERNAME` / `QAX_PASSWORD`：QAX 登录配置
+- `QAX_BROWSER_HEADLESS`：QAX 自动化是否隐藏浏览器界面
+- `QAX_COLLECT_CRON`：QAX 定时采集表达式
+- `SYSTEM_LOG_RETENTION_DAYS`：系统日志保留天数
 - `MAIL_AUTO_POLL_ENABLED`：是否自动收件
-- `MAIL_INBOX_PROTOCOL`：收件协议，可选 `imap` 或 `pop3`
-- `SMTP_*`：发信配置
-- `IMAP_*` / `POP3_*`：收件配置
+- `SMTP_*`、`IMAP_*`、`POP3_*`：邮件收发配置
 
 ### 5.5 启动系统
 
@@ -154,8 +144,8 @@ start_system.bat
 脚本会：
 
 1. 自动检查并补齐本地初始化环境
-2. 使用发布包内置 Python 运行时启动 FastAPI 服务
-3. 将缓存、临时目录、用户目录映射到发布包内的 `local/`
+2. 使用发布包内置 Python 启动 FastAPI 服务
+3. 将 Playwright 浏览器路径固定到 `runtime\ms-playwright`
 4. 自动打开浏览器首页 `http://127.0.0.1:8000/`
 
 ### 5.6 关闭系统
@@ -168,7 +158,7 @@ stop_system.bat
 
 ## 6. 局域网访问方式
 
-如果需要让局域网其他电脑访问：
+如需让局域网其他电脑访问：
 
 1. 在部署电脑上执行 `ipconfig`
 2. 记下内网 IP，例如 `192.168.1.20`
@@ -178,71 +168,44 @@ stop_system.bat
 http://192.168.1.20:8000/
 ```
 
-如果无法访问，请检查：
+如无法访问，请检查：
 
 - Windows 防火墙是否放行 `8000` 端口
 - 部署电脑与访问电脑是否处于同一网络
-- 服务是否已经正常启动
+- 服务是否已正常启动
 
-## 7. 首次启动后的默认数据
+## 7. 数据备份与恢复
 
-系统启动后会自动初始化默认数据，包括：
+### 7.1 备份数据
 
-- 默认管理员账号
-- 默认成员账号
-- 默认通知模板
-
-默认账号信息请参考：
-
-- `README.txt`
-- `docs/user_manual.md`
-
-## 8. 数据备份与恢复
-
-### 8.1 备份数据
-
-在升级前或重要操作前，建议先执行：
+执行：
 
 ```text
 backup_data.bat
 ```
 
-脚本会自动备份以下内容：
+备份内容包括：
 
 - `app\backend\data\app.db`
 - `app\.env`
 
-备份目录示例：
+### 7.2 恢复数据
 
-```text
-backup\20260424_103000\
-```
-
-### 8.2 恢复数据
-
-如需恢复历史数据，执行：
+执行：
 
 ```text
 restore_data.bat
 ```
 
-脚本会列出可用备份目录，并要求输入备份目录名称和 `YES` 二次确认。
-如果已经明确备份目录名称，也可以直接在命令行执行：
+也可指定备份目录：
 
 ```text
 restore_data.bat 20260424_103000
 ```
 
-恢复内容包括：
+## 8. 一键升级旧版
 
-- `app.db`
-- `.env`
-
-恢复完成后建议重新启动系统。
-
-## 9. 一键升级旧版
-
-如果旧版系统已经在其他目录正常运行，建议使用：
+如果旧版系统已在其他目录正常运行，执行：
 
 ```text
 upgrade_from_release.bat 旧版目录完整路径
@@ -252,23 +215,22 @@ upgrade_from_release.bat 旧版目录完整路径
 
 1. 停止旧版服务
 2. 备份旧版数据库与 `.env`
-3. 初始化新版运行环境
-4. 复制最新备份到新版目录
-5. 恢复数据到新版
-6. 启动新版服务
+3. 初始化新版本环境
+4. 复制旧版最新备份到新目录
+5. 恢复数据到新版本
+6. 启动新版本服务
 
-## 10. 常见问题
+## 9. 常见问题
 
-### 10.1 提示未找到内置 Python 运行时
+### 9.1 提示未找到内置 Python 运行时
 
-说明发布包中的 `runtime/python` 目录缺失或损坏。
+说明 `runtime/python` 目录缺失或损坏。请重新复制完整发布包。
 
-处理方式：
+### 9.2 提示未找到内置 Playwright 浏览器目录
 
-- 重新从开发机复制完整发布包
-- 或重新解压 zip 发布包后再执行安装脚本
+说明 `runtime/ms-playwright` 缺失，QAX 模块无法使用。请重新生成并复制完整发布包。
 
-### 10.2 启动成功但浏览器打不开页面
+### 9.3 启动成功但页面打不开
 
 优先检查：
 
@@ -276,13 +238,12 @@ upgrade_from_release.bat 旧版目录完整路径
 - `app/frontend/dist` 是否存在
 - 8000 端口是否被占用
 
-### 10.3 邮件功能无法使用
+### 9.4 邮件功能暂时不用
 
-邮件功能依赖 `SMTP_*` 和 `IMAP_*` 配置。
-如内网环境暂不需要邮件，可先保持：
+可先保持：
 
 ```text
 MAIL_AUTO_POLL_ENABLED=false
 ```
 
-系统其余功能仍可正常使用。
+系统其他功能仍可正常使用。

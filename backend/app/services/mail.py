@@ -73,6 +73,30 @@ def _mark_notification_recipient_replied(
     return recipient.id
 
 
+def _leading_nonempty_lines(text: str, limit: int = 8) -> list[str]:
+    """提取邮件开头的非空行，用于识别用户是否给出了明确回复指令。"""
+    lines: list[str] = []
+    for raw_line in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        lines.append(line)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _find_explicit_reply_line(subject: str, body: str, keywords: tuple[str, ...]) -> str:
+    """仅在主题或正文前几行中查找明确回复指令，避免把系统通知正文误判成回信。"""
+    normalized_subject = (subject or "").strip()
+    if normalized_subject and any(keyword in normalized_subject for keyword in keywords):
+        return normalized_subject
+    for line in _leading_nonempty_lines(body):
+        if any(keyword in line for keyword in keywords):
+            return line
+    return ""
+
+
 def _provider_hint() -> str:
     """根据已知服务商给出更有针对性的配置提示。"""
     host = settings.smtp_host.lower().strip()
@@ -605,6 +629,13 @@ def diagnose_imap_settings() -> dict[str, str]:
 
 def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type: str, sender: User, subject: str, body: str) -> None:
     """根据邮件内容更新任务状态。"""
+    keywords = ("已完成", "完成") if notify_type == "task_done" else ("进行中", "处理中")
+    reply_line = _find_explicit_reply_line(subject, body, keywords)
+    if not reply_line:
+        mail_event.process_status = "FAILED"
+        _append_mail_action(db, mail_event.id, notify_type, "FAILED", None, {"reason": "邮件开头未识别到明确状态回复指令"})
+        return
+
     task_id = _find_task_id(subject, body)
     if not task_id:
         mail_event.process_status = "FAILED"
@@ -689,6 +720,12 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
 
 def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: User, subject: str, body: str) -> None:
     """根据成员邮件创建延期申请，并通知管理员审批。"""
+    reply_line = _find_explicit_reply_line(subject, body, ("延期",))
+    if not reply_line:
+        mail_event.process_status = "FAILED"
+        _append_mail_action(db, mail_event.id, "delay_request", "FAILED", None, {"reason": "邮件开头未识别到明确延期回复指令"})
+        return
+
     task_id = _find_task_id(subject, body)
     proposed_deadline = _parse_date(body) or _parse_date(subject)
     if not task_id or proposed_deadline is None:
@@ -754,7 +791,7 @@ def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: U
 
 def _parse_delay_approval(body: str, subject: str) -> tuple[str | None, datetime | None, str]:
     """从管理员邮件中解析同意/拒绝动作和审批日期。"""
-    line = _first_matching_line(body, ("同意", "拒绝")) or _first_matching_line(subject, ("同意", "拒绝"))
+    line = _find_explicit_reply_line(subject, body, ("同意", "拒绝"))
     if not line:
         return None, None, ""
     action = "APPROVE" if "同意" in line else "REJECT"

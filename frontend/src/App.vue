@@ -14,7 +14,7 @@
         <router-link v-if="auth.isAdmin" to="/admin/delay-requests">{{ labels.delayRequests }}</router-link>
         <router-link v-if="auth.isSystemAdmin" to="/admin/users">{{ labels.users }}</router-link>
         <router-link v-if="auth.isAdmin" to="/admin/import-export">{{ labels.importExport }}</router-link>
-        <router-link v-if="auth.isSystemAdmin" to="/admin/audit-logs">{{ labels.auditLogs }}</router-link>
+        <router-link v-if="auth.isSystemAdmin" to="/admin/system-logs">{{ labels.auditLogs }}</router-link>
         <router-link v-if="auth.isMember" to="/member/tasks">{{ labels.memberTasks }}</router-link>
         <router-link v-if="auth.isMember" to="/member/notifications">{{ labels.memberNotifications }}</router-link>
       </nav>
@@ -53,7 +53,7 @@ const labels = {
   delayRequests: '延期审批',
   users: '用户管理',
   importExport: '导入导出',
-  auditLogs: '审计日志',
+  auditLogs: '系统日志',
   memberTasks: '我的任务',
   memberNotifications: '我的通知',
   currentUser: '当前登录：',

@@ -231,13 +231,21 @@ class MailScanState(Base):
 
 
 class AuditLog(Base, TimestampMixin):
-    """审计日志表，记录关键管理动作的前后状态。"""
+    """系统日志表，记录关键操作、后台任务与异常排障信息。
+
+    当前仍沿用历史表名 `audit_logs`，是为了兼容已有数据库与前端路由；
+    语义上已经升级为面向系统管理员的系统日志中心。
+    """
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     operator_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    log_level: Mapped[str] = mapped_column(String(16), nullable=False, default="INFO")
+    module_name: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
     action_type: Mapped[str] = mapped_column(String(64), nullable=False)
     target_type: Mapped[str] = mapped_column(String(64), nullable=False)
     target_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    detail_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     before_json: Mapped[str] = mapped_column(Text, nullable=False, default="")
     after_json: Mapped[str] = mapped_column(Text, nullable=False, default="")
     source_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")

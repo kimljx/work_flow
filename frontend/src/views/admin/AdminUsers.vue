@@ -140,7 +140,7 @@ async function submitUser() {
 }
 
 async function toggleUser(item, enabled) {
-  if (!window.confirm(`确认要${enabled ? '启用' : '禁用'}该用户吗？本操作将记录审计日志。`)) return
+  if (!window.confirm(`确认要${enabled ? '启用' : '禁用'}该用户吗？本操作将记录系统日志。`)) return
   await http.post(`/admin/users/${item.id}/${enabled ? 'enable' : 'disable'}`)
   await loadUsers()
 }

@@ -2,24 +2,24 @@
   <section class="page">
     <div class="panel workspace-header">
       <div>
-        <div class="workspace-eyebrow">任务模块</div>
-        <h1 class="workspace-title">任务排期与执行视图</h1>
-        <p class="workspace-subtitle">集中查看任务起止时间、优先级、当前状态和送达情况，支持直接进入详情、提醒和删除。</p>
+        <div class="workspace-eyebrow">Task Center</div>
+        <h1 class="workspace-title">任务</h1>
+        <p class="workspace-subtitle">聚焦任务本身，只保留最重要的信息与操作入口。</p>
       </div>
       <div class="toolbar">
-        <router-link class="button secondary" :to="{ path: '/admin/import-export', query: { from: route.fullPath } }">导入任务</router-link>
-        <router-link class="button" :to="{ path: '/admin/tasks/new', query: { from: route.fullPath } }">新建任务</router-link>
+        <button class="button secondary" @click="importOpen = true">导入任务</button>
+        <button @click="createOpen = true">新建任务</button>
       </div>
     </div>
 
     <div class="panel filter-shell">
-      <div class="filter-grid task-filter-grid">
+      <div class="filter-grid task-simple-filter-grid">
         <div class="filter-field">
-          <span class="filter-label">关键词</span>
-          <input v-model="keyword" placeholder="搜索任务标题、负责人或备注" />
+          <span class="filter-label">搜索</span>
+          <input v-model="keyword" placeholder="按任务名称或负责人搜索" />
         </div>
         <div class="filter-field">
-          <span class="filter-label">主状态</span>
+          <span class="filter-label">状态</span>
           <select v-model="status">
             <option value="">全部状态</option>
             <option value="not_started">未开始</option>
@@ -28,361 +28,176 @@
             <option value="canceled">已取消</option>
           </select>
         </div>
-        <div class="filter-field">
-          <span class="filter-label">优先级</span>
-          <select v-model="priority">
-            <option value="">全部等级</option>
-            <option value="high">高</option>
-            <option value="medium">中</option>
-            <option value="low">低</option>
-          </select>
-        </div>
       </div>
-      <div class="filter-section">
-        <span class="filter-label">子任务筛选</span>
-        <div class="filter-chip-group">
-          <button
-            v-for="item in subtaskFilterOptions"
-            :key="item.value"
-            :class="['button secondary small filter-chip', { active: subtaskStatusFilter === item.value }]"
-            @click="toggleSubtaskFilter(item.value)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
-      </div>
-      <div class="filter-section">
-        <span class="filter-label">高级筛选</span>
-        <div class="filter-chip-group">
-          <button
-            v-for="item in advancedFilterOptions"
-            :key="item.key"
-            :class="['button secondary small filter-chip', { active: advancedFilters[item.key] }]"
-            @click="toggleAdvancedFilter(item.key)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
-      </div>
-      <div class="filter-summary">
-        当前展示 {{ filteredTasks.length }} 条任务
-        <span v-if="activeFilterTexts.length > 0">，已启用：{{ activeFilterTexts.join(' / ') }}</span>
-      </div>
+      <div class="filter-summary">共 {{ filteredTasks.length }} 项任务</div>
     </div>
 
-    <div class="task-stack">
-      <article v-if="pagedTasks.length === 0" class="panel empty-state">
-        <h2>暂无符合条件的任务</h2>
-        <p>可以调整筛选条件，或直接创建新的任务计划。</p>
-      </article>
-
-      <article
-        v-for="task in pagedTasks"
-        :key="task.id"
-        class="task-work-card"
-      >
-        <div :class="statusUi(task).dot"></div>
-        <div class="task-work-main">
-          <div class="task-work-heading">
-            <div>
-              <div class="task-work-kicker">任务编号 #{{ task.id }}</div>
-              <h2>{{ task.title }}</h2>
-              <p>{{ task.content }}</p>
-            </div>
-            <span :class="resolvePriorityMeta(task.priority).tone">
-              {{ resolvePriorityMeta(task.priority).label }}
-            </span>
-          </div>
-
-          <div class="task-info-grid">
-            <div class="info-cell">
-              <span class="info-label">负责人</span>
-              <strong>{{ task.owner_name || '-' }}</strong>
-            </div>
-            <div class="info-cell">
-              <span class="info-label">参与成员</span>
-              <strong>{{ task.participant_count }} 人</strong>
-            </div>
-            <div class="info-cell">
-              <span class="info-label">开始时间</span>
-              <strong>{{ formatDateTime(task.start_at) }}</strong>
-            </div>
-            <div class="info-cell">
-              <span class="info-label">结束时间</span>
-              <strong>{{ formatDateTime(task.end_at) }}</strong>
-            </div>
-            <div class="info-cell">
-              <span class="info-label">计划用时</span>
-              <strong>{{ formatMinutes(task.planned_minutes) }}</strong>
-            </div>
-            <div class="info-cell">
-              <span class="info-label">通知送达</span>
-              <strong>{{ task.delivered_count }}/{{ task.notification_total }}</strong>
-            </div>
-            <div class="info-cell">
-              <span class="info-label">子任务进度</span>
-              <strong>{{ task.subtask_count || 0 }} 项</strong>
-              <div v-if="subtaskStatusSummary(task).length > 0" class="subtask-summary-row">
-                <span
-                  v-for="item in subtaskStatusSummary(task)"
-                  :key="`${task.id}-${item.status}`"
-                  :class="`${resolveSubtaskStatusMeta(item.status, item.label).tone} status-chip`"
-                >
-                  {{ item.label }} {{ item.count }}
-                </span>
+    <div class="panel">
+      <table class="table task-table">
+        <thead>
+          <tr>
+            <th>任务</th>
+            <th>负责人</th>
+            <th>状态</th>
+            <th>截止时间</th>
+            <th>优先级</th>
+            <th>通知</th>
+            <th>子任务</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-if="pagedTasks.length === 0">
+            <td colspan="8">当前没有符合条件的任务</td>
+          </tr>
+          <tr v-for="task in pagedTasks" :key="task.id">
+            <td>
+              <div class="task-table-title">{{ task.title }}</div>
+              <div class="subtle-text clamp-2">{{ task.content }}</div>
+            </td>
+            <td>{{ joinNames(task.responsible_names) }}</td>
+            <td><span :class="statusUi(task).tone">{{ statusUi(task).text }}</span></td>
+            <td>{{ formatDateTime(task.end_at) }}</td>
+            <td><span :class="resolvePriorityMeta(task.priority).tone">{{ resolvePriorityMeta(task.priority).label }}</span></td>
+            <td>
+              <div class="task-channel-stack">
+                <span>邮件：{{ task.latest_notifications?.email?.summary || '未发送' }}</span>
+                <span>即时消息：{{ task.latest_notifications?.qax?.summary || '未发送' }}</span>
               </div>
-              <div v-else class="subtle-text">暂无子任务</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="task-work-side">
-          <span :class="statusUi(task).tone">{{ statusUi(task).text }}</span>
-          <div class="task-side-note">优先级 {{ task.priority_text }}</div>
-          <div class="task-side-note">提醒设置 {{ task.due_remind_days > 0 ? `提前 ${task.due_remind_days} 天` : '未开启' }}</div>
-          <div class="task-side-note" v-if="Number(task.delay_days || 0) > 0">当前已延期 {{ task.delay_days }} 天</div>
-          <div class="toolbar task-actions">
-            <router-link class="button secondary" :to="{ path: `/admin/tasks/${task.id}`, query: { from: route.fullPath } }">详情</router-link>
-            <button class="button secondary" @click="remind(task.id)">提醒</button>
-            <button class="button danger" @click="removeTask(task.id)">删除</button>
-          </div>
-        </div>
-      </article>
+            </td>
+            <td>{{ task.subtask_count || 0 }}</td>
+            <td>
+              <div class="toolbar">
+                <router-link class="button secondary small" :to="`/admin/tasks/${task.id}`">详情</router-link>
+                <button class="button secondary small" @click="openEdit(task.id)">编辑</button>
+                <button class="button secondary small" @click="remind(task.id)">提醒</button>
+                <button class="button danger small" @click="removeTask(task.id)">删除</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <AppPagination v-model="page" :total="filteredTasks.length" :page-size="pageSize" />
+
+    <div v-if="createOpen" class="modal-mask" @click.self="closeCreate">
+      <div class="modal-card task-modal-card">
+        <TaskEditorForm @cancel="closeCreate" @saved="handleCreated" />
+      </div>
+    </div>
+
+    <div v-if="editTaskId" class="modal-mask" @click.self="closeEdit">
+      <div class="modal-card task-modal-card">
+        <TaskEditorForm :task-id="editTaskId" @cancel="closeEdit" @saved="handleEdited" />
+      </div>
+    </div>
+
+    <div v-if="importOpen" class="modal-mask" @click.self="closeImport">
+      <div class="modal-card task-modal-card">
+        <TaskImportDialog @cancel="closeImport" @imported="handleImported" />
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
-import { resolvePriorityMeta, resolveSubtaskStatusMeta, resolveTaskStatusTone } from '../../constants/taskUi'
-import { formatDateTime, formatMinutes } from '../../utils/format'
+import TaskEditorForm from '../../components/admin/TaskEditorForm.vue'
+import TaskImportDialog from '../../components/admin/TaskImportDialog.vue'
+import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
+import { formatDateTime } from '../../utils/format'
 
-const route = useRoute()
 const router = useRouter()
 const tasks = ref([])
 const keyword = ref('')
 const status = ref('')
-const priority = ref('')
-const subtaskStatusFilter = ref('')
 const page = ref(1)
-const pageSize = 8
-const advancedFilters = reactive({
-  delayedOnly: false,
-  lockedOnly: false,
-  lowDeliveryOnly: false,
-})
-const subtaskFilterOptions = [
-  { value: '', label: '全部子任务' },
-  { value: 'in_progress', label: '进行中子任务' },
-  { value: 'pending', label: '待开始子任务' },
-  { value: 'done', label: '已完成子任务' },
-  { value: 'canceled', label: '已取消子任务' },
-  { value: 'empty', label: '无子任务' },
-]
-const advancedFilterOptions = [
-  { key: 'delayedOnly', label: '仅看延期任务' },
-  { key: 'lockedOnly', label: '仅看已锁定' },
-  { key: 'lowDeliveryOnly', label: '仅看送达不足' },
-]
-const activeFilterTexts = computed(() => {
-  const labels = []
-  if (status.value) {
-    const statusText = {
-      not_started: '主状态: 未开始',
-      in_progress: '主状态: 进行中',
-      done: '主状态: 已完成',
-      canceled: '主状态: 已取消',
-    }[status.value]
-    if (statusText) {
-      labels.push(statusText)
-    }
-  }
-  if (priority.value) {
-    const priorityText = {
-      high: '优先级: 高',
-      medium: '优先级: 中',
-      low: '优先级: 低',
-    }[priority.value]
-    if (priorityText) {
-      labels.push(priorityText)
-    }
-  }
-  if (subtaskStatusFilter.value) {
-    const subtaskText = {
-      in_progress: '子任务: 进行中',
-      pending: '子任务: 待开始',
-      done: '子任务: 已完成',
-      canceled: '子任务: 已取消',
-      empty: '无子任务',
-    }[subtaskStatusFilter.value]
-    if (subtaskText) {
-      labels.push(subtaskText)
-    }
-  }
-  if (advancedFilters.delayedOnly) {
-    labels.push('延期中')
-  }
-  if (advancedFilters.lockedOnly) {
-    labels.push('状态已锁定')
-  }
-  if (advancedFilters.lowDeliveryOnly) {
-    labels.push('通知送达不足')
-  }
-  return labels
-})
+const pageSize = 10
+const createOpen = ref(false)
+const importOpen = ref(false)
+const editTaskId = ref(null)
 
-const filteredTasks = computed(() =>
-  tasks.value.filter((item) => {
-    const query = keyword.value.trim()
+const filteredTasks = computed(() => {
+  const query = keyword.value.trim()
+  return tasks.value.filter((item) => {
     const matchKeyword =
       !query ||
       item.title.includes(query) ||
-      (item.owner_name || '').includes(query) ||
-      (item.remark || '').includes(query)
+      joinNames(item.responsible_names).includes(query)
     const matchStatus = !status.value || item.main_status === status.value
-    const matchPriority = !priority.value || item.priority === priority.value
-    const matchSubtask = matchSubtaskFilter(item)
-    const matchAdvanced = matchAdvancedFilters(item)
-    return matchKeyword && matchStatus && matchPriority && matchSubtask && matchAdvanced
+    return matchKeyword && matchStatus
   })
-)
+})
 
 const pagedTasks = computed(() => {
   const start = (page.value - 1) * pageSize
   return filteredTasks.value.slice(start, start + pageSize)
 })
 
-watch(
-  [keyword, status, priority, subtaskStatusFilter, () => advancedFilters.delayedOnly, () => advancedFilters.lockedOnly, () => advancedFilters.lowDeliveryOnly],
-  () => {
-    page.value = 1
-  }
-)
+watch([keyword, status], () => {
+  page.value = 1
+})
 
-/**
- * 返回任务主状态的视觉展示配置。
- * 左侧色条仅代表主状态，不再混入延期风险，避免用户把“延期”和“状态”混为一类。
- * @param {object} task 当前任务对象。
- * @returns {{tone: string, dot: string, text: string}} 列表卡片使用的状态样式与文案。
- */
 function statusUi(task) {
   return resolveTaskStatusTone(task)
 }
 
-/**
- * 提取当前任务的子任务状态统计，用于列表信息卡和快捷筛选。
- * @param {object} task 当前任务对象。
- * @returns {Array<{status: string, label: string, count: number}>} 只保留数量大于 0 的状态项。
- */
-function subtaskStatusSummary(task) {
-  return (task.subtask_status_summary || []).filter((item) => Number(item.count) > 0)
+function joinNames(names) {
+  return Array.isArray(names) && names.length > 0 ? names.join(', ') : '-'
 }
 
-/**
- * 判断任务是否命中当前子任务筛选条件。
- * @param {object} task 当前任务对象。
- * @returns {boolean} 是否需要在列表中保留。
- */
-function matchSubtaskFilter(task) {
-  if (!subtaskStatusFilter.value) {
-    return true
-  }
-  if (subtaskStatusFilter.value === 'empty') {
-    return Number(task.subtask_count || 0) === 0
-  }
-  return subtaskStatusSummary(task).some((item) => item.status === subtaskStatusFilter.value)
-}
-
-/**
- * 判断任务是否命中高级组合筛选条件。
- * @param {object} task 当前任务对象。
- * @returns {boolean} 是否满足当前高级筛选组合。
- */
-function matchAdvancedFilters(task) {
-  if (advancedFilters.delayedOnly && Number(task.delay_days || 0) <= 0) {
-    return false
-  }
-  if (advancedFilters.lockedOnly && !task.state_locked) {
-    return false
-  }
-  if (advancedFilters.lowDeliveryOnly && Number(task.delivered_count || 0) >= Number(task.notification_total || 0)) {
-    return false
-  }
-  return true
-}
-
-/**
- * 切换子任务快捷筛选。
- * @param {string} value 目标筛选值。
- * @returns {void}
- */
-function toggleSubtaskFilter(value) {
-  subtaskStatusFilter.value = subtaskStatusFilter.value === value ? '' : value
-}
-
-/**
- * 切换高级筛选项。
- * @param {'delayedOnly' | 'lockedOnly' | 'lowDeliveryOnly'} key 高级筛选键。
- * @returns {void}
- */
-function toggleAdvancedFilter(key) {
-  advancedFilters[key] = !advancedFilters[key]
-}
-
-/**
- * 拉取当前账号可见的任务列表。
- * @returns {Promise<void>}
- */
 async function loadTasks() {
   const { data } = await http.get('/tasks')
   tasks.value = data
 }
 
-/**
- * 处理导入任务后回到列表页时的刷新提示。
- * @returns {Promise<void>}
- */
-async function handleRouteRefresh() {
-  if (route.query.refresh !== 'import') {
-    return
-  }
-  await loadTasks()
-  const successCount = Number(route.query.import_success_count || 0)
-  const failureCount = Number(route.query.import_failure_count || 0)
-  window.alert(`任务导入完成：成功 ${successCount} 条，失败 ${failureCount} 条`)
-  router.replace({ path: route.path, query: {} })
+function closeCreate() {
+  createOpen.value = false
 }
 
-/**
- * 为指定任务创建一次手动提醒。
- * @param {number} taskId 任务编号。
- * @returns {Promise<void>}
- */
+function closeImport() {
+  importOpen.value = false
+}
+
+function openEdit(taskId) {
+  editTaskId.value = taskId
+}
+
+function closeEdit() {
+  editTaskId.value = null
+}
+
+async function handleCreated(task) {
+  closeCreate()
+  await loadTasks()
+  router.push(`/admin/tasks/${task.id}`)
+}
+
+async function handleEdited() {
+  closeEdit()
+  await loadTasks()
+}
+
+async function handleImported() {
+  closeImport()
+  await loadTasks()
+}
+
 async function remind(taskId) {
-  if (!window.confirm('确认要对该任务发送手动提醒吗？')) return
+  if (!window.confirm('确认发送一次任务提醒吗？')) return
   await http.post(`/tasks/${taskId}/remind`)
-  window.alert('已创建提醒通知。')
   await loadTasks()
 }
 
-/**
- * 删除指定任务并刷新列表。
- * @param {number} taskId 任务编号。
- * @returns {Promise<void>}
- */
 async function removeTask(taskId) {
-  if (!window.confirm('删除任务会保留审计记录，是否继续？')) return
+  if (!window.confirm('确认删除这项任务吗？')) return
   await http.delete(`/tasks/${taskId}`)
   await loadTasks()
 }
 
-onMounted(async () => {
-  await loadTasks()
-  await handleRouteRefresh()
-})
+onMounted(loadTasks)
 </script>

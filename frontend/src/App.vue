@@ -6,15 +6,7 @@
     <aside class="sidebar" v-if="auth.isLoggedIn">
       <div class="brand">{{ labels.brand }}</div>
       <nav>
-        <router-link v-if="auth.isAdmin" to="/admin/dashboard">{{ labels.dashboard }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/tasks">{{ labels.tasks }}</router-link>
-        <router-link v-if="auth.isSystemAdmin" to="/admin/templates">{{ labels.templates }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/notifications">{{ labels.notifications }}</router-link>
-        <router-link v-if="auth.isSystemAdmin" to="/admin/mail-events">{{ labels.mailEvents }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/delay-requests">{{ labels.delayRequests }}</router-link>
-        <router-link v-if="auth.isSystemAdmin" to="/admin/users">{{ labels.users }}</router-link>
-        <router-link v-if="auth.isAdmin" to="/admin/import-export">{{ labels.importExport }}</router-link>
-        <router-link v-if="auth.isSystemAdmin" to="/admin/system-logs">{{ labels.auditLogs }}</router-link>
+        <router-link v-for="link in auth.isAdmin ? adminLinks : []" :key="link.to" :to="link.to">{{ link.label }}</router-link>
         <router-link v-if="auth.isMember" to="/member/tasks">{{ labels.memberTasks }}</router-link>
         <router-link v-if="auth.isMember" to="/member/notifications">{{ labels.memberNotifications }}</router-link>
       </nav>
@@ -68,6 +60,25 @@ const loading = useLoadingStore()
 const route = useRoute()
 const router = useRouter()
 const isPublicPage = computed(() => Boolean(route.meta.public))
+const adminLinks = computed(() => {
+  const links = [
+    { to: '/admin/dashboard', label: labels.dashboard },
+    { to: '/admin/tasks', label: labels.tasks },
+  ]
+  if (!auth.isSystemAdmin) {
+    return links
+  }
+  return [
+    ...links,
+    { to: '/admin/templates', label: labels.templates },
+    { to: '/admin/notifications', label: labels.notifications },
+    { to: '/admin/mail-events', label: labels.mailEvents },
+    { to: '/admin/delay-requests', label: labels.delayRequests },
+    { to: '/admin/users', label: labels.users },
+    { to: '/admin/import-export', label: labels.importExport },
+    { to: '/admin/system-logs', label: labels.auditLogs },
+  ]
+})
 const fallbackRoleText = computed(() => {
   if (auth.isSystemAdmin) return labels.systemAdmin
   return auth.isAdmin ? labels.admin : labels.member

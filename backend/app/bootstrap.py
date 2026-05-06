@@ -227,6 +227,30 @@ def bootstrap_database() -> None:
             )
             db.commit()
 
+        admin_count = db.query(User).filter(User.role.in_(("system_admin", "admin"))).count()
+        if admin_count == 0:
+            recovered_admin = db.query(User).filter(User.username == "admin").first()
+            if recovered_admin:
+                recovered_admin.password_hash = hash_password(settings.default_password)
+                recovered_admin.role = "system_admin"
+                recovered_admin.name = "系统管理员"
+                recovered_admin.email = "admin@example.com"
+                recovered_admin.ip_address = "10.0.0.1"
+                recovered_admin.is_active = True
+            else:
+                db.add(
+                    User(
+                        username="admin",
+                        password_hash=hash_password(settings.default_password),
+                        role="system_admin",
+                        name="系统管理员",
+                        email="admin@example.com",
+                        ip_address="10.0.0.1",
+                        is_active=True,
+                    )
+                )
+            db.commit()
+
         admin_user = db.query(User).filter(User.username == "admin").first()
         if admin_user and admin_user.role == "admin":
             # 首个内置账号升级为系统管理员，确保新增系统级菜单后仍可维护用户和模板配置。

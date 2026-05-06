@@ -163,6 +163,24 @@ def _smtp_ssl_error_hint(exc: ssl.SSLError) -> str:
     return f"SMTP 建立安全连接失败：{exc}"
 
 
+def _smtp_protocol_error_hint(exc: Exception) -> str:
+    """将 SMTP 协议层异常转换成更可操作的提示。"""
+    message = str(exc)
+    normalized = message.lower()
+    host = settings.smtp_host.lower().strip()
+    if "line too long" in normalized:
+        return (
+            "SMTP 发件失败：服务端返回了非标准 SMTP 响应（line too long）。"
+            "这通常是把 POP3/IMAP 主机或端口误用于发件，或被内网邮件网关转发到了错误协议。"
+            "POP3 不能用于发件，请改用 SMTP_HOST/SMTP_PORT，并检查端口与 SSL/TLS 是否匹配。"
+        )
+    if host.startswith("pop.") or host.startswith("pop3.") or "pop3" in host:
+        return "SMTP 发件失败：当前 SMTP_HOST 看起来是 POP3 地址。POP3 只能收件，发件请改用 SMTP 地址。"
+    if host.startswith("imap.") or "imap" in host:
+        return "SMTP 发件失败：当前 SMTP_HOST 看起来是 IMAP 地址。IMAP 只能收件，发件请改用 SMTP 地址。"
+    return f"SMTP 发件失败：{exc}"
+
+
 def _imap_security_mode_text() -> str:
     """返回当前 IMAP 加密方式的中文说明。"""
     if settings.imap_use_ssl or settings.imap_port == 993:
@@ -223,6 +241,19 @@ def _pop3_ssl_error_hint(exc: ssl.SSLError) -> str:
     if "ssl" in message or "tls" in message:
         return f"POP3 SSL/TLS 握手失败。{_pop3_security_recommendation()}"
     return f"POP3 建立安全连接失败：{exc}"
+
+
+def _pop3_protocol_error_hint(exc: poplib.error_proto) -> str:
+    """将 POP3 协议层错误转换成更可操作的提示。"""
+    message = str(exc)
+    normalized = message.lower()
+    if "line too long" in normalized:
+        return (
+            f"POP3 登录失败：服务端返回了非标准 POP3 响应（line too long）。"
+            f"这通常不是账号密码错误，而是 POP3_HOST、POP3_PORT 与加密方式不匹配，"
+            f"当前使用的是“{_pop3_security_mode_text()}”。{_pop3_security_recommendation()}"
+        )
+    return f"POP3 登录失败：{exc}"
 
 
 def _decode_header_value(value: str | None) -> str:
@@ -879,10 +910,16 @@ def _apply_business_action(db: Session, mail_event: MailEvent, template: Templat
         _apply_task_status_from_mail(db, mail_event, "task_done", sender, subject, body)
     elif template.notify_type == "task_in_progress":
         _apply_task_status_from_mail(db, mail_event, "task_in_progress", sender, subject, body)
-    elif template.notify_type == "delay_request":
-        _apply_delay_request_from_mail(db, mail_event, sender, subject, body)
-    elif template.notify_type == "delay_approve":
-        _apply_delay_approval_from_mail(db, mail_event, sender, subject, body)
+    elif template.notify_type in {"delay_request", "delay_approve"}:
+        mail_event.process_status = "SKIPPED"
+        _append_mail_action(
+            db,
+            mail_event.id,
+            template.notify_type,
+            "SKIPPED",
+            None,
+            {"reason": "延期审批流程已停用"},
+        )
     else:
         mail_event.process_status = "MATCHED"
         _append_mail_action(db, mail_event.id, template.notify_type, "SKIPPED", None, {"reason": "模板类型暂不支持"})
@@ -1001,6 +1038,104 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
         return {"status": "failed", "message": _imap_ssl_error_hint(exc), "count": 0}
     except poplib.error_proto as exc:
         return {"status": "failed", "message": f"POP3 登录失败：{exc}", "count": 0}
+    except imaplib.IMAP4.error as exc:
+        return {"status": "failed", "message": f"IMAP 登录失败：{exc}", "count": 0}
+    except Exception as exc:  # pragma: no cover
+        db.rollback()
+        return {"status": "failed", "message": f"邮件扫描失败：{exc}", "count": 0}
+
+
+def diagnose_inbox_settings() -> dict[str, str]:
+    """测试当前收件协议的登录与访问能力。"""
+    if _inbox_protocol() == "pop3":
+        if not settings.pop3_host or not settings.pop3_user:
+            return {"status": "failed", "message": "请先配置 POP3_HOST 与 POP3_USER 后再测试。"}
+        if settings.pop3_use_ssl and settings.pop3_use_tls:
+            return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
+        mailbox = None
+        try:
+            mailbox = _open_pop3_connection()
+            mailbox.user(settings.pop3_user)
+            mailbox.pass_(settings.pop3_password)
+            return {"status": "success", "message": "POP3 连接与登录成功，可以正常读取收件箱。"}
+        except ssl.SSLError as exc:
+            return {"status": "failed", "message": _pop3_ssl_error_hint(exc)}
+        except socket.gaierror as exc:
+            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}。请确认 POP3_HOST 是否填写正确。"}
+        except socket.timeout:
+            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}"}
+        except poplib.error_proto as exc:
+            return {"status": "failed", "message": _pop3_protocol_error_hint(exc)}
+        except Exception as exc:  # pragma: no cover
+            return {"status": "failed", "message": f"POP3 测试失败：{exc}"}
+        finally:
+            if mailbox is not None:
+                try:
+                    mailbox.quit()
+                except Exception:
+                    pass
+
+    if not settings.imap_host or not settings.imap_user:
+        return {"status": "failed", "message": "请先配置 IMAP_HOST 与 IMAP_USER 后再测试。"}
+    if settings.imap_use_ssl and settings.imap_use_tls:
+        return {"status": "failed", "message": "IMAP_USE_SSL 与 IMAP_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
+    try:
+        with _open_imap_connection() as mailbox:
+            mailbox.login(settings.imap_user, settings.imap_password)
+            mailbox.select("INBOX")
+        return {"status": "success", "message": "IMAP 连接与登录成功，可以正常读取收件箱。"}
+    except ssl.SSLError as exc:
+        return {"status": "failed", "message": _imap_ssl_error_hint(exc)}
+    except socket.gaierror as exc:
+        return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}。请确认 IMAP_HOST 是否填写正确。"}
+    except socket.timeout:
+        return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}"}
+    except imaplib.IMAP4.error as exc:
+        return {"status": "failed", "message": f"IMAP 登录失败：{exc}"}
+    except Exception as exc:  # pragma: no cover
+        return {"status": "failed", "message": f"IMAP 测试失败：{exc}"}
+
+
+def poll_mailbox(db: Session) -> dict[str, str | int]:
+    """扫描邮箱未读邮件并写入系统。"""
+    if _inbox_protocol() == "pop3":
+        if not settings.pop3_host or not settings.pop3_user:
+            return {"status": "skipped", "message": "未配置 POP3，已跳过邮件收取。", "count": 0}
+    elif not settings.imap_host or not settings.imap_user:
+        return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
+
+    try:
+        state = _mail_scan_state(db)
+        if state.baseline_started_at is None:
+            now = shanghai_now_naive()
+            state.baseline_started_at = now
+            state.last_scan_at = now
+            db.commit()
+            return {
+                "status": "initialized",
+                "message": f"已初始化扫描基准时间 {now.isoformat(sep=' ', timespec='seconds')}，本次不处理历史邮件。",
+                "count": 0,
+            }
+
+        result = _poll_mailbox_via_pop3(db, state) if _inbox_protocol() == "pop3" else _poll_mailbox_via_imap(db, state)
+        if result.get("status") == "success":
+            state.last_scan_at = shanghai_now_naive()
+            db.commit()
+        return result
+    except socket.gaierror as exc:
+        if _inbox_protocol() == "pop3":
+            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}", "count": 0}
+        return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}", "count": 0}
+    except socket.timeout:
+        if _inbox_protocol() == "pop3":
+            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}", "count": 0}
+        return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}", "count": 0}
+    except ssl.SSLError as exc:
+        if _inbox_protocol() == "pop3":
+            return {"status": "failed", "message": _pop3_ssl_error_hint(exc), "count": 0}
+        return {"status": "failed", "message": _imap_ssl_error_hint(exc), "count": 0}
+    except poplib.error_proto as exc:
+        return {"status": "failed", "message": _pop3_protocol_error_hint(exc), "count": 0}
     except imaplib.IMAP4.error as exc:
         return {"status": "failed", "message": f"IMAP 登录失败：{exc}", "count": 0}
     except Exception as exc:  # pragma: no cover

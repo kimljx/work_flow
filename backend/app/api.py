@@ -79,21 +79,12 @@ from app.services.users import build_default_password_hash, ensure_last_admin_no
 
 router = APIRouter(prefix="/api/v1")
 TASK_IMPORT_FIELDS = (
+    "sequence",
     "title",
     "content",
-    "owner_name",
-    "participant_names",
-    "start_at",
-    "end_at",
-    "priority",
-    "remark",
-    "due_remind_days",
-    "milestone_names",
-    "milestone_datetimes",
-    "remind_offsets",
-    "subtask_titles",
-    "subtask_contents",
-    "subtask_assignee_names",
+    "subtask",
+    "responsible_names",
+    "deadline",
 )
 
 
@@ -180,11 +171,111 @@ def serialize_user(user: User) -> UserOut:
     )
 
 
+def _empty_latest_notification(channel: str) -> dict[str, object]:
+    return {
+        "channel": channel,
+        "channel_text": notification_channel_text(channel),
+        "notify_type": "",
+        "notify_type_text": "",
+        "delivery_status": "not_sent",
+        "delivery_status_text": "未发送",
+        "read_status": "unread",
+        "read_status_text": read_status_text("unread", channel),
+        "sent_at": None,
+        "summary": "未发送",
+    }
+
+
+def _latest_notification_summary(
+    db: Session,
+    task_id: int,
+    channel: str,
+    *,
+    user_id: int | None = None,
+) -> dict[str, object]:
+    if user_id is None:
+        notification = (
+            db.query(Notification)
+            .filter(Notification.task_id == task_id, Notification.channel == channel)
+            .order_by(Notification.id.desc())
+            .first()
+        )
+    else:
+        notification = (
+            db.query(Notification)
+            .join(NotificationRecipient, NotificationRecipient.notification_id == Notification.id)
+            .filter(
+                Notification.task_id == task_id,
+                Notification.channel == channel,
+                NotificationRecipient.user_id == user_id,
+            )
+            .order_by(Notification.id.desc(), NotificationRecipient.id.desc())
+            .first()
+        )
+    if not notification:
+        return _empty_latest_notification(channel)
+
+    recipients = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).all()
+    summary = _empty_latest_notification(channel)
+    summary.update(
+        {
+            "notify_type": notification.notify_type,
+            "notify_type_text": NOTIFICATION_TYPE_LABELS.get(notification.notify_type, notification.notify_type),
+            "sent_at": notification.created_at,
+        }
+    )
+
+    if user_id is None:
+        delivered_count = sum(1 for item in recipients if item.delivery_status == "delivered")
+        read_count = sum(1 for item in recipients if item.read_status == "read")
+        recipient_total = len(recipients)
+        summary.update(
+            {
+                "delivery_status": notification.status,
+                "delivery_status_text": notification_status_text(notification.status),
+                "read_status": "read" if read_count > 0 else "unread",
+                "read_status_text": f"{read_count}/{recipient_total} {feedback_label_text(channel)}" if recipient_total else read_status_text("unread", channel),
+                "summary": (
+                    f"已送达 {delivered_count}/{recipient_total}"
+                    if recipient_total
+                    else notification_status_text(notification.status)
+                ),
+            }
+        )
+        return summary
+
+    recipient = next((item for item in recipients if item.user_id == user_id), None)
+    if not recipient:
+        return summary
+    summary.update(
+        {
+            "delivery_status": recipient.delivery_status,
+            "delivery_status_text": notification_status_text(recipient.delivery_status),
+            "read_status": recipient.read_status,
+            "read_status_text": read_status_text(recipient.read_status, channel),
+            "summary": (
+                read_status_text(recipient.read_status, channel)
+                if recipient.delivery_status == "delivered"
+                else notification_status_text(recipient.delivery_status)
+            ),
+        }
+    )
+    return summary
+
+
+def _task_latest_notifications(db: Session, task_id: int, *, user_id: int | None = None) -> dict[str, dict[str, object]]:
+    return {
+        "email": _latest_notification_summary(db, task_id, "email", user_id=user_id),
+        "qax": _latest_notification_summary(db, task_id, "qax", user_id=user_id),
+    }
+
+
 def serialize_task(task: Task, db: Session) -> TaskOut:
     """聚合任务成员和通知统计，生成任务列表项。"""
     members = db.query(TaskMember).filter(TaskMember.task_id == task.id).all()
     owner_name = next((item.user.name for item in members if item.member_role == "owner" and item.user), "")
     creator = db.query(User).filter(User.id == task.created_by).first() if task.created_by else None
+    responsible_names = [item.user.name for item in members if item.user]
     participant_count = sum(1 for item in members if item.member_role == "participant")
     recipients = (
         db.query(NotificationRecipient)
@@ -224,12 +315,14 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
         priority_text=PRIORITY_LABELS.get(task.priority, task.priority),
         owner_name=owner_name,
         creator_name=creator.name if creator else "",
+        responsible_names=responsible_names,
         participant_count=participant_count,
         notification_total=len(recipients),
         delivered_count=delivered_count,
         completed_member_count=1 if task.main_status == "done" else 0,
         subtask_count=len(subtasks),
         subtask_status_summary=subtask_status_summary,
+        latest_notifications=_task_latest_notifications(db, task.id),
         created_at=task.created_at,
     )
 
@@ -712,6 +805,144 @@ def _build_task_create_from_import_row(row_data: dict[str, object], db: Session)
     return TaskCreate(**payload)
 
 
+def _split_simple_import_names(value: object) -> list[str]:
+    text = str(value or "")
+    for marker in ("、", "，", "；", ";", "/", "|"):
+        text = text.replace(marker, ",")
+    text = text.replace(" ", "").strip(",")
+    if not text:
+        return []
+    names: list[str] = []
+    for item in text.split(","):
+        normalized = item.strip()
+        if normalized and normalized not in names:
+            names.append(normalized)
+    return names
+
+
+def _normalize_simple_import_deadline(value: object) -> datetime:
+    deadline = _normalize_import_datetime(value, "截止日期")
+    if deadline.hour == 0 and deadline.minute == 0 and deadline.second == 0:
+        return deadline.replace(hour=23, minute=59, second=0, microsecond=0)
+    return deadline
+
+
+def _collect_simple_import_rows(rows: list[tuple[object, ...]]) -> tuple[list[tuple[int, dict[str, object]]], list[str], list[dict[str, object]]]:
+    collected: dict[str, dict[str, object]] = {}
+    for index, row in enumerate(rows[1:], start=2):
+        if not any(cell not in (None, "") for cell in row):
+            continue
+        first_cell = str(row[0] or "").strip()
+        if first_cell.startswith("补充说明"):
+            break
+        row_data = {field: row[position] if position < len(row) else None for position, field in enumerate(TASK_IMPORT_FIELDS)}
+        title = str(row_data.get("title") or "").strip()
+        if not title or title == "……":
+            continue
+        key = str(row_data.get("sequence") or "").strip() or f"row-{index}"
+        grouped = collected.setdefault(
+            key,
+            {
+                "sequence": key,
+                "title": title,
+                "content": str(row_data.get("content") or "").strip(),
+                "responsible_names": [],
+                "deadline": row_data.get("deadline"),
+                "subtasks": [],
+                "row_number": index,
+            },
+        )
+        if not grouped.get("content") and row_data.get("content"):
+            grouped["content"] = str(row_data.get("content") or "").strip()
+        if not grouped.get("deadline") and row_data.get("deadline"):
+            grouped["deadline"] = row_data.get("deadline")
+        for name in _split_simple_import_names(row_data.get("responsible_names")):
+            if name not in grouped["responsible_names"]:
+                grouped["responsible_names"].append(name)
+        subtask_title = str(row_data.get("subtask") or "").strip()
+        if subtask_title:
+            for assignee_name in _split_simple_import_names(row_data.get("responsible_names")):
+                grouped["subtasks"].append({"title": subtask_title, "assignee_name": assignee_name})
+
+    import_rows: list[tuple[int, dict[str, object]]] = []
+    row_signatures: list[str] = []
+    row_samples: list[dict[str, object]] = []
+    for grouped in collected.values():
+        row_data = {
+            "sequence": grouped["sequence"],
+            "title": grouped["title"],
+            "content": grouped["content"],
+            "responsible_names": "、".join(grouped["responsible_names"]),
+            "deadline": grouped["deadline"],
+            "subtasks": grouped["subtasks"],
+        }
+        # Excel 读取到的截止日期可能是 datetime；先标准化再生成签名，避免导入预检直接抛出序列化异常。
+        normalized_signature_payload = {
+            **row_data,
+            "deadline": row_data["deadline"].isoformat() if isinstance(row_data["deadline"], datetime) else row_data["deadline"],
+        }
+        signature = hashlib.sha256(
+            json.dumps(normalized_signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        row_number = int(grouped["row_number"])
+        import_rows.append((row_number, row_data))
+        row_signatures.append(signature)
+        row_samples.append(
+            {
+                "signature": signature,
+                "row_number": row_number,
+                "title": row_data["title"],
+                "owner_name": row_data["responsible_names"],
+                "end_at": str(row_data["deadline"] or ""),
+            }
+        )
+    return import_rows, row_signatures, row_samples
+
+
+def _build_task_create_from_simple_import_row(row_data: dict[str, object], db: Session) -> TaskCreate:
+    responsible_names = _split_simple_import_names(row_data.get("responsible_names"))
+    if not responsible_names:
+        raise ValueError("负责人不能为空")
+    responsible_users = [_find_active_user_by_name(db, item, "负责人") for item in responsible_names]
+    owner = responsible_users[0]
+    participant_ids = [item.id for item in responsible_users[1:]]
+    member_ids = {owner.id, *participant_ids}
+    end_at = _normalize_simple_import_deadline(row_data.get("deadline"))
+    now = shanghai_now_naive().replace(second=0, microsecond=0)
+    start_at = now if now < end_at else end_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    if start_at >= end_at:
+        start_at = end_at - timedelta(hours=1)
+
+    subtasks: list[dict[str, object]] = []
+    for index, item in enumerate(row_data.get("subtasks") or []):
+        assignee = _find_active_user_by_name(db, item.get("assignee_name"), "子任务负责人")
+        if assignee.id not in member_ids:
+            raise ValueError(f"子任务负责人不在任务负责人范围内：{item.get('assignee_name')}")
+        subtasks.append(
+            {
+                "title": str(item.get("title") or "").strip(),
+                "content": "",
+                "assignee_id": assignee.id,
+                "sort_order": index,
+                "status": "pending",
+            }
+        )
+
+    return TaskCreate(
+        title=str(row_data.get("title") or "").strip(),
+        content=str(row_data.get("content") or "").strip(),
+        owner_id=owner.id,
+        participant_ids=participant_ids,
+        start_at=start_at,
+        end_at=end_at,
+        due_remind_days=0,
+        priority="medium",
+        remark="",
+        milestones=[],
+        subtasks=subtasks,
+    )
+
+
 def _record_task_import_history(
     db: Session,
     filename: str,
@@ -1190,6 +1421,39 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "任务导入模板"
+    sheet.append(["序号", "任务名称", "任务内容", "子任务", "负责人", "截止日期"])
+    sheet.append([1, "地市数据分域", "把数据分域工作落到实处，明确各市的数据管理范围与权限。", "制定地市数据分域清单与规则", "张三、李四", datetime(2026, 12, 31)])
+    sheet.append([1, "地市数据分域", "把数据分域工作落到实处，明确各市的数据管理范围与权限。", "部署地市数据分域访问控制", "李四", datetime(2026, 12, 31)])
+    sheet.append([2, "数据治理", "依据数据敏感程度进行分级，并制定相应的安全策略与访问权限控制，确保客户隐私数据与核心商业数据在存储、流转和使用中的安全合规。", "", "张三、李四、老六", datetime(2026, 5, 31)])
+    sheet.append([3, "……", "", "", "", ""])
+    sheet.append(["", "", "", "", "", ""])
+    sheet.append(["", "", "", "", "", ""])
+    sheet.append([
+        "补充说明：\n1.同一个任务如果有不同的子任务，每个子任务单独占一行，但序号相同。\n2.每行中的负责人如果有多个，以中文顿号或逗号区分，通知需要按人名进行发送。\n3.如果同一个任务下，同一个人涉及多个子任务，则将子任务合并为一个通知。\n4.邮件内容需简化，任务标题和子任务按截止日期聚合展示。\n5.桌面消息的标题和内容与邮件一致",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row_index in range(2, 9):
+        for column_index in range(1, 7):
+            sheet.cell(row=row_index, column=column_index).alignment = Alignment(vertical="top", wrap_text=True)
+    for column, width in {"A": 10, "B": 24, "C": 48, "D": 30, "E": 24, "F": 18}.items():
+        sheet.column_dimensions[column].width = width
+    excel_buffer = io.BytesIO()
+    workbook.save(excel_buffer)
+    excel_buffer.seek(0)
+    return StreamingResponse(
+        iter([excel_buffer.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="task-import-template.xlsx"'},
+    )
+    sheet = workbook.active
+    sheet.title = "任务导入模板"
 
     headers = [
         "任务标题(title)",
@@ -1372,6 +1636,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "email": item.user.email if item.user else "",
                 "member_role": item.member_role,
                 "member_role_text": MEMBER_ROLE_LABELS.get(item.member_role, item.member_role),
+                "display_role_text": "负责人",
             }
             for item in members
         ],
@@ -1396,6 +1661,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "status": item.status,
                 "status_text": SUBTASK_STATUS_LABELS.get(item.status, item.status),
                 "sort_order": item.sort_order,
+                "latest_notifications": _task_latest_notifications(db, task.id, user_id=item.assignee_id),
             }
             for item in subtasks
         ],
@@ -2070,7 +2336,7 @@ async def import_tasks(
     if len(rows) < 2:
         raise HTTPException(status_code=400, detail="模板中没有可导入的数据行")
 
-    import_rows, row_signatures, row_samples = _collect_import_rows(rows)
+    import_rows, row_signatures, row_samples = _collect_simple_import_rows(rows)
     overlap_count, overlap_rate, overlap_samples = _detect_import_overlap(db, row_signatures, row_samples)
     if overlap_count >= 3 and overlap_rate >= 0.6 and not confirm_duplicate:
         preview = TaskImportPreviewOut(
@@ -2086,7 +2352,7 @@ async def import_tasks(
     failures: list[dict[str, object]] = []
     for index, row_data in import_rows:
         try:
-            payload = _build_task_create_from_import_row(row_data, db)
+            payload = _build_task_create_from_simple_import_row(row_data, db)
             task = _create_task_record(payload, current_user, db, source="import")
             db.commit()
             created_task_ids.append(task.id)

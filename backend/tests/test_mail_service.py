@@ -292,6 +292,46 @@ class MailServiceTestCase(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("POP3", result["message"])
 
+    def test_diagnose_pop3_line_too_long_returns_configuration_hint(self) -> None:
+        import app.services.mail as mail_module
+
+        original_protocol = settings.mail_inbox_protocol
+        original_host = settings.pop3_host
+        original_port = settings.pop3_port
+        original_user = settings.pop3_user
+        original_password = settings.pop3_password
+        original_ssl = settings.pop3_use_ssl
+        original_tls = settings.pop3_use_tls
+        original_pop3 = mail_module.poplib.POP3
+        settings.mail_inbox_protocol = "pop3"
+        settings.pop3_host = "pop3.example.com"
+        settings.pop3_port = 110
+        settings.pop3_user = "user"
+        settings.pop3_password = "pass"
+        settings.pop3_use_ssl = False
+        settings.pop3_use_tls = False
+
+        def broken_pop3(host, port, timeout=None):
+            raise mail_module.poplib.error_proto("line too long")
+
+        mail_module.poplib.POP3 = broken_pop3
+        try:
+            result = diagnose_imap_settings()
+        finally:
+            mail_module.poplib.POP3 = original_pop3
+            settings.mail_inbox_protocol = original_protocol
+            settings.pop3_host = original_host
+            settings.pop3_port = original_port
+            settings.pop3_user = original_user
+            settings.pop3_password = original_password
+            settings.pop3_use_ssl = original_ssl
+            settings.pop3_use_tls = original_tls
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("line too long", result["message"])
+        self.assertIn("不是账号密码错误", result["message"])
+        self.assertIn("POP3_HOST、POP3_PORT 与加密方式不匹配", result["message"])
+
     def test_poll_mailbox_supports_pop3_recent_scan(self) -> None:
         import app.services.mail as mail_module
 

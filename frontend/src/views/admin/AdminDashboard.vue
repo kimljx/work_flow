@@ -3,46 +3,45 @@
     <div class="panel workspace-header">
       <div>
         <div class="workspace-eyebrow">管理看板</div>
-        <h1 class="workspace-title">任务推进与风险总览</h1>
+        <h1 class="workspace-title">任务推进总览</h1>
         <p class="workspace-subtitle">{{ heroSummary }}</p>
       </div>
       <div class="toolbar">
-        <router-link class="button" to="/admin/tasks/new">新建任务</router-link>
-        <router-link class="button secondary" to="/admin/delay-requests">处理审批</router-link>
-        <router-link class="button secondary" to="/admin/notifications">通知记录</router-link>
+        <button @click="goCreateTask">新建任务</button>
+        <router-link class="button secondary" to="/admin/tasks">查看任务</router-link>
       </div>
     </div>
 
     <div class="stats">
       <div class="stat-card compact dashboard-stat-primary">
-        <span class="metric-label">健康分</span>
-        <strong>{{ summary.health_score }}</strong>
+        <span class="metric-label">任务总数</span>
+        <strong>{{ summary.task_total }}</strong>
         <div class="subtle-text">{{ healthScoreText }}</div>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">任务完成率</span>
+        <span class="metric-label">完成率</span>
         <strong>{{ summary.completion_rate }}%</strong>
         <div class="subtle-text">已完成 {{ summary.done_total }} / 全部 {{ summary.task_total }}</div>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">在途任务</span>
+        <span class="metric-label">进行中</span>
         <strong>{{ summary.in_progress_total }}</strong>
-        <div class="subtle-text">未开始 {{ summary.pending_total }}，即将到期 {{ summary.due_soon_total }}</div>
+        <div class="subtle-text">未开始 {{ summary.pending_total }}</div>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">延期风险</span>
-        <strong>{{ summary.delayed_total }}</strong>
-        <div class="subtle-text">健康任务率 {{ summary.healthy_task_rate }}%</div>
+        <span class="metric-label">即将到期</span>
+        <strong>{{ summary.due_soon_total }}</strong>
+        <div class="subtle-text">已延期 {{ summary.delayed_total }}</div>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">待审批</span>
-        <strong>{{ summary.pending_delay_requests }}</strong>
-        <div class="subtle-text">需要管理员处理的延期申请</div>
+        <span class="metric-label">邮件状态</span>
+        <strong>{{ summary.email_success_rate }}%</strong>
+        <div class="subtle-text">异常 {{ summary.mail_failure_total }}</div>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">通知异常</span>
-        <strong>{{ summary.mail_failure_total }}</strong>
-        <div class="subtle-text">累计重试 {{ summary.retry_total }}</div>
+        <span class="metric-label">即时消息</span>
+        <strong>{{ summary.qax_read_rate }}%</strong>
+        <div class="subtle-text">送达 {{ summary.qax_delivery_rate }}%</div>
       </div>
     </div>
 
@@ -51,7 +50,7 @@
         <div class="section-head">
           <div>
             <h2>七日趋势</h2>
-            <p>用同一张图观察新增、完成和延期库存，判断推进速度是否跑赢积压。</p>
+            <p>只保留任务推进最关键的新增、完成和延期走势。</p>
           </div>
         </div>
 
@@ -84,7 +83,7 @@
           <div class="dashboard-simple-legend">
             <span><i class="dashboard-simple-dot created"></i>新增</span>
             <span><i class="dashboard-simple-dot completed"></i>完成</span>
-            <span><i class="dashboard-simple-dot delayed"></i>延期库存</span>
+            <span><i class="dashboard-simple-dot delayed"></i>延期</span>
           </div>
         </div>
         <div v-else class="muted-block">当前数据量还不足以形成趋势。</div>
@@ -93,8 +92,8 @@
       <div class="panel">
         <div class="section-head">
           <div>
-            <h2>当前结构</h2>
-            <p>用更适合管理决策的方式看状态和优先级，不堆砌无意义数字。</p>
+            <h2>任务结构</h2>
+            <p>快速判断状态分布和优先级压力，不再放审批入口和通知中心入口。</p>
           </div>
         </div>
 
@@ -136,20 +135,20 @@
 
         <div class="dashboard-signal-grid">
           <div class="info-cell">
-            <span class="info-label">邮件成功率</span>
-            <strong>{{ summary.email_success_rate }}%</strong>
+            <span class="info-label">健康任务率</span>
+            <strong>{{ summary.healthy_task_rate }}%</strong>
           </div>
           <div class="info-cell">
-            <span class="info-label">即时消息送达率</span>
+            <span class="info-label">QAX 送达率</span>
             <strong>{{ summary.qax_delivery_rate }}%</strong>
           </div>
           <div class="info-cell">
-            <span class="info-label">即时消息已读率</span>
+            <span class="info-label">QAX 已读率</span>
             <strong>{{ summary.qax_read_rate }}%</strong>
           </div>
           <div class="info-cell">
-            <span class="info-label">沟通异常</span>
-            <strong>{{ summary.mail_failure_total }}</strong>
+            <span class="info-label">重试次数</span>
+            <strong>{{ summary.retry_total }}</strong>
           </div>
         </div>
       </div>
@@ -159,14 +158,14 @@
       <div class="panel">
         <div class="section-head">
           <div>
-            <h2>重点待办</h2>
-            <p>先把最值得处理的事情列出来，避免在多个菜单之间来回切换。</p>
+            <h2>重点提醒</h2>
+            <p>仅保留与任务推进直接相关的提醒项。</p>
           </div>
         </div>
 
         <div class="dashboard-attention-list-simple">
           <article
-            v-for="item in summary.attention_items"
+            v-for="item in attentionItems"
             :key="`${item.title}-${item.route}`"
             class="dashboard-attention-item-simple"
           >
@@ -188,13 +187,13 @@
         <div class="section-head">
           <div>
             <h2>快捷入口</h2>
-            <p>保留高频动作，但让入口更贴近现有后台风格，不再单独做一套视觉系统。</p>
+            <p>固定为任务相关入口，避免看板再次长成一个管理菜单。</p>
           </div>
         </div>
 
         <div class="dashboard-action-list-simple">
           <router-link
-            v-for="item in summary.quick_actions"
+            v-for="item in quickActions"
             :key="item.route"
             class="dashboard-action-item-simple"
             :to="item.route"
@@ -211,8 +210,10 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import http from '../../api/http'
 
+const router = useRouter()
 const summary = ref({
   task_total: 0,
   in_progress_total: 0,
@@ -239,15 +240,40 @@ const summary = ref({
 
 const heroSummary = computed(() => {
   if (!summary.value.task_total) {
-    return '当前还没有任务数据，先创建任务或导入计划，让看板开始形成可追踪的趋势。'
+    return '当前还没有任务数据，先新建任务或导入任务，让看板开始形成可跟踪的节奏。'
   }
-  return `当前共 ${summary.value.task_total} 项任务，完成率 ${summary.value.completion_rate}% 。其中 ${summary.value.due_soon_total} 项即将到期，${summary.value.delayed_total} 项已延期，${summary.value.pending_delay_requests} 条申请待审批。`
+  return `当前共 ${summary.value.task_total} 项任务，完成率 ${summary.value.completion_rate}% 。其中 ${summary.value.due_soon_total} 项即将到期，${summary.value.delayed_total} 项已延期。`
 })
 
 const healthScoreText = computed(() => {
   if (summary.value.health_score >= 80) return '整体推进较稳定'
   if (summary.value.health_score >= 60) return '需要关注部分风险'
   return '建议优先处理风险任务'
+})
+
+const attentionItems = computed(() =>
+  (summary.value.attention_items || []).filter((item) => !String(item.route || '').includes('/delay-requests'))
+)
+
+const quickActions = computed(() => {
+  const source = (summary.value.quick_actions || []).filter((item) => String(item.route || '').startsWith('/admin/tasks'))
+  if (source.length > 0) {
+    return source
+  }
+  return [
+    {
+      title: '查看任务列表',
+      description: '进入任务表格，集中查看当前全部任务。',
+      route: '/admin/tasks',
+      action_label: '进入任务',
+    },
+    {
+      title: '新建任务',
+      description: '创建主任务、负责人和子任务。',
+      route: '/admin/tasks',
+      action_label: '前往创建',
+    },
+  ]
 })
 
 const trendHasData = computed(() =>
@@ -292,6 +318,10 @@ function toneClass(tone) {
   if (tone === 'danger') return 'status-tone status-tone-danger'
   if (tone === 'primary') return 'status-tone status-tone-primary'
   return 'status-tone status-tone-neutral'
+}
+
+function goCreateTask() {
+  router.push('/admin/tasks')
 }
 
 onMounted(async () => {

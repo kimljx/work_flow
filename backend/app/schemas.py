@@ -120,12 +120,14 @@ class TaskOut(BaseModel):
     priority_text: str = ""
     owner_name: str = ""
     creator_name: str = ""
+    responsible_names: list[str] = Field(default_factory=list)
     participant_count: int = 0
     notification_total: int = 0
     delivered_count: int = 0
     completed_member_count: int = 0
     subtask_count: int = 0
     subtask_status_summary: list[dict] = Field(default_factory=list)
+    latest_notifications: dict[str, dict] = Field(default_factory=dict)
     created_at: datetime | None = None
 
 

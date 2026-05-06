@@ -107,8 +107,6 @@ def template_allowed_variables(template_kind: str, notify_type: str) -> set[str]
     if template_kind not in {"MAIL_SEND", "QAX_SEND"}:
         return set()
     variables = set(COMMON_TEMPLATE_VARIABLES)
-    if notify_type == "delay_approval":
-        variables.update(DELAY_APPROVAL_VARIABLES)
     return variables
 
 

@@ -66,7 +66,7 @@
               </span>
             </label>
 
-            <div v-if="primaryResponsibleId === user.id" class="task-responsible-subtasks">
+            <div v-if="responsibleSelection.includes(String(user.id))" class="task-responsible-subtasks">
               <div class="task-responsible-subtasks-head">
                 <div>
                   <strong>子任务</strong>
@@ -75,20 +75,20 @@
                 <button
                   type="button"
                   class="button secondary small"
-                  :disabled="submitting || responsibleOptions.length === 0"
-                  @click.stop="addSubtask"
+                  :disabled="submitting"
+                  @click.stop="addSubtask(user.id)"
                 >
                   新增子任务
                 </button>
               </div>
 
-              <div v-if="form.subtasks.length === 0" class="muted-block task-responsible-subtasks-empty">
+              <div v-if="subtasksForUser(user.id).length === 0" class="muted-block task-responsible-subtasks-empty">
                 当前没有子任务，可以只创建主任务。
               </div>
 
               <div v-else class="task-responsible-subtask-list">
                 <div
-                  v-for="(item, index) in form.subtasks"
+                  v-for="(item, index) in subtasksForUser(user.id)"
                   :key="item.local_key"
                   class="task-responsible-subtask-item"
                 >
@@ -113,7 +113,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div v-if="isEdit" class="panel">
         <div class="section-head">
           <div>
             <h3>里程碑</h3>
@@ -166,7 +166,6 @@ const responsibleOptions = computed(() => {
   const selectedIds = new Set(responsibleSelection.value.map((item) => Number(item)))
   return users.value.filter((item) => selectedIds.has(item.id))
 })
-const primaryResponsibleId = computed(() => Number(responsibleSelection.value[0]) || null)
 
 const form = reactive({
   title: '',
@@ -199,15 +198,19 @@ function buildDefaultTaskDateTime(hour) {
   return toDateTimeLocal(now)
 }
 
-function addSubtask() {
-  if (responsibleOptions.value.length === 0) {
+function subtasksForUser(userId) {
+  return form.subtasks.filter((item) => Number(item.assignee_id) === Number(userId))
+}
+
+function addSubtask(userId) {
+  if (!responsibleSelection.value.includes(String(userId))) {
     return
   }
   form.subtasks.push({
     id: null,
     local_key: nextSubtaskKey(),
     title: '',
-    assignee_id: responsibleOptions.value[0].id,
+    assignee_id: Number(userId),
   })
 }
 

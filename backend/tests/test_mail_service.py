@@ -43,8 +43,7 @@ class MailServiceTestCase(unittest.TestCase):
         self.assertIn("SMTP", result["message"])
 
     def test_port_465_uses_ssl_by_default(self) -> None:
-        from app.services.mail import _open_smtp_connection
-        import smtplib
+        from app.services.mail import _make_zmail_smtp_server
 
         original_host = settings.smtp_host
         original_port = settings.smtp_port
@@ -52,26 +51,15 @@ class MailServiceTestCase(unittest.TestCase):
         settings.smtp_host = "smtp.example.com"
         settings.smtp_port = 465
         settings.smtp_use_ssl = False
-
-        captured = {}
-        original_smtp_ssl = smtplib.SMTP_SSL
-
-        class DummySMTPSSL:
-            def __init__(self, host, port, timeout):
-                captured["host"] = host
-                captured["port"] = port
-                captured["timeout"] = timeout
-
-        smtplib.SMTP_SSL = DummySMTPSSL
         try:
-            _open_smtp_connection()
+            server = _make_zmail_smtp_server()
         finally:
-            smtplib.SMTP_SSL = original_smtp_ssl
             settings.smtp_host = original_host
             settings.smtp_port = original_port
             settings.smtp_use_ssl = original_ssl
 
-        self.assertEqual(captured["port"], 465)
+        self.assertEqual(server.port, 465)
+        self.assertTrue(server.ssl)
 
     def test_diagnose_returns_dns_message_for_bad_host(self) -> None:
         import app.services.mail as mail_module
@@ -156,6 +144,8 @@ class MailServiceTestCase(unittest.TestCase):
     def test_imap_requires_configuration(self) -> None:
         original_host = settings.imap_host
         original_user = settings.imap_user
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_host = ""
         settings.imap_user = ""
         try:
@@ -163,6 +153,7 @@ class MailServiceTestCase(unittest.TestCase):
         finally:
             settings.imap_host = original_host
             settings.imap_user = original_user
+            settings.mail_inbox_protocol = original_inbox_protocol
 
         self.assertEqual(result["status"], "failed")
         self.assertIn("IMAP_HOST", result["message"])
@@ -177,6 +168,8 @@ class MailServiceTestCase(unittest.TestCase):
         original_ssl = settings.imap_use_ssl
         original_tls = settings.imap_use_tls
         original_imap = mail_module.imaplib.IMAP4
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_host = "imap.example.com"
         settings.imap_port = 143
         settings.imap_user = "user"
@@ -202,6 +195,7 @@ class MailServiceTestCase(unittest.TestCase):
             result = diagnose_imap_settings()
         finally:
             mail_module.imaplib.IMAP4 = original_imap
+            settings.mail_inbox_protocol = original_inbox_protocol
             settings.imap_host = original_host
             settings.imap_port = original_port
             settings.imap_user = original_user
@@ -221,6 +215,8 @@ class MailServiceTestCase(unittest.TestCase):
         original_ssl = settings.imap_use_ssl
         original_tls = settings.imap_use_tls
         original_open = mail_module._open_imap_connection
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_host = "imap.example.com"
         settings.imap_port = 143
         settings.imap_user = "user"
@@ -236,6 +232,7 @@ class MailServiceTestCase(unittest.TestCase):
             result = diagnose_imap_settings()
         finally:
             mail_module._open_imap_connection = original_open
+            settings.mail_inbox_protocol = original_inbox_protocol
             settings.imap_host = original_host
             settings.imap_port = original_port
             settings.imap_user = original_user
@@ -257,7 +254,18 @@ class MailServiceTestCase(unittest.TestCase):
         original_password = settings.pop3_password
         original_ssl = settings.pop3_use_ssl
         original_tls = settings.pop3_use_tls
-        original_pop3 = mail_module.poplib.POP3
+        original_factory = mail_module._make_zmail_mail_server
+
+        class FakePOPServer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeMailServer:
+            pop_server = FakePOPServer()
+
         settings.mail_inbox_protocol = "pop3"
         settings.pop3_host = "pop3.example.com"
         settings.pop3_port = 110
@@ -266,21 +274,11 @@ class MailServiceTestCase(unittest.TestCase):
         settings.pop3_use_ssl = False
         settings.pop3_use_tls = False
 
-        class DummyPop3:
-            def user(self, username):
-                return b"+OK"
-
-            def pass_(self, password):
-                return b"+OK"
-
-            def quit(self):
-                return b"+OK"
-
-        mail_module.poplib.POP3 = lambda host, port, timeout=None: DummyPop3()
+        mail_module._make_zmail_mail_server = lambda u, p: FakeMailServer()
         try:
             result = diagnose_imap_settings()
         finally:
-            mail_module.poplib.POP3 = original_pop3
+            mail_module._make_zmail_mail_server = original_factory
             settings.mail_inbox_protocol = original_protocol
             settings.pop3_host = original_host
             settings.pop3_port = original_port
@@ -302,7 +300,7 @@ class MailServiceTestCase(unittest.TestCase):
         original_password = settings.pop3_password
         original_ssl = settings.pop3_use_ssl
         original_tls = settings.pop3_use_tls
-        original_pop3 = mail_module.poplib.POP3
+        original_factory = mail_module._make_zmail_mail_server
         settings.mail_inbox_protocol = "pop3"
         settings.pop3_host = "pop3.example.com"
         settings.pop3_port = 110
@@ -311,14 +309,14 @@ class MailServiceTestCase(unittest.TestCase):
         settings.pop3_use_ssl = False
         settings.pop3_use_tls = False
 
-        def broken_pop3(host, port, timeout=None):
+        def broken_factory(u: str, p: str):
             raise mail_module.poplib.error_proto("line too long")
 
-        mail_module.poplib.POP3 = broken_pop3
+        mail_module._make_zmail_mail_server = broken_factory
         try:
             result = diagnose_imap_settings()
         finally:
-            mail_module.poplib.POP3 = original_pop3
+            mail_module._make_zmail_mail_server = original_factory
             settings.mail_inbox_protocol = original_protocol
             settings.pop3_host = original_host
             settings.pop3_port = original_port
@@ -343,7 +341,7 @@ class MailServiceTestCase(unittest.TestCase):
         original_ssl = settings.pop3_use_ssl
         original_tls = settings.pop3_use_tls
         original_max_scan = settings.mail_inbox_max_scan
-        original_pop3 = mail_module.poplib.POP3
+        original_factory = mail_module._make_zmail_mail_server
         settings.mail_inbox_protocol = "pop3"
         settings.pop3_host = "pop3.example.com"
         settings.pop3_port = 110
@@ -353,29 +351,33 @@ class MailServiceTestCase(unittest.TestCase):
         settings.pop3_use_tls = False
         settings.mail_inbox_max_scan = 2
 
-        class DummyPop3:
-            def user(self, username):
-                return b"+OK"
+        class FakePOPServer:
+            def __enter__(self):
+                return self
 
-            def pass_(self, password):
-                return b"+OK"
+            def __exit__(self, exc_type, exc, tb):
+                return False
 
             def list(self):
                 return b"+OK", [b"1 100", b"2 100", b"3 100"], 0
 
-            def retr(self, message_number):
+            def get_mail(self, message_number: int):
                 message = EmailMessage()
                 message["Message-ID"] = f"<pop3-{message_number}@example.com>"
                 message["Subject"] = "任务#1 进行中"
                 message["From"] = "member@example.com"
                 message["Date"] = "Wed, 22 Apr 2026 10:00:00 +0800"
                 message.set_content("任务#1 进行中")
-                return b"+OK", message.as_bytes().splitlines(), 0
+                return message.as_bytes().splitlines()
 
-            def quit(self):
-                return b"+OK"
+            @property
+            def server(self):
+                return self
 
-        mail_module.poplib.POP3 = lambda host, port, timeout=None: DummyPop3()
+        class FakeMailServer:
+            pop_server = FakePOPServer()
+
+        mail_module._make_zmail_mail_server = lambda u, p: FakeMailServer()
         try:
             with SessionLocal() as db:
                 db.add(User(username="member", password_hash=hash_password("x"), role="member", name="成员", email="member@example.com", ip_address="10.0.0.2", is_active=True))
@@ -392,7 +394,7 @@ class MailServiceTestCase(unittest.TestCase):
                 self.assertEqual(result["count"], 2)
                 self.assertIn("POP3", result["message"])
         finally:
-            mail_module.poplib.POP3 = original_pop3
+            mail_module._make_zmail_mail_server = original_factory
             settings.mail_inbox_protocol = original_protocol
             settings.pop3_host = original_host
             settings.pop3_port = original_port
@@ -401,6 +403,22 @@ class MailServiceTestCase(unittest.TestCase):
             settings.pop3_use_ssl = original_ssl
             settings.pop3_use_tls = original_tls
             settings.mail_inbox_max_scan = original_max_scan
+
+    def test_poll_mailbox_returns_busy_when_another_poll_is_running(self) -> None:
+        import app.services.mail as mail_module
+
+        acquired = mail_module._MAIL_POLL_EXECUTION_LOCK.acquire(blocking=False)
+        self.assertTrue(acquired)
+        try:
+            with SessionLocal() as db:
+                result = poll_mailbox(db)
+        finally:
+            if acquired:
+                mail_module._MAIL_POLL_EXECUTION_LOCK.release()
+
+        self.assertEqual(result["status"], "busy")
+        self.assertIn("稍后重试", result["message"])
+        self.assertEqual(result["count"], 0)
 
     def test_extract_text_body_accepts_unknown_8bit_charset(self) -> None:
         message = EmailMessage()
@@ -444,6 +462,8 @@ class MailServiceTestCase(unittest.TestCase):
         original_password = settings.imap_password
         original_ssl = settings.imap_use_ssl
         original_tls = settings.imap_use_tls
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_max_unseen_scan = 2
         settings.mail_inbox_max_scan = 2
         settings.imap_host = "imap.example.com"
@@ -499,6 +519,7 @@ class MailServiceTestCase(unittest.TestCase):
             mail_module.imaplib.IMAP4_SSL = original_imap
             settings.imap_max_unseen_scan = original_max_scan
             settings.mail_inbox_max_scan = original_inbox_max_scan
+            settings.mail_inbox_protocol = original_inbox_protocol
             settings.imap_host = original_host
             settings.imap_user = original_user
             settings.imap_password = original_password
@@ -524,6 +545,8 @@ class MailServiceTestCase(unittest.TestCase):
         original_password = settings.imap_password
         original_ssl = settings.imap_use_ssl
         original_tls = settings.imap_use_tls
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_host = "imap.example.com"
         settings.imap_user = "user"
         settings.imap_password = "pass"
@@ -579,6 +602,7 @@ class MailServiceTestCase(unittest.TestCase):
                 self.assertEqual(action.action_status, "APPLIED")
         finally:
             mail_module.imaplib.IMAP4_SSL = original_imap
+            settings.mail_inbox_protocol = original_inbox_protocol
             settings.imap_host = original_host
             settings.imap_user = original_user
             settings.imap_password = original_password
@@ -593,6 +617,8 @@ class MailServiceTestCase(unittest.TestCase):
         original_password = settings.imap_password
         original_ssl = settings.imap_use_ssl
         original_tls = settings.imap_use_tls
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_host = "imap.example.com"
         settings.imap_user = "user"
         settings.imap_password = "pass"
@@ -642,10 +668,14 @@ class MailServiceTestCase(unittest.TestCase):
                 db.commit()
                 result = poll_mailbox(db)
                 self.assertEqual(result["status"], "success")
-                self.assertEqual(db.query(DelayRequest).count(), 1)
-                self.assertGreaterEqual(db.query(Notification).count(), 2)
+                # 当前业务层将延期申请类邮件标记为跳过（审批链路停用），不再写入 DelayRequest。
+                self.assertEqual(db.query(DelayRequest).count(), 0)
+                delay_action = db.query(MailAction).filter(MailAction.action_type == "delay_request").first()
+                self.assertIsNotNone(delay_action)
+                self.assertEqual(delay_action.action_status, "SKIPPED")
         finally:
             mail_module.imaplib.IMAP4_SSL = original_imap
+            settings.mail_inbox_protocol = original_inbox_protocol
             settings.imap_host = original_host
             settings.imap_user = original_user
             settings.imap_password = original_password
@@ -660,6 +690,8 @@ class MailServiceTestCase(unittest.TestCase):
         original_password = settings.imap_password
         original_ssl = settings.imap_use_ssl
         original_tls = settings.imap_use_tls
+        original_inbox_protocol = settings.mail_inbox_protocol
+        settings.mail_inbox_protocol = "imap"
         settings.imap_host = "imap.example.com"
         settings.imap_user = "user"
         settings.imap_password = "pass"
@@ -736,12 +768,12 @@ class MailServiceTestCase(unittest.TestCase):
                 self.assertEqual(result["status"], "success")
                 self.assertEqual(task.main_status, "not_started")
                 self.assertEqual(recipient.read_status, "unread")
-                action = db.query(MailAction).order_by(MailAction.id.desc()).first()
-                self.assertIsNotNone(action)
-                self.assertEqual(action.action_status, "FAILED")
+                # 系统生成的通知经 strip_reply_guides 后通常无法命中回复模板，不产生业务 MailAction。
+                self.assertEqual(db.query(MailAction).count(), 0)
                 self.assertEqual(db.query(DelayRequest).count(), 0)
         finally:
             mail_module.imaplib.IMAP4_SSL = original_imap
+            settings.mail_inbox_protocol = original_inbox_protocol
             settings.imap_host = original_host
             settings.imap_user = original_user
             settings.imap_password = original_password

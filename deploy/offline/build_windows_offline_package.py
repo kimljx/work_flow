@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-"""构建 Windows 内网离线发布包。
+"""Build a Windows offline release package from the current workspace."""
 
-发布包目标：
-1. 目标电脑无需预装 Python、Node.js 或 Playwright 浏览器。
-2. 后端依赖、QAX 所需 Chromium 浏览器和前端静态资源全部提前打入包内。
-3. 输出“目录版发布包 + zip 压缩包”，方便复制、归档和升级。
-"""
-
+import os
 import shutil
 import subprocess
 import sys
+from hashlib import sha256
 from datetime import datetime
 from pathlib import Path
 from urllib.request import urlretrieve
@@ -25,21 +21,22 @@ PYTHON_EMBED_URL = (
     f"https://www.python.org/ftp/python/{PYTHON_EMBED_VERSION}/"
     f"python-{PYTHON_EMBED_VERSION}-embed-amd64.zip"
 )
-PYTHON_DOWNLOAD_CMD = ["py", "-3.10"]
+HOST_PYTHON_CMD = ["py", "-3.11"]
 BROWSER_NAME = "chromium"
 RELEASE_NAME = f"work_flow_windows_offline_py310_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 RELEASE_ROOT = DIST_ROOT / RELEASE_NAME
+STAGING_ROOT = DIST_ROOT / f"{RELEASE_NAME}__incomplete"
 
 
 def run_command(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-    """执行外部命令，并在失败时直接中断构建。"""
+    """Run an external command and fail fast on error."""
 
-    print(f"[执行] {' '.join(command)}")
+    print(f"[run] {' '.join(command)}")
     subprocess.run(command, cwd=cwd, check=True, env=env)
 
 
 def ensure_clean_directory(path: Path) -> None:
-    """确保输出目录为空目录。"""
+    """Ensure an empty output directory exists."""
 
     if path.exists():
         shutil.rmtree(path)
@@ -47,7 +44,7 @@ def ensure_clean_directory(path: Path) -> None:
 
 
 def copy_windows_text_file(source: Path, destination: Path, encoding: str = "gbk") -> None:
-    """以 Windows 文本格式复制脚本和说明文件。"""
+    """Copy a text file with CRLF line endings for Windows deployment scripts."""
 
     content = source.read_text(encoding="utf-8")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -55,38 +52,26 @@ def copy_windows_text_file(source: Path, destination: Path, encoding: str = "gbk
 
 
 def build_frontend_dist() -> None:
-    """重新构建前端静态资源，确保离线包内容与当前代码一致。"""
+    """Rebuild frontend assets so the package matches the latest code."""
 
     run_command(["npm.cmd", "run", "build"], cwd=PROJECT_ROOT / "frontend")
 
 
 def download_embedded_python(target_zip: Path) -> None:
-    """下载官方 Windows 嵌入式 Python 运行时。"""
+    """Download the official Windows embeddable Python runtime."""
 
-    print(f"[下载] {PYTHON_EMBED_URL}")
+    print(f"[download] {PYTHON_EMBED_URL}")
     target_zip.parent.mkdir(parents=True, exist_ok=True)
     urlretrieve(PYTHON_EMBED_URL, target_zip)
 
 
-def download_python_packages(target_dir: Path) -> None:
-    """下载 Python 3.10 对应的离线依赖包。"""
+def download_bootstrap_packages(target_dir: Path) -> None:
+    """Download pip bootstrap wheels using the host Python."""
 
     target_dir.mkdir(parents=True, exist_ok=True)
     run_command(
         [
-            *PYTHON_DOWNLOAD_CMD,
-            "-m",
-            "pip",
-            "download",
-            "--dest",
-            str(target_dir),
-            "-r",
-            str(PROJECT_ROOT / "backend" / "requirements.txt"),
-        ]
-    )
-    run_command(
-        [
-            *PYTHON_DOWNLOAD_CMD,
+            *HOST_PYTHON_CMD,
             "-m",
             "pip",
             "download",
@@ -99,8 +84,38 @@ def download_python_packages(target_dir: Path) -> None:
     )
 
 
+def install_wheels_from_directory(packages_dir: Path, site_packages_dir: Path, pattern: str = "*.whl") -> None:
+    """Install downloaded wheels by unpacking them into site-packages."""
+
+    wheel_paths = sorted(packages_dir.glob(pattern))
+    if not wheel_paths:
+        raise RuntimeError(f"No wheel files matching {pattern!r} found in {packages_dir}")
+
+    for wheel_path in wheel_paths:
+        with ZipFile(wheel_path) as wheel_file:
+            for member in wheel_file.namelist():
+                normalized = Path(member)
+                parts = normalized.parts
+                target_path = None
+
+                if len(parts) >= 3 and parts[0].endswith(".data") and parts[1] in {"purelib", "platlib"}:
+                    target_path = site_packages_dir.joinpath(*parts[2:])
+                elif len(parts) >= 2 and parts[0].endswith(".data"):
+                    continue
+                else:
+                    target_path = site_packages_dir.joinpath(*parts)
+
+                if member.endswith("/"):
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with wheel_file.open(member) as source, target_path.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+
+
 def prepare_embedded_runtime(release_root: Path) -> Path:
-    """准备内置 Python 运行时并预装依赖，返回运行时 Python 路径。"""
+    """Prepare embedded Python and preinstall packages into it."""
 
     runtime_root = release_root / "runtime" / "python"
     embed_zip = release_root / "runtime" / f"python-{PYTHON_EMBED_VERSION}-embed-amd64.zip"
@@ -114,16 +129,44 @@ def prepare_embedded_runtime(release_root: Path) -> Path:
     (runtime_root / "Lib").mkdir(parents=True, exist_ok=True)
     site_packages_dir.mkdir(parents=True, exist_ok=True)
 
-    # 嵌入式 Python 默认关闭 site 包加载，这里显式打开并补充 site-packages。
     (runtime_root / "python310._pth").write_text(
         "python310.zip\n.\nLib\nLib/site-packages\nimport site\n",
         encoding="utf-8",
         newline="\r\n",
     )
 
+    install_wheels_from_directory(release_root / "packages", site_packages_dir, "pip-*.whl")
+    install_wheels_from_directory(release_root / "packages", site_packages_dir, "setuptools-*.whl")
+    install_wheels_from_directory(release_root / "packages", site_packages_dir, "wheel-*.whl")
+    install_wheels_from_directory(release_root / "packages", site_packages_dir, "packaging-*.whl")
+    return runtime_root / "python.exe"
+
+
+def download_python_packages(runtime_python: Path, target_dir: Path) -> None:
+    """Download backend dependencies with the embedded Python 3.10 resolver."""
+
+    target_dir.mkdir(parents=True, exist_ok=True)
     run_command(
         [
-            *PYTHON_DOWNLOAD_CMD,
+            str(runtime_python),
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            str(target_dir),
+            "--only-binary=:all:",
+            "-r",
+            str(PROJECT_ROOT / "backend" / "requirements.txt"),
+        ]
+    )
+
+
+def install_python_packages(runtime_python: Path, release_root: Path) -> None:
+    """Install backend dependencies into the embedded runtime from local wheels only."""
+
+    run_command(
+        [
+            str(runtime_python),
             "-m",
             "pip",
             "install",
@@ -131,22 +174,21 @@ def prepare_embedded_runtime(release_root: Path) -> Path:
             "--find-links",
             str(release_root / "packages"),
             "--target",
-            str(site_packages_dir),
+            str(release_root / "runtime" / "python" / "Lib" / "site-packages"),
             "--upgrade",
             "-r",
             str(PROJECT_ROOT / "backend" / "requirements.txt"),
         ]
     )
-    return runtime_root / "python.exe"
 
 
 def install_playwright_browser(runtime_python: Path, release_root: Path) -> None:
-    """把 QAX 依赖的 Chromium 浏览器直接安装到发布包内。"""
+    """Install Chromium needed by Playwright directly into the release."""
 
     browser_root = release_root / "runtime" / "ms-playwright"
     browser_root.mkdir(parents=True, exist_ok=True)
 
-    env = dict(os_environ())
+    env = dict(os.environ)
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_root)
     env["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
 
@@ -154,7 +196,7 @@ def install_playwright_browser(runtime_python: Path, release_root: Path) -> None
 
 
 def copytree_filtered(source: Path, destination: Path) -> None:
-    """复制目录，同时排除缓存文件，避免把构建噪音带入发布包。"""
+    """Copy a directory while skipping cache and transient files."""
 
     shutil.copytree(
         source,
@@ -163,8 +205,39 @@ def copytree_filtered(source: Path, destination: Path) -> None:
     )
 
 
+def file_sha256(path: Path) -> str:
+    """Return the SHA256 checksum of a file."""
+
+    digest = sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_build_info(release_root: Path) -> None:
+    """Write a build manifest for offline verification."""
+
+    tracked_files = [
+        PROJECT_ROOT / "frontend" / "dist" / "index.html",
+        PROJECT_ROOT / "backend" / "app" / "services" / "mail.py",
+        PROJECT_ROOT / "backend" / "requirements.txt",
+        PROJECT_ROOT / "deploy" / "offline" / "build_windows_offline_package.py",
+    ]
+    lines = [
+        f"release_name={RELEASE_NAME}",
+        f"built_at={datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "[sha256]",
+    ]
+    for path in tracked_files:
+        lines.append(f"{path.relative_to(PROJECT_ROOT).as_posix()}={file_sha256(path)}")
+    lines.append("")
+    (release_root / "BUILD_INFO.txt").write_text("\n".join(lines), encoding="utf-8", newline="\r\n")
+
+
 def copy_release_files(release_root: Path) -> None:
-    """复制发布包所需的应用、脚本与文档。"""
+    """Copy application code, scripts, and docs into the release package."""
 
     app_root = release_root / "app"
     backend_root = app_root / "backend"
@@ -196,7 +269,7 @@ def copy_release_files(release_root: Path) -> None:
 
 
 def zip_release_directory(release_root: Path) -> Path:
-    """将目录版发布包压缩为 zip 文件。"""
+    """Zip the directory release for easy transfer."""
 
     zip_path = release_root.with_suffix(".zip")
     if zip_path.exists():
@@ -209,30 +282,32 @@ def zip_release_directory(release_root: Path) -> Path:
     return zip_path
 
 
-def os_environ() -> dict[str, str]:
-    """返回当前环境变量副本，便于构建过程追加临时变量。"""
-
-    return dict(__import__("os").environ)
-
-
 def main() -> int:
-    """执行 Windows 离线发布包构建主流程。"""
+    """Build the Windows offline release package."""
 
     DIST_ROOT.mkdir(parents=True, exist_ok=True)
-    ensure_clean_directory(RELEASE_ROOT)
-    ensure_clean_directory(RELEASE_ROOT / "packages")
+    ensure_clean_directory(STAGING_ROOT)
+    ensure_clean_directory(STAGING_ROOT / "packages")
 
     build_frontend_dist()
-    download_python_packages(RELEASE_ROOT / "packages")
-    runtime_python = prepare_embedded_runtime(RELEASE_ROOT)
-    install_playwright_browser(runtime_python, RELEASE_ROOT)
-    copy_release_files(RELEASE_ROOT)
+    download_bootstrap_packages(STAGING_ROOT / "packages")
+    runtime_python = prepare_embedded_runtime(STAGING_ROOT)
+    download_python_packages(runtime_python, STAGING_ROOT / "packages")
+    install_python_packages(runtime_python, STAGING_ROOT)
+    install_playwright_browser(runtime_python, STAGING_ROOT)
+    copy_release_files(STAGING_ROOT)
+    write_build_info(STAGING_ROOT)
+
+    if RELEASE_ROOT.exists():
+        shutil.rmtree(RELEASE_ROOT)
+    STAGING_ROOT.rename(RELEASE_ROOT)
+
     zip_path = zip_release_directory(RELEASE_ROOT)
 
     print()
-    print("Windows 离线发布包已生成：")
-    print(f"- 目录版：{RELEASE_ROOT}")
-    print(f"- 压缩包：{zip_path}")
+    print("Windows offline package generated:")
+    print(f"- directory: {RELEASE_ROOT}")
+    print(f"- zip: {zip_path}")
     return 0
 
 

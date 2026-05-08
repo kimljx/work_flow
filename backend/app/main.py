@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
+FRONTEND_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 _mail_poll_stop_event = threading.Event()
 _mail_poll_thread: threading.Thread | None = None
@@ -208,7 +213,7 @@ def _serve_frontend_file(relative_path: str = "index.html") -> FileResponse:
     target = _frontend_file(relative_path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="前端静态资源不存在，请先执行前端构建或使用离线发布包。")
-    return FileResponse(target)
+    return FileResponse(target, headers=FRONTEND_NO_CACHE_HEADERS)
 
 
 app = FastAPI(title=settings.app_name, version="1.0.0")
@@ -295,6 +300,6 @@ def serve_frontend_entry(full_path: str) -> FileResponse:
 
     static_target = _frontend_file(full_path)
     if static_target.exists() and static_target.is_file():
-        return FileResponse(static_target)
+        return FileResponse(static_target, headers=FRONTEND_NO_CACHE_HEADERS)
 
     return _serve_frontend_file()

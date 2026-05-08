@@ -43,8 +43,12 @@
         <strong>{{ formatDateTime(pollState?.last_scan_at) }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">匹配邮件数</span>
+        <span class="metric-label">落库邮件数</span>
         <strong>{{ events.length }}</strong>
+      </div>
+      <div class="stat-card compact">
+        <span class="metric-label">未匹配落库</span>
+        <strong>{{ unmatchedEvents.length }}</strong>
       </div>
     </div>
 
@@ -56,10 +60,14 @@
     <div class="panel">
       <div class="section-head">
         <div>
-          <h2>匹配结果列表</h2>
-          <p>每条记录都可以进入详情查看匹配内容、模板和落库动作。</p>
+          <h2>落库邮件列表</h2>
+          <p>包含匹配成功和未匹配的落库邮件，可进入详情查看正文、模板和处理结果。</p>
         </div>
-        <button class="button secondary small" @click="loadAll" :disabled="busy">刷新列表</button>
+        <div class="toolbar">
+          <button class="button secondary small" :class="{ active: eventFilter === 'all' }" @click="setEventFilter('all')">全部</button>
+          <button class="button secondary small" :class="{ active: eventFilter === 'unmatched' }" @click="setEventFilter('unmatched')">未匹配</button>
+          <button class="button secondary small" @click="loadAll" :disabled="busy">刷新列表</button>
+        </div>
       </div>
 
       <table class="table">
@@ -76,7 +84,7 @@
         </thead>
         <tbody>
           <tr v-if="pagedEvents.length === 0">
-            <td colspan="7">当前没有匹配成功的邮件。</td>
+            <td colspan="7">当前没有符合条件的邮件。</td>
           </tr>
           <tr v-for="item in pagedEvents" :key="item.id">
             <td>{{ formatDateTime(item.created_at) }}</td>
@@ -102,7 +110,7 @@
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="events.length" :page-size="pageSize" />
+      <AppPagination v-model="page" :total="filteredEvents.length" :page-size="pageSize" />
     </div>
   </section>
 </template>
@@ -119,6 +127,7 @@ const pollState = ref(null)
 const page = ref(1)
 const pageSize = 10
 const busy = ref(false)
+const eventFilter = ref('all')
 const feedback = ref({
   title: '',
   message: '',
@@ -126,9 +135,16 @@ const feedback = ref({
 })
 const nowTick = ref(Date.now())
 
+const unmatchedEvents = computed(() => events.value.filter((item) => item.process_status === 'UNMATCHED'))
+
+const filteredEvents = computed(() => {
+  if (eventFilter.value === 'unmatched') return unmatchedEvents.value
+  return events.value
+})
+
 const pagedEvents = computed(() => {
   const start = (page.value - 1) * pageSize
-  return events.value.slice(start, start + pageSize)
+  return filteredEvents.value.slice(start, start + pageSize)
 })
 
 const countdownText = computed(() => {
@@ -160,6 +176,11 @@ async function loadAll() {
 
 function showFeedback(title, message, type = 'success') {
   feedback.value = { title, message, type }
+}
+
+function setEventFilter(value) {
+  eventFilter.value = value
+  page.value = 1
 }
 
 async function testMailSettings() {

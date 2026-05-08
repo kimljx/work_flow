@@ -1636,6 +1636,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "email": item.user.email if item.user else "",
                 "member_role": item.member_role,
                 "member_role_text": MEMBER_ROLE_LABELS.get(item.member_role, item.member_role),
+                "latest_notifications": _task_latest_notifications(db, task.id, user_id=item.user_id),
                 "display_role_text": "负责人",
             }
             for item in members

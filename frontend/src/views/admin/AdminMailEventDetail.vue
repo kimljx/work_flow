@@ -36,6 +36,11 @@
       <p>{{ detail.subject || '-' }}</p>
     </div>
 
+    <div v-if="detail.process_status === 'UNMATCHED'" class="panel">
+      <h2>未匹配说明</h2>
+      <p class="error-text">这封邮件已经落库，但没有命中任何启用的邮件回复模板。请检查正文中是否包含“进行中 / 已完成 / 延期”等规则关键字，或在模板管理中调整匹配规则。</p>
+    </div>
+
     <div class="detail-grid">
       <div class="panel">
         <div class="section-head">

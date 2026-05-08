@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import os
+from pathlib import Path
 import re
 import threading
 from typing import Any
@@ -30,6 +32,36 @@ QAX_ROW_FAILED_STATUSES = ("已取消",)
 QAX_DETAIL_UNREAD_STATUSES = ("未接收", "正在执行")
 QAX_DETAIL_READ_STATUSES = ("执行成功",)
 QAX_DETAIL_FAILED_STATUSES = ("执行失败",)
+
+
+def _ensure_local_playwright_browser_path() -> None:
+    """Prefer the browser bundled inside the offline package."""
+    configured = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+    if configured and list(Path(configured).glob("chromium-*/chrome-win/chrome.exe")):
+        return
+    current = Path(__file__).resolve()
+    candidates = [
+        current.parents[4] / "runtime" / "ms-playwright",
+        current.parents[3] / "runtime" / "ms-playwright",
+        Path.cwd() / "runtime" / "ms-playwright",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(candidate)
+            os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_GC", "1")
+            return
+
+
+def _local_chromium_executable() -> str | None:
+    browser_root = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+    if not browser_root:
+        return None
+    root = Path(browser_root)
+    candidates = sorted(root.glob("chromium-*/chrome-win/chrome.exe"), reverse=True)
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 @dataclass
@@ -51,6 +83,7 @@ class QaxAutomationError(RuntimeError):
 def _load_playwright() -> Any:
     """按需加载 Playwright async API。"""
 
+    _ensure_local_playwright_browser_path()
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
@@ -112,11 +145,16 @@ class QaxAutomationClient:
         self._timeout_error: Any | None = None
 
     async def __aenter__(self) -> "QaxAutomationClient":
+        _ensure_local_playwright_browser_path()
         async_playwright, timeout_error = _load_playwright()
         self._timeout_error = timeout_error
         self._playwright_cm = async_playwright()
         playwright = await self._playwright_cm.start()
-        self._browser = await playwright.chromium.launch(headless=settings.qax_browser_headless)
+        launch_options = {"headless": settings.qax_browser_headless}
+        executable_path = _local_chromium_executable()
+        if executable_path:
+            launch_options["executable_path"] = executable_path
+        self._browser = await playwright.chromium.launch(**launch_options)
         self._context = await self._browser.new_context(ignore_https_errors=settings.qax_ignore_https_errors)
         self.page = await self._context.new_page()
         await self._login_and_open_task_page()
@@ -128,7 +166,7 @@ class QaxAutomationClient:
         if self._browser is not None:
             await self._browser.close()
         if self._playwright_cm is not None:
-            await self._playwright_cm.stop()
+            await self._playwright_cm.__aexit__(exc_type, exc, tb)
 
     async def _login_and_open_task_page(self) -> None:
         """登录 QAX 并进入“资产管理 -> 终端任务”页面。"""
@@ -139,10 +177,11 @@ class QaxAutomationClient:
         await self.page.get_by_role("button", name="下一步").click()
         await self.page.get_by_placeholder("请输入密码").fill(settings.qax_password)
         await self.page.get_by_role("button", name="立即登录").click()
+        await self.page.wait_for_timeout(500)
 
         # 登录后可能会有确认弹窗，但不是每次都有，这里只做兼容点击。
-        await _click_if_visible(self.page.get_by_role("button", name="确 认"))
-        await _click_if_visible(self.page.get_by_role("button", name="我知道了"))
+        await self.page.get_by_role("button", name="确 认").click()
+        await self.page.get_by_role("button", name="我知道了").click()
 
         await self.page.get_by_text("资产管理", exact=True).click()
         await self.page.get_by_role("link", name="终端任务").click()
@@ -185,29 +224,39 @@ class QaxAutomationClient:
         await page.get_by_role("button", name="下一步").click()
         await page.get_by_role("button", name="下一步").click()
         await page.get_by_role("button", name="确 认").click()
+        await self.page.wait_for_timeout(5000)
 
-    async def query_task_status(self, task_name: str) -> QaxTaskStatus:
+    async def query_task_status(self, task_name: str, ip_address:str) -> QaxTaskStatus:
         """按任务名查询 QAX 任务状态。"""
 
         assert self.page is not None
-        row = self.page.get_by_role("row").filter(has_text=task_name).first
-        if await row.count() == 0:
+        try:
+            row = self.page.get_by_role("row",name=task_name)
+            await row.wait_for(state="visible",timeout=2000)
+            row_text = await row.get_by_role("cell").nth(4).inner_text()
+            # print(f"row_text:{row_text}")
+            # detail_text = row_text
+        except Exception as e:
+            # print(e)
             return QaxTaskStatus(task_name=task_name, found=False, detail="QAX 中未找到对应任务")
-
-        row_text = await row.locator(".q-table_7_column_34.q-table__cell").inner_text()
-        detail_text = row_text
         try:
             detail_button = row.get_by_role("button").nth(1)
             async with self.page.expect_popup() as popup_info:
                 await detail_button.click()
             popup = await popup_info.value
             try:
-                await _click_if_visible(popup.get_by_role("button", name="Close"), timeout_ms=3000)
-                popup_text = await popup.locator(".q-table_3_column_18.q-table__cell").inner_text()
-                detail_text = f"{detail_text}\n{(popup_text or '').strip()}"
+                await self.page.wait_for_timeout(1000)
+                await popup.get_by_role("button", name="确 认").click()
+                popup_text = await popup.locator(".q-table__body-wrapper tbody tr").filter(
+                    has_text=ip_address).first.locator(".q-table_3_column_18.q-table__cell").inner_text()
+
+                print(f"popup_text:{popup_text}")
+                detail_text = f"{row_text}\n{(popup_text or '').strip()}"
+                print(f"detail_text:{detail_text}")
             finally:
+                await self.page.wait_for_timeout(2000)
                 await popup.close()
-        except Exception:
+        except Exception as e:
             # 查询详情只是增强判断，失败时回退到列表文本即可。
             pass
 
@@ -215,17 +264,23 @@ class QaxAutomationClient:
 
     async def delete_task_if_exists(self, task_name: str) -> bool:
         """在 QAX 中尽力删除已不再需要的即时消息任务。"""
-
         assert self.page is not None
-        row = self.page.get_by_role("row").filter(has_text=task_name).first
-        if await row.count() == 0:
+        try:
+            row = self.page.get_by_role("row", name=task_name)
+            await row.wait_for(state="visible", timeout=2000)
+        except Exception as e:
             return False
         try:
-            await row.get_by_role("button").nth(2).click()
-            await self.page.get_by_role("button", name="删除").click()
+            trigger = row.get_by_role("button").nth(2)
+            await trigger.scroll_into_view_if_needed()
+            await trigger.hover()
+            await self.page.wait_for_timeout(500)
+            delbtn = self.page.locator('ul:visible li:has-text("删除")').last
+            await delbtn.click()
             await self.page.get_by_role("button", name="确 认").click()
+            await self.page.wait_for_timeout(1000)
             return True
-        except Exception:
+        except Exception as e:
             return False
 
 
@@ -428,13 +483,12 @@ def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
         async with QaxAutomationClient() as client:
             for recipient, notification, task, user in qax_recipients:
                 task_name = build_qax_task_name(notification, recipient, task)
+                ip_address = user.ip_address
                 touched_notifications.add(notification.id)
-
                 if recipient.read_status == "read":
                     await client.delete_task_if_exists(task_name)
                     continue
-
-                result = await client.query_task_status(task_name)
+                result = await client.query_task_status(task_name,ip_address)
                 if not result.found:
                     continue
 

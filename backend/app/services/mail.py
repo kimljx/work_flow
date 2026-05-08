@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """邮件接入服务。
 
-负责 SMTP 连通性检测、IMAP 收件、邮件正文解析、模板匹配以及
-“邮件驱动任务状态 / 延期审批”的业务处理。
+负责 SMTP 连通性检测、POP3/IMAP 收件、邮件正文解析、模板匹配以及
+“邮件驱动任务状态 / 延期审批”的业务处理。SMTP 与 POP3 收发基于 zmail，
+IMAP 仍使用标准库。
 """
 
 import email
@@ -11,15 +12,23 @@ import hashlib
 import html as html_lib
 import imaplib
 import json
+import logging
 import poplib
 import re
 import ssl
 import smtplib
 import socket
+import threading
+import zmail
+from contextlib import contextmanager
 from datetime import datetime
+from email import message_from_string
+from typing import Iterator
+from zmail.server import MailServer as ZmailMailServer, SMTPServer as ZmailSMTPServer
 from email.header import decode_header
 from email.message import EmailMessage, Message
 from email.utils import parseaddr, parsedate_to_datetime
+from zmail.mime import Mail as ZmailMime
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -28,13 +37,19 @@ from app.config import settings
 from app.constants import ADMIN_ROLES
 from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
-from app.services.templates import sort_templates, template_matches
+from app.services.templates import _split_rule, sort_templates, strip_reply_guides
 from app.timeutils import shanghai_now_naive, to_shanghai_naive
 
 
 DATE_PATTERN = re.compile(r"(20\d{2})(?:-|/|年)(\d{1,2})(?:-|/|月)(\d{1,2})(?:日)?")
 TASK_ID_PATTERN = re.compile(r"(?:任务\s*(?:ID|编号)\s*[#:：]?\s*|任务\s*#\s*)(\d+)", re.IGNORECASE)
 DELAY_REQUEST_ID_PATTERN = re.compile(r"(?:延期申请\s*(?:ID|编号)\s*[#:：]?\s*|延期申请\s*#\s*)(\d+)", re.IGNORECASE)
+_MAIL_POLL_EXECUTION_LOCK = threading.Lock()
+_MAIL_HEADER_FETCH = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)]"
+_MAIL_BODY_FETCH_BYTES = 64 * 1024
+_POP3_BODY_PREVIEW_LINES = 400
+logger = logging.getLogger(__name__)
+PreparedMailTemplate = tuple[Template, tuple[str, ...], tuple[str, ...]]
 
 
 def _mark_notification_recipient_replied(
@@ -361,12 +376,54 @@ def _plain_text_to_html(content: str) -> str:
     )
 
 
-def _open_smtp_connection() -> smtplib.SMTP:
-    """按配置自动选择普通 SMTP 或 SSL SMTP 连接。"""
-    use_ssl = settings.smtp_use_ssl or settings.smtp_port == 465
-    if use_ssl:
-        return smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds)
-    return smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds)
+def _smtp_login_username() -> str:
+    """返回 zmail 需要使用的 SMTP 登录用户名。"""
+
+    return (settings.smtp_user or settings.smtp_from_address).strip()
+
+
+def _make_zmail_smtp_server() -> ZmailSMTPServer:
+    """按当前配置构造 zmail SMTPServer。"""
+
+    return ZmailSMTPServer(
+        username=_smtp_login_username(),
+        password=settings.smtp_password,
+        host=settings.smtp_host,
+        port=settings.smtp_port,
+        ssl=_smtp_ssl_flag(),
+        tls=settings.smtp_use_tls,
+        timeout=settings.smtp_timeout_seconds,
+        debug=False,
+    )
+
+
+@contextmanager
+def _open_smtp_connection() -> Iterator[ZmailSMTPServer]:
+    """统一通过 zmail SMTPServer 打开 SMTP 连接。"""
+
+    server = _make_zmail_smtp_server()
+    if settings.smtp_user:
+        with server as opened_server:
+            yield opened_server
+        return
+
+    server._make_server()
+    try:
+        if server.tls:
+            server.stls()
+        yield server
+    finally:
+        if server.server is not None:
+            try:
+                server.server.quit()
+            except smtplib.SMTPServerDisconnected:
+                pass
+            finally:
+                try:
+                    server.server.close()
+                except Exception:
+                    pass
+                server._remove_server()
 
 
 def _open_imap_connection() -> imaplib.IMAP4:
@@ -382,17 +439,29 @@ def _open_imap_connection() -> imaplib.IMAP4:
     return mailbox
 
 
-def _open_pop3_connection() -> poplib.POP3:
-    """按配置自动选择普通 POP3、STLS 或 SSL POP3 连接。"""
-    use_ssl = settings.pop3_use_ssl or settings.pop3_port == 995
-    if use_ssl:
-        return poplib.POP3_SSL(settings.pop3_host, settings.pop3_port, timeout=settings.smtp_timeout_seconds)
+def _smtp_ssl_flag() -> bool:
+    return settings.smtp_use_ssl or settings.smtp_port == 465
 
-    mailbox = poplib.POP3(settings.pop3_host, settings.pop3_port, timeout=settings.smtp_timeout_seconds)
-    if settings.pop3_use_tls:
-        # 仅在明确要求 STLS 时升级连接，避免把普通 110 端口误按 SSL 直连处理。
-        mailbox.stls()
-    return mailbox
+
+def _pop3_ssl_flag() -> bool:
+    return settings.pop3_use_ssl or settings.pop3_port == 995
+
+
+def _make_zmail_mail_server(username: str, password: str) -> ZmailMailServer:
+    """按当前 SMTP/POP3 配置构造 zmail MailServer（POP 与 SMTP 使用同一套主机与端口参数）。"""
+    return zmail.server(
+        username,
+        password,
+        smtp_host=settings.smtp_host,
+        smtp_port=settings.smtp_port,
+        smtp_ssl=_smtp_ssl_flag(),
+        smtp_tls=settings.smtp_use_tls,
+        pop_host=settings.pop3_host,
+        pop_port=settings.pop3_port,
+        pop_ssl=_pop3_ssl_flag(),
+        pop_tls=settings.pop3_use_tls,
+        timeout=settings.smtp_timeout_seconds,
+    )
 
 
 def _resolve_message_id(message: Message, raw_message: bytes, fallback_prefix: str) -> str:
@@ -404,11 +473,167 @@ def _resolve_message_id(message: Message, raw_message: bytes, fallback_prefix: s
     return f"{fallback_prefix}-{digest}"
 
 
+def _extract_imap_fetch_bytes(raw_data: object) -> bytes:
+    """Return the first bytes payload from an IMAP fetch response."""
+    if not raw_data:
+        return b""
+    if isinstance(raw_data, (bytes, bytearray)):
+        return bytes(raw_data)
+    if not isinstance(raw_data, (list, tuple)):
+        return b""
+    for item in raw_data:
+        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
+            return bytes(item[1])
+        if isinstance(item, (bytes, bytearray)) and b"\r\n" in item:
+            return bytes(item)
+    return b""
+
+
+def _imap_since_date(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    return f"{value.day:02d}-{months[value.month - 1]}-{value.year}"
+
+
+def _is_message_before_baseline(message: Message, state: MailScanState) -> bool:
+    message_time = _message_datetime(message)
+    return bool(message_time and state.baseline_started_at and message_time <= state.baseline_started_at)
+
+
+def _mail_reply_templates(db: Session) -> list[PreparedMailTemplate]:
+    templates = sort_templates(db.query(Template).filter(Template.template_kind == "MAIL_REPLY", Template.enabled.is_(True)).all())
+    return [
+        (
+            template,
+            tuple(rule.lower() for rule in _split_rule(template.subject_rule)),
+            tuple(rule.lower() for rule in _split_rule(template.body_rule)),
+        )
+        for template in templates
+    ]
+
+
+def _match_mail_template(templates: list[PreparedMailTemplate], subject: str, body: str) -> Template | None:
+    subject_text = (subject or "").lower()
+    body_text = strip_reply_guides(body).lower()
+    for template, subject_rules, body_rules in templates:
+        if subject_rules and any(rule in subject_text for rule in subject_rules):
+            return template
+        if body_rules and any(rule in body_text for rule in body_rules):
+            return template
+    return None
+
+
+def _existing_mail_message_ids(db: Session, message_ids: list[str]) -> set[str]:
+    if not message_ids:
+        return set()
+    rows = db.query(MailEvent.message_id).filter(MailEvent.message_id.in_(message_ids)).all()
+    return {row[0] for row in rows}
+
+
+def _processed_mail_message_ids(db: Session, message_ids: list[str]) -> set[str]:
+    if not message_ids:
+        return set()
+    rows = (
+        db.query(MailEvent.message_id)
+        .filter(MailEvent.message_id.in_(message_ids), MailEvent.process_status != "UNMATCHED")
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def _join_header_and_body_preview(header_bytes: bytes, body_bytes: bytes) -> bytes:
+    if not header_bytes:
+        return body_bytes
+    for separator in (b"\r\n\r\n", b"\n\n"):
+        if separator in header_bytes and header_bytes.split(separator, 1)[1].strip():
+            return header_bytes
+    separator = b"\r\n\r\n" if b"\r\n" in header_bytes else b"\n\n"
+    return header_bytes.rstrip(b"\r\n") + separator + body_bytes.lstrip(b"\r\n")
+
+
+def _pop3_top(pop: object, message_number: int, line_count: int) -> list[bytes]:
+    server = getattr(pop, "server", pop)
+    _, lines, _ = server.top(message_number, line_count)
+    return [line if isinstance(line, bytes) else str(line).encode("utf-8", errors="ignore") for line in lines]
+
+
+def _decode_imap_id(imap_id: bytes | str) -> str:
+    return imap_id.decode() if isinstance(imap_id, bytes) else str(imap_id)
+
+
+def _mail_subject_system_name() -> str:
+    return (settings.app_name or "").strip()
+
+
+def _format_system_mail_subject(subject: str) -> str:
+    system_name = _mail_subject_system_name()
+    clean_subject = (subject or "").strip()
+    if not system_name or system_name in clean_subject:
+        return clean_subject
+    return f"[{system_name}] {clean_subject}"
+
+
+def _is_system_mail_subject(subject: str) -> bool:
+    system_name = _mail_subject_system_name()
+    return bool(system_name and system_name.lower() in (subject or "").lower())
+
+
+def _safe_mail_text(value: object, *, limit: int, field_name: str) -> str:
+    """将待落库文本收敛为安全字符串，避免异常类型或超长内容拖垮整次收件。"""
+
+    text = value if isinstance(value, str) else ("" if value is None else str(value))
+    if len(text) <= limit:
+        return text
+    logger.warning("Mail field %s exceeded limit %s and was truncated", field_name, limit)
+    return text[:limit]
+
+
+def _record_failed_mail_event(
+    db: Session,
+    *,
+    message_id: str,
+    from_addr: str,
+    subject: str,
+    raw_message: bytes,
+    reason: str,
+) -> None:
+    """尽量落一条失败邮件记录，便于排查单封异常但不影响后续邮件继续处理。"""
+
+    safe_message_id = _safe_mail_text(message_id, limit=255, field_name="message_id")
+    if db.query(MailEvent).filter(MailEvent.message_id == safe_message_id).first():
+        return
+
+    digest = hashlib.sha256(raw_message).hexdigest()
+    detail = _safe_mail_text(reason, limit=1000, field_name="body_digest")
+    original = _safe_mail_text(
+        f"RAW_SHA256={digest}\nERROR={reason}",
+        limit=10000,
+        field_name="original_body",
+    )
+    failed_event = MailEvent(
+        message_id=safe_message_id,
+        from_addr=_safe_mail_text(from_addr, limit=255, field_name="from_addr"),
+        subject=_safe_mail_text(subject, limit=2000, field_name="subject"),
+        body_digest=detail,
+        original_body=original,
+        resolved_template_id=None,
+        resolved_version=None,
+        process_status="FAILED",
+    )
+    db.add(failed_event)
+    db.flush()
+
+
 def _build_mail_event_from_message(
     db: Session,
     state: MailScanState,
     raw_message: bytes,
     fallback_prefix: str,
+    templates: list[PreparedMailTemplate] | None = None,
+    known_message_id: str | None = None,
+    skip_existing_check: bool = False,
+    replace_unmatched_existing: bool = False,
 ) -> bool:
     """将原始邮件落库并尝试匹配业务动作。
 
@@ -417,39 +642,45 @@ def _build_mail_event_from_message(
     - `False` 表示该邮件因基线或重复被跳过。
     """
     message = email.message_from_bytes(raw_message)
-    message_time = _message_datetime(message)
-    if message_time and state.baseline_started_at and message_time <= state.baseline_started_at:
+    if _is_message_before_baseline(message, state):
         # 基线之前的历史邮件不参与自动处理，避免系统接入初期误操作旧数据。
         return False
 
-    message_id = _resolve_message_id(message, raw_message, fallback_prefix)
+    message_id = known_message_id or _resolve_message_id(message, raw_message, fallback_prefix)
     existing = db.query(MailEvent).filter(MailEvent.message_id == message_id).first()
-    if existing:
+    if existing and not (replace_unmatched_existing and existing.process_status == "UNMATCHED"):
+        if skip_existing_check:
+            return False
         return False
 
     subject = _decode_header_value(message.get("Subject"))
     from_addr = _decode_header_value(message.get("From"))
     body = _extract_text_body(message)
 
-    matched_template = None
-    templates = sort_templates(db.query(Template).filter(Template.template_kind == "MAIL_REPLY", Template.enabled.is_(True)).all())
-    for template in templates:
-        if template_matches(template, subject, body):
-            matched_template = template
-            break
+    matched_template = _match_mail_template(templates if templates is not None else _mail_reply_templates(db), subject, body)
 
-    mail_event = MailEvent(
-        message_id=message_id,
-        from_addr=from_addr,
-        subject=subject,
-        body_digest=body[:1000],
-        original_body=body,
-        resolved_template_id=matched_template.id if matched_template else None,
-        resolved_version=matched_template.version if matched_template else None,
-        process_status="MATCHED" if matched_template else "UNMATCHED",
-    )
-    db.add(mail_event)
-    db.flush()
+    if existing and existing.process_status == "UNMATCHED":
+        mail_event = existing
+        mail_event.from_addr = from_addr
+        mail_event.subject = subject
+        mail_event.body_digest = body[:1000]
+        mail_event.original_body = body
+        mail_event.resolved_template_id = matched_template.id if matched_template else None
+        mail_event.resolved_version = matched_template.version if matched_template else None
+        mail_event.process_status = "MATCHED" if matched_template else "UNMATCHED"
+    else:
+        mail_event = MailEvent(
+            message_id=message_id,
+            from_addr=from_addr,
+            subject=subject,
+            body_digest=body[:1000],
+            original_body=body,
+            resolved_template_id=matched_template.id if matched_template else None,
+            resolved_version=matched_template.version if matched_template else None,
+            process_status="MATCHED" if matched_template else "UNMATCHED",
+        )
+        db.add(mail_event)
+        db.flush()
 
     if matched_template:
         _apply_business_action(db, mail_event, matched_template, subject, body, from_addr)
@@ -474,6 +705,18 @@ def initialize_mail_scan_baseline(db: Session) -> dict[str, str]:
     state.last_scan_at = now
     db.commit()
     return {"status": "success", "message": f"已设置首次扫描基准时间为 {now.isoformat(sep=' ', timespec='seconds')}"}
+
+
+@contextmanager
+def _mail_poll_guard() -> Iterator[bool]:
+    """避免自动收件与手动收件并发执行，导致 POP3 邮箱锁冲突或前端长时间等待。"""
+
+    acquired = _MAIL_POLL_EXECUTION_LOCK.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _MAIL_POLL_EXECUTION_LOCK.release()
 
 
 def _message_datetime(message: Message) -> datetime | None:
@@ -569,14 +812,8 @@ def diagnose_mail_settings() -> dict[str, str]:
         return {"status": "failed", "message": "SMTP_USE_SSL 与 SMTP_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
 
     try:
-        with _open_smtp_connection() as server:
-            if not isinstance(server, smtplib.SMTP_SSL):
-                server.ehlo()
-                if settings.smtp_use_tls:
-                    server.starttls()
-                    server.ehlo()
-            if settings.smtp_user:
-                server.login(settings.smtp_user, settings.smtp_password)
+        with _open_smtp_connection():
+            pass
         hint = _provider_hint()
         suffix = f" 提示：{hint}" if hint else ""
         return {"status": "success", "message": f"SMTP 连接与认证成功。{suffix}".strip()}
@@ -609,11 +846,10 @@ def diagnose_inbox_settings() -> dict[str, str]:
             return {"status": "failed", "message": "请先配置 POP3_HOST 与 POP3_USER 后再测试。"}
         if settings.pop3_use_ssl and settings.pop3_use_tls:
             return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
-        mailbox = None
         try:
-            mailbox = _open_pop3_connection()
-            mailbox.user(settings.pop3_user)
-            mailbox.pass_(settings.pop3_password)
+            mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
+            with mail_server.pop_server:
+                pass
             return {"status": "success", "message": "POP3 连接与登录成功，可以正常读取收件箱。"}
         except ssl.SSLError as exc:
             return {"status": "failed", "message": _pop3_ssl_error_hint(exc)}
@@ -622,15 +858,9 @@ def diagnose_inbox_settings() -> dict[str, str]:
         except socket.timeout:
             return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}"}
         except poplib.error_proto as exc:
-            return {"status": "failed", "message": f"POP3 登录失败：{exc}"}
+            return {"status": "failed", "message": _pop3_protocol_error_hint(exc)}
         except Exception as exc:  # pragma: no cover
             return {"status": "failed", "message": f"POP3 测试失败：{exc}"}
-        finally:
-            if mailbox is not None:
-                try:
-                    mailbox.quit()
-                except Exception:
-                    pass
 
     if not settings.imap_host or not settings.imap_user:
         return {"status": "failed", "message": "请先配置 IMAP_HOST 与 IMAP_USER 后再测试。"}
@@ -933,7 +1163,11 @@ def _poll_mailbox_via_imap(db: Session, state: MailScanState) -> dict[str, str |
     with _open_imap_connection() as mailbox:
         mailbox.login(settings.imap_user, settings.imap_password)
         mailbox.select("INBOX")
-        status, data = mailbox.search(None, "UNSEEN")
+        since_date = _imap_since_date(state.baseline_started_at)
+        if since_date:
+            status, data = mailbox.search(None, "UNSEEN", "SINCE", since_date)
+        else:
+            status, data = mailbox.search(None, "UNSEEN")
         if status != "OK":
             return {"status": "failed", "message": "IMAP 未能查询未读邮件。", "count": 0}
 
@@ -942,13 +1176,36 @@ def _poll_mailbox_via_imap(db: Session, state: MailScanState) -> dict[str, str |
         if settings.mail_inbox_max_scan > 0:
             message_numbers = message_numbers[-settings.mail_inbox_max_scan :]
 
-        saved_count = 0
+        templates = _mail_reply_templates(db)
+        candidates: list[tuple[bytes, str, bytes, str]] = []
+        candidate_message_ids: list[str] = []
         for imap_id in message_numbers:
-            fetch_status, raw_data = mailbox.fetch(imap_id, "(BODY.PEEK[])")
-            if fetch_status != "OK" or not raw_data or not raw_data[0]:
+            header_status, header_data = mailbox.fetch(imap_id, f"({_MAIL_HEADER_FETCH})")
+            if header_status != "OK":
                 continue
-            raw_message = raw_data[0][1]
-            if _build_mail_event_from_message(db, state, raw_message, f"imap-{imap_id.decode()}"):
+            header_message = _extract_imap_fetch_bytes(header_data)
+            if not header_message:
+                continue
+            fallback_prefix = f"imap-{_decode_imap_id(imap_id)}"
+            header = email.message_from_bytes(header_message)
+            if _is_message_before_baseline(header, state):
+                continue
+            message_id = _resolve_message_id(header, header_message, fallback_prefix)
+            candidates.append((imap_id, fallback_prefix, header_message, message_id))
+            candidate_message_ids.append(message_id)
+
+        existing_message_ids = _processed_mail_message_ids(db, candidate_message_ids)
+
+        saved_count = 0
+        for imap_id, fallback_prefix, header_message, message_id in candidates:
+            if message_id in existing_message_ids:
+                continue
+            body_status, body_data = mailbox.fetch(imap_id, f"(BODY.PEEK[TEXT]<0.{_MAIL_BODY_FETCH_BYTES}>)")
+            if body_status != "OK":
+                continue
+            body_preview = _extract_imap_fetch_bytes(body_data)
+            raw_message = _join_header_and_body_preview(header_message, body_preview)
+            if _build_mail_event_from_message(db, state, raw_message, fallback_prefix, templates, message_id, skip_existing_check=True):
                 saved_count += 1
 
         return {
@@ -959,25 +1216,53 @@ def _poll_mailbox_via_imap(db: Session, state: MailScanState) -> dict[str, str |
 
 
 def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str | int]:
-    """使用 POP3 拉取最近邮件。"""
+    """使用 POP3（zmail）拉取最近邮件。"""
     if settings.pop3_use_ssl and settings.pop3_use_tls:
         return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请修正配置后重试。", "count": 0}
 
-    mailbox = _open_pop3_connection()
-    try:
-        mailbox.user(settings.pop3_user)
-        mailbox.pass_(settings.pop3_password)
-        _, listings, _ = mailbox.list()
+    mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
+
+    with mail_server.pop_server as pop:
+        _, listings, _ = pop.server.list()
         message_numbers = [int(line.split()[0]) for line in listings if line]
         total_count = len(message_numbers)
         if settings.mail_inbox_max_scan > 0:
             message_numbers = message_numbers[-settings.mail_inbox_max_scan :]
 
-        saved_count = 0
+        templates = _mail_reply_templates(db)
+        candidates: list[tuple[int, bytes, str, str]] = []
+        candidate_message_ids: list[str] = []
         for message_number in message_numbers:
-            _, lines, _ = mailbox.retr(message_number)
-            raw_message = b"\r\n".join(lines)
-            if _build_mail_event_from_message(db, state, raw_message, f"pop3-{message_number}"):
+            header_lines = _pop3_top(pop, message_number, 0)
+            header_message = b"\r\n".join(header_lines)
+            fallback_prefix = f"pop3-{message_number}"
+            header = email.message_from_bytes(header_message)
+            if _is_message_before_baseline(header, state):
+                continue
+            if not _is_system_mail_subject(_decode_header_value(header.get("Subject"))):
+                continue
+            message_id = _resolve_message_id(header, header_message, fallback_prefix)
+            candidates.append((message_number, header_message, fallback_prefix, message_id))
+            candidate_message_ids.append(message_id)
+
+        existing_message_ids = _processed_mail_message_ids(db, candidate_message_ids)
+
+        saved_count = 0
+        for message_number, header_message, fallback_prefix, message_id in candidates:
+            if message_id in existing_message_ids:
+                continue
+            body_lines = _pop3_top(pop, message_number, _POP3_BODY_PREVIEW_LINES)
+            raw_message = b"\r\n".join(body_lines)
+            if _build_mail_event_from_message(
+                db,
+                state,
+                raw_message,
+                fallback_prefix,
+                templates,
+                message_id,
+                skip_existing_check=True,
+                replace_unmatched_existing=True,
+            ):
                 saved_count += 1
 
         return {
@@ -985,11 +1270,6 @@ def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str |
             "message": f"本次通过 POP3 扫描最近邮件 {len(message_numbers)} 封（总邮件 {total_count} 封），已落库 {saved_count} 封。",
             "count": saved_count,
         }
-    finally:
-        try:
-            mailbox.quit()
-        except Exception:
-            pass
 
 
 def poll_mailbox(db: Session) -> dict[str, str | int]:
@@ -1006,141 +1286,51 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
     elif not settings.imap_host or not settings.imap_user:
         return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
 
-    try:
-        state = _mail_scan_state(db)
-        if state.baseline_started_at is None:
-            now = shanghai_now_naive()
-            state.baseline_started_at = now
-            state.last_scan_at = now
-            db.commit()
+    with _mail_poll_guard() as acquired:
+        if not acquired:
             return {
-                "status": "initialized",
-                "message": f"已初始化扫描基准时间 {now.isoformat(sep=' ', timespec='seconds')}，本次不处理历史邮件。",
+                "status": "busy",
+                "message": "另一项邮件收取任务正在执行，请稍后重试。",
                 "count": 0,
             }
 
-        result = _poll_mailbox_via_pop3(db, state) if _inbox_protocol() == "pop3" else _poll_mailbox_via_imap(db, state)
-        if result.get("status") == "success":
-            state.last_scan_at = shanghai_now_naive()
-            db.commit()
-        return result
-    except socket.gaierror as exc:
-        if _inbox_protocol() == "pop3":
-            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}", "count": 0}
-        return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}", "count": 0}
-    except socket.timeout:
-        if _inbox_protocol() == "pop3":
-            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}", "count": 0}
-        return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}", "count": 0}
-    except ssl.SSLError as exc:
-        if _inbox_protocol() == "pop3":
-            return {"status": "failed", "message": _pop3_ssl_error_hint(exc), "count": 0}
-        return {"status": "failed", "message": _imap_ssl_error_hint(exc), "count": 0}
-    except poplib.error_proto as exc:
-        return {"status": "failed", "message": f"POP3 登录失败：{exc}", "count": 0}
-    except imaplib.IMAP4.error as exc:
-        return {"status": "failed", "message": f"IMAP 登录失败：{exc}", "count": 0}
-    except Exception as exc:  # pragma: no cover
-        db.rollback()
-        return {"status": "failed", "message": f"邮件扫描失败：{exc}", "count": 0}
-
-
-def diagnose_inbox_settings() -> dict[str, str]:
-    """测试当前收件协议的登录与访问能力。"""
-    if _inbox_protocol() == "pop3":
-        if not settings.pop3_host or not settings.pop3_user:
-            return {"status": "failed", "message": "请先配置 POP3_HOST 与 POP3_USER 后再测试。"}
-        if settings.pop3_use_ssl and settings.pop3_use_tls:
-            return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
-        mailbox = None
         try:
-            mailbox = _open_pop3_connection()
-            mailbox.user(settings.pop3_user)
-            mailbox.pass_(settings.pop3_password)
-            return {"status": "success", "message": "POP3 连接与登录成功，可以正常读取收件箱。"}
-        except ssl.SSLError as exc:
-            return {"status": "failed", "message": _pop3_ssl_error_hint(exc)}
+            state = _mail_scan_state(db)
+            if state.baseline_started_at is None:
+                now = shanghai_now_naive()
+                state.baseline_started_at = now
+                state.last_scan_at = now
+                db.commit()
+                return {
+                    "status": "initialized",
+                    "message": f"已初始化扫描基准时间 {now.isoformat(sep=' ', timespec='seconds')}，本次不处理历史邮件。",
+                    "count": 0,
+                }
+
+            result = _poll_mailbox_via_pop3(db, state) if _inbox_protocol() == "pop3" else _poll_mailbox_via_imap(db, state)
+            if result.get("status") == "success":
+                state.last_scan_at = shanghai_now_naive()
+                db.commit()
+            return result
         except socket.gaierror as exc:
-            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}。请确认 POP3_HOST 是否填写正确。"}
+            if _inbox_protocol() == "pop3":
+                return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}", "count": 0}
+            return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}", "count": 0}
         except socket.timeout:
-            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}"}
+            if _inbox_protocol() == "pop3":
+                return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}", "count": 0}
+            return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}", "count": 0}
+        except ssl.SSLError as exc:
+            if _inbox_protocol() == "pop3":
+                return {"status": "failed", "message": _pop3_ssl_error_hint(exc), "count": 0}
+            return {"status": "failed", "message": _imap_ssl_error_hint(exc), "count": 0}
         except poplib.error_proto as exc:
-            return {"status": "failed", "message": _pop3_protocol_error_hint(exc)}
+            return {"status": "failed", "message": _pop3_protocol_error_hint(exc), "count": 0}
+        except imaplib.IMAP4.error as exc:
+            return {"status": "failed", "message": f"IMAP 登录失败：{exc}", "count": 0}
         except Exception as exc:  # pragma: no cover
-            return {"status": "failed", "message": f"POP3 测试失败：{exc}"}
-        finally:
-            if mailbox is not None:
-                try:
-                    mailbox.quit()
-                except Exception:
-                    pass
-
-    if not settings.imap_host or not settings.imap_user:
-        return {"status": "failed", "message": "请先配置 IMAP_HOST 与 IMAP_USER 后再测试。"}
-    if settings.imap_use_ssl and settings.imap_use_tls:
-        return {"status": "failed", "message": "IMAP_USE_SSL 与 IMAP_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
-    try:
-        with _open_imap_connection() as mailbox:
-            mailbox.login(settings.imap_user, settings.imap_password)
-            mailbox.select("INBOX")
-        return {"status": "success", "message": "IMAP 连接与登录成功，可以正常读取收件箱。"}
-    except ssl.SSLError as exc:
-        return {"status": "failed", "message": _imap_ssl_error_hint(exc)}
-    except socket.gaierror as exc:
-        return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}。请确认 IMAP_HOST 是否填写正确。"}
-    except socket.timeout:
-        return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}"}
-    except imaplib.IMAP4.error as exc:
-        return {"status": "failed", "message": f"IMAP 登录失败：{exc}"}
-    except Exception as exc:  # pragma: no cover
-        return {"status": "failed", "message": f"IMAP 测试失败：{exc}"}
-
-
-def poll_mailbox(db: Session) -> dict[str, str | int]:
-    """扫描邮箱未读邮件并写入系统。"""
-    if _inbox_protocol() == "pop3":
-        if not settings.pop3_host or not settings.pop3_user:
-            return {"status": "skipped", "message": "未配置 POP3，已跳过邮件收取。", "count": 0}
-    elif not settings.imap_host or not settings.imap_user:
-        return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
-
-    try:
-        state = _mail_scan_state(db)
-        if state.baseline_started_at is None:
-            now = shanghai_now_naive()
-            state.baseline_started_at = now
-            state.last_scan_at = now
-            db.commit()
-            return {
-                "status": "initialized",
-                "message": f"已初始化扫描基准时间 {now.isoformat(sep=' ', timespec='seconds')}，本次不处理历史邮件。",
-                "count": 0,
-            }
-
-        result = _poll_mailbox_via_pop3(db, state) if _inbox_protocol() == "pop3" else _poll_mailbox_via_imap(db, state)
-        if result.get("status") == "success":
-            state.last_scan_at = shanghai_now_naive()
-            db.commit()
-        return result
-    except socket.gaierror as exc:
-        if _inbox_protocol() == "pop3":
-            return {"status": "failed", "message": f"POP3 域名解析失败：{settings.pop3_host}，错误：{exc}", "count": 0}
-        return {"status": "failed", "message": f"IMAP 域名解析失败：{settings.imap_host}，错误：{exc}", "count": 0}
-    except socket.timeout:
-        if _inbox_protocol() == "pop3":
-            return {"status": "failed", "message": f"POP3 连接超时：{settings.pop3_host}:{settings.pop3_port}", "count": 0}
-        return {"status": "failed", "message": f"IMAP 连接超时：{settings.imap_host}:{settings.imap_port}", "count": 0}
-    except ssl.SSLError as exc:
-        if _inbox_protocol() == "pop3":
-            return {"status": "failed", "message": _pop3_ssl_error_hint(exc), "count": 0}
-        return {"status": "failed", "message": _imap_ssl_error_hint(exc), "count": 0}
-    except poplib.error_proto as exc:
-        return {"status": "failed", "message": _pop3_protocol_error_hint(exc), "count": 0}
-    except imaplib.IMAP4.error as exc:
-        return {"status": "failed", "message": f"IMAP 登录失败：{exc}", "count": 0}
-    except Exception as exc:  # pragma: no cover
-        db.rollback()
-        return {"status": "failed", "message": f"邮件扫描失败：{exc}", "count": 0}
+            db.rollback()
+            return {"status": "failed", "message": f"邮件扫描失败：{exc}", "count": 0}
 
 
 def send_mail_notification(to_address: str, subject: str, content: str) -> dict[str, str]:
@@ -1152,24 +1342,19 @@ def send_mail_notification(to_address: str, subject: str, content: str) -> dict[
     if settings.smtp_use_ssl and settings.smtp_use_tls:
         return {"status": "failed", "message": "邮件发送失败：SMTP_USE_SSL 与 SMTP_USE_TLS 不能同时开启。"}
 
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = settings.smtp_from_address
-    message["To"] = to_address
-    message.set_content(content)
-    # 同时补充 HTML 正文，兼容会默认按 HTML 渲染的邮箱客户端，避免换行与空格被吞掉。
-    message.add_alternative(_plain_text_to_html(content), subtype="html")
+    # 使用 zmail 统一构造与发送，保持现有参数和返回结构不变。
+    mail_dict = {
+        "subject": _format_system_mail_subject(subject),
+        "content_text": content,
+        "content_html": _plain_text_to_html(content),
+        "from": settings.smtp_from_address,
+        "headers": {"To": to_address},
+    }
+    message = ZmailMime(mail_dict)
 
     try:
         with _open_smtp_connection() as server:
-            if not isinstance(server, smtplib.SMTP_SSL):
-                server.ehlo()
-                if settings.smtp_use_tls:
-                    server.starttls()
-                    server.ehlo()
-            if settings.smtp_user:
-                server.login(settings.smtp_user, settings.smtp_password)
-            server.send_message(message)
+            server.send([to_address], message, settings.smtp_timeout_seconds)
         return {"status": "sent", "message": "邮件发送成功"}
     except ssl.SSLError as exc:
         return {"status": "failed", "message": f"邮件发送失败：{_smtp_ssl_error_hint(exc)}"}

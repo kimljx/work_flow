@@ -66,26 +66,17 @@
           <input v-model="statusForm.remark" :disabled="actionLoading" placeholder="可选说明" />
           <button :disabled="actionLoading" @click="changeStatus">更新状态</button>
         </div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="section-head">
-        <div>
-          <h2>主任务通知</h2>
-          <p>仅展示最近一次邮件与即时消息状态，不再展示通知列表。</p>
-        </div>
-      </div>
-      <div class="task-notice-grid">
-        <div class="info-cell">
-          <span class="info-label">邮件</span>
-          <strong>{{ task.latest_notifications?.email?.summary || '未发送' }}</strong>
-          <div class="subtle-text">{{ task.latest_notifications?.email?.read_status_text || '' }}</div>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">即时消息</span>
-          <strong>{{ task.latest_notifications?.qax?.summary || '未发送' }}</strong>
-          <div class="subtle-text">{{ task.latest_notifications?.qax?.read_status_text || '' }}</div>
+        <div class="task-notice-grid task-status-notice-grid">
+          <div class="info-cell">
+            <span class="info-label">邮件</span>
+            <strong>{{ task.latest_notifications?.email?.summary || '未发送' }}</strong>
+            <div class="subtle-text">{{ task.latest_notifications?.email?.read_status_text || '' }}</div>
+          </div>
+          <div class="info-cell">
+            <span class="info-label">QAX</span>
+            <strong>{{ task.latest_notifications?.qax?.summary || '未发送' }}</strong>
+            <div class="subtle-text">{{ task.latest_notifications?.qax?.read_status_text || '' }}</div>
+          </div>
         </div>
       </div>
     </div>
@@ -96,9 +87,9 @@
           <h2>子任务</h2>
         </div>
       </div>
-      <div v-if="task.subtasks.length === 0" class="muted-block">当前没有子任务。</div>
+      <div v-if="notificationRows.length === 0" class="muted-block">当前没有子任务。</div>
       <div v-else class="task-simple-list">
-        <div v-for="item in task.subtasks" :key="item.id" class="task-simple-row task-simple-row-detail">
+        <div v-for="item in notificationRows" :key="item.row_key" class="task-simple-row task-simple-row-detail">
           <div class="task-simple-main">
             <strong>{{ item.title }}</strong>
             <div class="subtle-text">{{ item.assignee_name || '-' }} / {{ item.status_text }}</div>
@@ -107,7 +98,7 @@
             <span>邮件：{{ item.latest_notifications?.email?.summary || '未发送' }}</span>
             <span>即时消息：{{ item.latest_notifications?.qax?.summary || '未发送' }}</span>
           </div>
-          <button v-if="item.status !== 'done'" class="button secondary small" :disabled="actionLoading" @click="remindSubtask(item)">提醒</button>
+          <button v-if="item.id && item.status !== 'done'" class="button secondary small" :disabled="actionLoading" @click="remindSubtask(item)">提醒</button>
         </div>
       </div>
     </div>
@@ -142,6 +133,24 @@ const dueRemindText = computed(() => {
     return '未启用'
   }
   return `截止前 ${task.value.due_remind_days} 天提醒`
+})
+const notificationRows = computed(() => {
+  if (!task.value) return []
+  if ((task.value.subtasks || []).length > 0) {
+    return task.value.subtasks.map((item) => ({
+      ...item,
+      row_key: `subtask-${item.id}`,
+    }))
+  }
+  return (task.value.members || []).map((item) => ({
+    id: null,
+    row_key: `member-${item.user_id}`,
+    title: item.name || `成员 #${item.user_id}`,
+    assignee_name: item.email || '-',
+    status: '',
+    status_text: item.member_role_text || item.display_role_text || '参与人',
+    latest_notifications: item.latest_notifications || {},
+  }))
 })
 
 async function loadTask() {

@@ -19,11 +19,17 @@ class TaskStatusInferenceTestCase(unittest.TestCase):
         now = datetime(2026, 5, 1, 10, 0, 0)
         self.assertEqual(infer_task_status_by_time(start_at, end_at, now), "in_progress")
 
-    def test_reach_end_is_done(self) -> None:
+    def test_reach_end_stays_in_progress(self) -> None:
         start_at = datetime(2026, 5, 1, 0, 0, 0)
         end_at = datetime(2026, 5, 2, 0, 0, 0)
         now = datetime(2026, 5, 2, 0, 0, 0)
-        self.assertEqual(infer_task_status_by_time(start_at, end_at, now), "done")
+        self.assertEqual(infer_task_status_by_time(start_at, end_at, now), "in_progress")
+
+    def test_after_end_stays_in_progress(self) -> None:
+        start_at = datetime(2026, 5, 1, 0, 0, 0)
+        end_at = datetime(2026, 5, 2, 0, 0, 0)
+        now = datetime(2026, 5, 8, 9, 0, 0)
+        self.assertEqual(infer_task_status_by_time(start_at, end_at, now), "in_progress")
 
 
 if __name__ == "__main__":

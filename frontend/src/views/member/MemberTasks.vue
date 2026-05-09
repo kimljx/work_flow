@@ -69,6 +69,9 @@ function delayStatus(task) {
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
   const endDay = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate()).getTime()
   const daysToDue = Math.ceil((endDay - startOfToday) / 86400000)
+  if (daysToDue < 0) {
+    return { text: `已延期${Math.abs(daysToDue)}天`, className: 'error-text task-delay-text' }
+  }
   if (daysToDue >= 0 && daysToDue <= 3) {
     return { text: '即将延期', className: 'warning-text task-delay-text' }
   }

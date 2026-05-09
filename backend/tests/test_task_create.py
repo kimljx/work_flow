@@ -74,6 +74,40 @@ class TaskCreateTestCase(unittest.TestCase):
             task = db.query(Task).filter(Task.title == "创建任务接口回归测试").first()
             self.assertIsNotNone(task)
 
+    def test_create_overdue_task_does_not_auto_complete(self) -> None:
+        with TestClient(app) as client:
+            login_response = client.post("/api/v1/auth/login", json={"username": "admin", "password": "ChangeMe123"})
+            self.assertEqual(login_response.status_code, 200)
+            token = login_response.json()["access_token"]
+
+            response = client.post(
+                "/api/v1/tasks",
+                json={
+                    "title": "overdue should stay active",
+                    "content": "deadline is past but status must not become done",
+                    "owner_id": 1,
+                    "participant_ids": [2],
+                    "start_at": "2026-05-07T09:00:00",
+                    "end_at": "2026-05-08T18:00:00",
+                    "priority": "high",
+                    "remark": "",
+                    "due_remind_days": 1,
+                    "milestones": [],
+                    "subtasks": [],
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["main_status"], "in_progress")
+            self.assertIsNone(payload["completed_at"])
+
+        with SessionLocal() as db:
+            task = db.query(Task).filter(Task.title == "overdue should stay active").first()
+            self.assertIsNotNone(task)
+            self.assertEqual(task.main_status, "in_progress")
+            self.assertIsNone(task.completed_at)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -158,12 +158,10 @@ def task_status_display(task: Task) -> str:
 
 
 def infer_task_status_by_time(start_at: datetime, end_at: datetime, now: datetime | None = None) -> str:
-    """根据任务起止时间推断默认主状态。"""
+    """根据开始时间推断默认主状态；截止时间不能自动将任务置为已完成。"""
     current = now or shanghai_now_naive()
     if current < start_at:
         return "not_started"
-    if current >= end_at:
-        return "done"
     return "in_progress"
 
 
@@ -556,7 +554,7 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
         due_remind_days=max(payload.due_remind_days, 0),
         planned_minutes=int((payload.end_at - payload.start_at).total_seconds() // 60),
         main_status=inferred_status,
-        completed_at=shanghai_now_naive() if inferred_status == "done" else None,
+        completed_at=None,
         created_by=current_user.id,
     )
     db.add(task)

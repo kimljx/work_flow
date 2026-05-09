@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -24,7 +24,10 @@ from app.config import settings
 from app.db import SessionLocal
 from app.services.audit import cleanup_system_logs, write_system_log
 from app.services.mail import poll_mailbox
+from app.services.notifications import create_due_reminders, create_overdue_task_reminders
 from app.services.qax import collect_qax_status
+from app.services.runtime_settings import load_runtime_settings
+from app.timeutils import shanghai_now_naive
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,10 @@ _mail_poll_stop_event = threading.Event()
 _mail_poll_thread: threading.Thread | None = None
 _qax_collect_stop_event = threading.Event()
 _qax_collect_thread: threading.Thread | None = None
+_due_remind_stop_event = threading.Event()
+_due_remind_thread: threading.Thread | None = None
+_overdue_remind_stop_event = threading.Event()
+_overdue_remind_thread: threading.Thread | None = None
 _system_log_cleanup_stop_event = threading.Event()
 _system_log_cleanup_thread: threading.Thread | None = None
 
@@ -100,8 +107,10 @@ def _mail_poll_loop() -> None:
     这里使用独立线程而不是阻塞主线程，避免影响 Web 接口响应。
     轮询间隔设置了最小值，防止因错误配置导致数据库和邮箱被过度请求。
     """
-    interval = max(settings.mail_auto_poll_interval_seconds, 30)
-    while not _mail_poll_stop_event.wait(interval):
+    while not _mail_poll_stop_event.wait(max(load_runtime_settings().mail_auto_poll_interval_seconds, 30)):
+        runtime = load_runtime_settings()
+        if not runtime.mail_auto_poll_enabled:
+            continue
         try:
             with SessionLocal() as db:
                 result = poll_mailbox(db)
@@ -162,16 +171,10 @@ def _system_log_cleanup_loop() -> None:
 def _qax_collect_loop() -> None:
     """按 cron 配置定时执行 QAX 状态采集并写入系统日志。"""
 
-    cron_expr = (settings.qax_collect_cron or "").strip()
-    last_run_key = ""
-    while not _qax_collect_stop_event.wait(15):
-        current = datetime.now()
-        current_key = current.strftime("%Y-%m-%d %H:%M")
-        if current_key == last_run_key:
+    while not _qax_collect_stop_event.wait(max(load_runtime_settings().qax_auto_collect_interval_seconds, 30)):
+        runtime = load_runtime_settings()
+        if not runtime.qax_auto_collect_enabled:
             continue
-        if not _cron_matches_now(cron_expr, current):
-            continue
-        last_run_key = current_key
         try:
             with SessionLocal() as db:
                 result = collect_qax_status(db)
@@ -191,12 +194,78 @@ def _qax_collect_loop() -> None:
                     log_level="INFO" if result.get("status") == "success" else "WARNING",
                     module_name="scheduler.qax",
                     message=f"自动采集 QAX 状态完成，结果：{result.get('status')}",
-                    detail={"cron": cron_expr, **result},
+                    detail={"interval_seconds": runtime.qax_auto_collect_interval_seconds, **result},
                 )
                 db.commit()
                 logger.info("Auto qax collect result: %s", result)
         except Exception as exc:  # pragma: no cover
             logger.exception("Auto qax collect failed: %s", exc)
+
+
+def _due_remind_loop() -> None:
+    """每天在运行时设置的时间点生成主任务提前提醒。"""
+    last_run_date: date | None = None
+    while not _due_remind_stop_event.wait(30):
+        runtime = load_runtime_settings()
+        if not runtime.due_remind_enabled:
+            continue
+        now = shanghai_now_naive()
+        if now.strftime("%H:%M") != runtime.due_remind_run_at or last_run_date == now.date():
+            continue
+        try:
+            with SessionLocal() as db:
+                created_count = create_due_reminders(db)
+                write_system_log(
+                    db,
+                    operator_id=None,
+                    action_type="AUTO_CREATE_DUE_REMINDERS",
+                    target_type="Task",
+                    target_id=None,
+                    before={},
+                    after={"created_count": created_count, "run_at": runtime.due_remind_run_at},
+                    log_level="INFO",
+                    module_name="scheduler.due-remind",
+                    message=f"自动生成主任务提前提醒，新增 {created_count} 条",
+                    detail={"created_count": created_count, "run_at": runtime.due_remind_run_at},
+                )
+                db.commit()
+                last_run_date = now.date()
+                logger.info("Auto due reminder result: created=%s run_at=%s", created_count, runtime.due_remind_run_at)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Auto due reminder failed: %s", exc)
+
+
+def _overdue_remind_loop() -> None:
+    """每天在运行时设置的时间点提醒延期或已过截止时间的未完成主任务。"""
+    last_run_date: date | None = None
+    while not _overdue_remind_stop_event.wait(30):
+        runtime = load_runtime_settings()
+        if not runtime.overdue_remind_enabled:
+            continue
+        now = shanghai_now_naive()
+        if now.strftime("%H:%M") != runtime.overdue_remind_run_at or last_run_date == now.date():
+            continue
+        try:
+            with SessionLocal() as db:
+                created_count = create_overdue_task_reminders(db)
+                write_system_log(
+                    db,
+                    operator_id=None,
+                    action_type="AUTO_CREATE_OVERDUE_REMINDERS",
+                    target_type="Task",
+                    target_id=None,
+                    before={},
+                    after={"created_count": created_count, "run_at": runtime.overdue_remind_run_at},
+                    log_level="INFO",
+                    module_name="scheduler.overdue-remind",
+                    message=f"自动生成延期未完成任务提醒，新增 {created_count} 条",
+                    detail={"created_count": created_count, "run_at": runtime.overdue_remind_run_at},
+                )
+                db.commit()
+                last_run_date = now.date()
+                logger.info("Auto overdue reminder result: created=%s run_at=%s", created_count, runtime.overdue_remind_run_at)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Auto overdue reminder failed: %s", exc)
 
 
 def _frontend_file(relative_path: str) -> Path:
@@ -230,17 +299,27 @@ app.add_middleware(
 def startup_event() -> None:
     """应用启动时初始化数据库，并按配置拉起自动收件线程。"""
     bootstrap_database()
-    global _mail_poll_thread, _qax_collect_thread, _system_log_cleanup_thread
-    if settings.mail_auto_poll_enabled and _mail_poll_thread is None:
+    global _mail_poll_thread, _qax_collect_thread, _due_remind_thread, _overdue_remind_thread, _system_log_cleanup_thread
+    if _mail_poll_thread is None:
         _mail_poll_stop_event.clear()
         _mail_poll_thread = threading.Thread(target=_mail_poll_loop, name="mail-auto-poll", daemon=True)
         _mail_poll_thread.start()
-        logger.info("Auto mail polling started, interval=%ss", max(settings.mail_auto_poll_interval_seconds, 30))
-    if settings.qax_collect_cron.strip() and _qax_collect_thread is None:
+        logger.info("Auto mail polling started")
+    if _qax_collect_thread is None:
         _qax_collect_stop_event.clear()
         _qax_collect_thread = threading.Thread(target=_qax_collect_loop, name="qax-auto-collect", daemon=True)
         _qax_collect_thread.start()
-        logger.info("Auto qax collect started, cron=%s", settings.qax_collect_cron)
+        logger.info("Auto qax collect started")
+    if _due_remind_thread is None:
+        _due_remind_stop_event.clear()
+        _due_remind_thread = threading.Thread(target=_due_remind_loop, name="due-remind", daemon=True)
+        _due_remind_thread.start()
+        logger.info("Auto due reminder started")
+    if _overdue_remind_thread is None:
+        _overdue_remind_stop_event.clear()
+        _overdue_remind_thread = threading.Thread(target=_overdue_remind_loop, name="overdue-remind", daemon=True)
+        _overdue_remind_thread.start()
+        logger.info("Auto overdue reminder started")
     if _system_log_cleanup_thread is None:
         _system_log_cleanup_stop_event.clear()
         _system_log_cleanup_thread = threading.Thread(target=_system_log_cleanup_loop, name="system-log-cleanup", daemon=True)
@@ -255,18 +334,26 @@ def startup_event() -> None:
 @app.on_event("shutdown")
 def shutdown_event() -> None:
     """应用关闭时优雅停止后台轮询线程，避免进程悬挂。"""
-    global _mail_poll_thread, _qax_collect_thread, _system_log_cleanup_thread
+    global _mail_poll_thread, _qax_collect_thread, _due_remind_thread, _overdue_remind_thread, _system_log_cleanup_thread
     _mail_poll_stop_event.set()
     _qax_collect_stop_event.set()
+    _due_remind_stop_event.set()
+    _overdue_remind_stop_event.set()
     _system_log_cleanup_stop_event.set()
     if _mail_poll_thread and _mail_poll_thread.is_alive():
         _mail_poll_thread.join(timeout=2)
     if _qax_collect_thread and _qax_collect_thread.is_alive():
         _qax_collect_thread.join(timeout=2)
+    if _due_remind_thread and _due_remind_thread.is_alive():
+        _due_remind_thread.join(timeout=2)
+    if _overdue_remind_thread and _overdue_remind_thread.is_alive():
+        _overdue_remind_thread.join(timeout=2)
     if _system_log_cleanup_thread and _system_log_cleanup_thread.is_alive():
         _system_log_cleanup_thread.join(timeout=2)
     _mail_poll_thread = None
     _qax_collect_thread = None
+    _due_remind_thread = None
+    _overdue_remind_thread = None
     _system_log_cleanup_thread = None
 
 

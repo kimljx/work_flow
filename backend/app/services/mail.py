@@ -37,12 +37,13 @@ from app.config import settings
 from app.constants import ADMIN_ROLES
 from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
+from app.services.runtime_settings import load_runtime_settings
 from app.services.templates import _split_rule, sort_templates, strip_reply_guides
 from app.timeutils import shanghai_now_naive, to_shanghai_naive
 
 
 DATE_PATTERN = re.compile(r"(20\d{2})(?:-|/|年)(\d{1,2})(?:-|/|月)(\d{1,2})(?:日)?")
-TASK_ID_PATTERN = re.compile(r"(?:任务\s*(?:ID|编号)\s*[#:：]?\s*|任务\s*#\s*)(\d+)", re.IGNORECASE)
+TASK_ID_PATTERN = re.compile(r"(?:任务通知\s*#\s*|任务\s*(?:ID|编号)\s*[#:：]?\s*|任务\s*#\s*)(\d+)", re.IGNORECASE)
 DELAY_REQUEST_ID_PATTERN = re.compile(r"(?:延期申请\s*(?:ID|编号)\s*[#:：]?\s*|延期申请\s*#\s*)(\d+)", re.IGNORECASE)
 _MAIL_POLL_EXECUTION_LOCK = threading.Lock()
 _MAIL_HEADER_FETCH = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)]"
@@ -554,6 +555,9 @@ def _join_header_and_body_preview(header_bytes: bytes, body_bytes: bytes) -> byt
 
 def _pop3_top(pop: object, message_number: int, line_count: int) -> list[bytes]:
     server = getattr(pop, "server", pop)
+    if not hasattr(server, "top") and hasattr(server, "get_mail"):
+        lines = server.get_mail(message_number)
+        return [line if isinstance(line, bytes) else str(line).encode("utf-8", errors="ignore") for line in lines]
     _, lines, _ = server.top(message_number, line_count)
     return [line if isinstance(line, bytes) else str(line).encode("utf-8", errors="ignore") for line in lines]
 
@@ -563,20 +567,21 @@ def _decode_imap_id(imap_id: bytes | str) -> str:
 
 
 def _mail_subject_system_name() -> str:
-    return (settings.app_name or "").strip()
+    return "任务通知"
 
 
 def _format_system_mail_subject(subject: str) -> str:
     system_name = _mail_subject_system_name()
     clean_subject = (subject or "").strip()
-    if not system_name or system_name in clean_subject:
+    if clean_subject.startswith("【任务通知#") or not system_name or system_name in clean_subject:
         return clean_subject
     return f"[{system_name}] {clean_subject}"
 
 
 def _is_system_mail_subject(subject: str) -> bool:
     system_name = _mail_subject_system_name()
-    return bool(system_name and system_name.lower() in (subject or "").lower())
+    text = subject or ""
+    return text.startswith("【任务通知#") or text.startswith("任务#") or bool(system_name and system_name.lower() in text.lower())
 
 
 def _safe_mail_text(value: object, *, limit: int, field_name: str) -> str:
@@ -697,10 +702,10 @@ def _mail_scan_state(db: Session) -> MailScanState:
     return state
 
 
-def initialize_mail_scan_baseline(db: Session) -> dict[str, str]:
+def initialize_mail_scan_baseline(db: Session, baseline_at: datetime | None = None) -> dict[str, str]:
     """重置邮件扫描基线，避免首次扫描误处理历史邮件。"""
     state = _mail_scan_state(db)
-    now = shanghai_now_naive()
+    now = baseline_at or shanghai_now_naive()
     state.baseline_started_at = now
     state.last_scan_at = now
     db.commit()
@@ -953,6 +958,8 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
     if task.main_status == "done" and task.actual_minutes == 0:
         # 首次完成时补算实际耗时，避免后续重复覆盖人工修正数据。
         task.actual_minutes = max(int((shanghai_now_naive() - task.start_at).total_seconds() // 60), 0)
+    if task.main_status == "done" and task.completed_at is None:
+        task.completed_at = shanghai_now_naive()
     db.add(
         TaskStatusEvent(
             task_id=task.id,
@@ -1173,8 +1180,9 @@ def _poll_mailbox_via_imap(db: Session, state: MailScanState) -> dict[str, str |
 
         message_numbers = [item for item in data[0].split() if item]
         unread_total = len(message_numbers)
-        if settings.mail_inbox_max_scan > 0:
-            message_numbers = message_numbers[-settings.mail_inbox_max_scan :]
+        max_scan = load_runtime_settings().mail_inbox_max_scan
+        if max_scan > 0:
+            message_numbers = message_numbers[-max_scan :]
 
         templates = _mail_reply_templates(db)
         candidates: list[tuple[bytes, str, bytes, str]] = []
@@ -1226,8 +1234,9 @@ def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str |
         _, listings, _ = pop.server.list()
         message_numbers = [int(line.split()[0]) for line in listings if line]
         total_count = len(message_numbers)
-        if settings.mail_inbox_max_scan > 0:
-            message_numbers = message_numbers[-settings.mail_inbox_max_scan :]
+        max_scan = load_runtime_settings().mail_inbox_max_scan
+        if max_scan > 0:
+            message_numbers = message_numbers[-max_scan :]
 
         templates = _mail_reply_templates(db)
         candidates: list[tuple[int, bytes, str, str]] = []

@@ -60,6 +60,73 @@
     <div class="panel">
       <div class="section-head">
         <div>
+          <h2>定时任务设置</h2>
+          <p>按分钟配置后台自动采集节奏，并控制每次默认扫描邮件数量。</p>
+        </div>
+        <button class="button" @click="saveSchedulerSettings" :disabled="busy">保存设置</button>
+      </div>
+      <div class="scheduler-setting-grid">
+        <label class="checkbox-row scheduler-setting-toggle">
+          <input v-model="schedulerForm.mail_auto_poll_enabled" type="checkbox" />
+          <span>自动收取邮件</span>
+        </label>
+        <div class="scheduler-setting-controls">
+          <div>
+            <label>邮件采集间隔（分钟）</label>
+            <input v-model.number="schedulerForm.mail_auto_poll_interval_minutes" type="number" min="1" />
+          </div>
+          <div>
+            <label>默认邮件扫描数量</label>
+            <input v-model.number="schedulerForm.mail_inbox_max_scan" type="number" min="1" />
+          </div>
+          <div>
+            <label>扫描基准时间（可选）</label>
+            <input v-model="schedulerForm.mail_scan_baseline_at" type="datetime-local" />
+          </div>
+        </div>
+        <label class="checkbox-row scheduler-setting-toggle">
+          <input v-model="schedulerForm.qax_auto_collect_enabled" type="checkbox" />
+          <span>自动采集 QAX</span>
+        </label>
+        <div class="scheduler-setting-controls">
+          <div>
+            <label>QAX 采集间隔（分钟）</label>
+            <input v-model.number="schedulerForm.qax_auto_collect_interval_minutes" type="number" min="1" />
+          </div>
+          <label class="checkbox-row scheduler-inline-checkbox">
+            <input v-model="schedulerForm.qax_browser_visible" type="checkbox" />
+            <span>Playwright 界面可视化</span>
+          </label>
+        </div>
+        <label class="checkbox-row scheduler-setting-toggle">
+          <input v-model="schedulerForm.due_remind_enabled" type="checkbox" />
+          <span>主任务提前提醒</span>
+        </label>
+        <div class="scheduler-setting-controls">
+          <div>
+            <label>当天定时任务时间点</label>
+            <input v-model="schedulerForm.due_remind_run_at" type="time" />
+          </div>
+          <div class="subtle-text scheduler-setting-note">按主任务的“提前多少天提醒”配置，在该时间点生成到期提醒。</div>
+        </div>
+
+        <label class="checkbox-row scheduler-setting-toggle">
+          <input v-model="schedulerForm.overdue_remind_enabled" type="checkbox" />
+          <span>延期未完成任务提醒</span>
+        </label>
+        <div class="scheduler-setting-controls">
+          <div>
+            <label>当天定时任务时间点</label>
+            <input v-model="schedulerForm.overdue_remind_run_at" type="time" />
+          </div>
+          <div class="subtle-text scheduler-setting-note">每天扫描已延期或已超过截止时间且未完成的主任务，并发送提醒。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head">
+        <div>
           <h2>落库邮件列表</h2>
           <p>包含匹配成功和未匹配的落库邮件，可进入详情查看正文、模板和处理结果。</p>
         </div>
@@ -134,6 +201,19 @@ const feedback = ref({
   type: 'success',
 })
 const nowTick = ref(Date.now())
+const schedulerForm = ref({
+  mail_auto_poll_enabled: true,
+  mail_auto_poll_interval_minutes: 5,
+  mail_inbox_max_scan: 20,
+  due_remind_enabled: true,
+  due_remind_run_at: '09:00',
+  overdue_remind_enabled: true,
+  overdue_remind_run_at: '09:00',
+  qax_auto_collect_enabled: false,
+  qax_auto_collect_interval_minutes: 60,
+  mail_scan_baseline_at: '',
+  qax_browser_visible: false,
+})
 
 const unmatchedEvents = computed(() => events.value.filter((item) => item.process_status === 'UNMATCHED'))
 
@@ -165,10 +245,27 @@ async function loadPollState() {
   pollState.value = data
 }
 
+async function loadSchedulerSettings() {
+  const { data } = await http.get('/admin/scheduler/settings')
+  schedulerForm.value = {
+    mail_auto_poll_enabled: Boolean(data.mail_auto_poll_enabled),
+    mail_auto_poll_interval_minutes: Math.max(1, Math.round(Number(data.mail_auto_poll_interval_seconds || 300) / 60)),
+    mail_inbox_max_scan: Number(data.mail_inbox_max_scan || 20),
+    due_remind_enabled: data.due_remind_enabled !== false,
+    due_remind_run_at: data.due_remind_run_at || '09:00',
+    overdue_remind_enabled: data.overdue_remind_enabled !== false,
+    overdue_remind_run_at: data.overdue_remind_run_at || '09:00',
+    qax_auto_collect_enabled: Boolean(data.qax_auto_collect_enabled),
+    qax_auto_collect_interval_minutes: Math.max(1, Math.round(Number(data.qax_auto_collect_interval_seconds || 3600) / 60)),
+    mail_scan_baseline_at: data.mail_scan_baseline_at ? String(data.mail_scan_baseline_at).slice(0, 16) : '',
+    qax_browser_visible: Boolean(data.qax_browser_visible),
+  }
+}
+
 async function loadAll() {
   busy.value = true
   try {
-    await Promise.all([loadEvents(), loadPollState()])
+    await Promise.all([loadEvents(), loadPollState(), loadSchedulerSettings()])
   } finally {
     busy.value = false
   }
@@ -210,11 +307,35 @@ async function testInboxSettings() {
 async function initializeBaseline() {
   busy.value = true
   try {
-    const { data } = await http.post('/admin/mail/baseline')
+    const payload = schedulerForm.value.mail_scan_baseline_at
+      ? { baseline_at: new Date(schedulerForm.value.mail_scan_baseline_at).toISOString() }
+      : {}
+    const { data } = await http.post('/admin/mail/baseline', payload)
     showFeedback('扫描基准设置', data.message, data.status === 'success' ? 'success' : 'error')
     await loadPollState()
   } catch (error) {
     showFeedback('扫描基准设置', error.response?.data?.detail || '设置扫描基准失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function saveSchedulerSettings() {
+  busy.value = true
+  try {
+    await http.put('/admin/scheduler/settings', {
+      ...schedulerForm.value,
+      mail_auto_poll_interval_seconds: Math.max(1, Number(schedulerForm.value.mail_auto_poll_interval_minutes || 5)) * 60,
+      mail_inbox_max_scan: Math.max(1, Number(schedulerForm.value.mail_inbox_max_scan || 20)),
+      qax_auto_collect_interval_seconds: Math.max(1, Number(schedulerForm.value.qax_auto_collect_interval_minutes || 60)) * 60,
+      mail_scan_baseline_at: schedulerForm.value.mail_scan_baseline_at
+        ? new Date(schedulerForm.value.mail_scan_baseline_at).toISOString()
+        : null,
+    })
+    showFeedback('定时任务设置', '设置已保存', 'success')
+    await loadPollState()
+  } catch (error) {
+    showFeedback('定时任务设置', error.response?.data?.detail || '保存失败', 'error')
   } finally {
     busy.value = false
   }

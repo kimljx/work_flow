@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Notification, NotificationRecipient, Task, User
+from app.services.runtime_settings import load_runtime_settings
 from app.services.templates import strip_reply_guides
 
 
@@ -150,7 +151,8 @@ class QaxAutomationClient:
         self._timeout_error = timeout_error
         self._playwright_cm = async_playwright()
         playwright = await self._playwright_cm.start()
-        launch_options = {"headless": settings.qax_browser_headless}
+        runtime = load_runtime_settings()
+        launch_options = {"headless": not runtime.qax_browser_visible}
         executable_path = _local_chromium_executable()
         if executable_path:
             launch_options["executable_path"] = executable_path
@@ -488,7 +490,10 @@ def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
                 if recipient.read_status == "read":
                     await client.delete_task_if_exists(task_name)
                     continue
-                result = await client.query_task_status(task_name,ip_address)
+                try:
+                    result = await client.query_task_status(task_name, ip_address)
+                except TypeError:
+                    result = await client.query_task_status(task_name)
                 if not result.found:
                     continue
 

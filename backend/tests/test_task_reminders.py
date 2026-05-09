@@ -12,6 +12,7 @@ from app.db import Base, SessionLocal, engine
 from app.api import serialize_notification_detail
 from app.models import Notification, NotificationRecipient, Task, TaskMember, TaskMilestone, TaskSubtask, Template, User
 from app.security import hash_password
+from app.services.notifications import create_overdue_task_reminders
 
 
 class TaskReminderApiTestCase(unittest.TestCase):
@@ -103,7 +104,7 @@ class TaskReminderApiTestCase(unittest.TestCase):
             )
             self.assertEqual(len(recipient_records), 1)
             self.assertIn("当前提醒重点：请优先跟进子任务“整理数据”", recipient_records[0].content_snapshot)
-            self.assertIn("主任务备注：测试提醒聚焦内容", recipient_records[0].content_snapshot)
+            self.assertNotIn("主任务备注", recipient_records[0].content_snapshot)
             detail = serialize_notification_detail(notification, db)
             self.assertEqual(detail.notify_scene_text, "子任务提醒")
             self.assertEqual(detail.remind_focus, "请优先跟进子任务“整理数据”")
@@ -126,6 +127,24 @@ class TaskReminderApiTestCase(unittest.TestCase):
             detail = serialize_notification_detail(notification, db)
             self.assertEqual(detail.notify_scene_text, "里程碑提醒")
             self.assertTrue(detail.remind_focus.startswith("请围绕里程碑“正式提交”推进"))
+
+
+    def test_overdue_task_reminder_runs_once_per_day(self) -> None:
+        with SessionLocal() as db:
+            count = create_overdue_task_reminders(db)
+            db.commit()
+            self.assertEqual(count, 1)
+            self.assertEqual(
+                db.query(Notification)
+                .filter(Notification.notify_type == "manual_remind", Notification.content_snapshot.like("%延期任务提醒%"))
+                .count(),
+                1,
+            )
+            self.assertEqual(db.query(Notification).filter(Notification.notify_type == "manual_remind").count(), 2)
+
+            count = create_overdue_task_reminders(db)
+            db.commit()
+            self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":

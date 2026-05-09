@@ -10,7 +10,6 @@ import AdminTemplates from '../views/admin/AdminTemplates.vue'
 import AdminNotifications from '../views/admin/AdminNotifications.vue'
 import AdminMailEvents from '../views/admin/AdminMailEvents.vue'
 import AdminMailEventDetail from '../views/admin/AdminMailEventDetail.vue'
-import AdminDelayRequests from '../views/admin/AdminDelayRequests.vue'
 import AdminUsers from '../views/admin/AdminUsers.vue'
 import AdminImportExport from '../views/admin/AdminImportExport.vue'
 import AdminAuditLogs from '../views/admin/AdminAuditLogs.vue'
@@ -34,7 +33,6 @@ const routes = [
   { path: '/admin/notifications/:id', component: NotificationDetailPage, meta: { role: 'admin' } },
   { path: '/admin/mail-events', component: AdminMailEvents, meta: { role: 'admin' } },
   { path: '/admin/mail-events/:id', component: AdminMailEventDetail, meta: { role: 'admin' } },
-  { path: '/admin/delay-requests', component: AdminDelayRequests, meta: { role: 'admin' } },
   { path: '/admin/users', component: AdminUsers, meta: { role: 'admin' } },
   { path: '/admin/import-export', component: AdminImportExport, meta: { role: 'admin' } },
   { path: '/admin/system-logs', component: AdminAuditLogs, meta: { role: 'admin' } },

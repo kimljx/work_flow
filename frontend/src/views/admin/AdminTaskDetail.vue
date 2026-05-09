@@ -41,6 +41,11 @@
           <div class="info-cell">
             <span class="info-label">截止时间</span>
             <strong>{{ formatDateTime(task.end_at) }}</strong>
+            <div v-if="delayStatus.text" :class="delayStatus.className">{{ delayStatus.text }}</div>
+          </div>
+          <div v-if="task.completed_at" class="info-cell">
+            <span class="info-label">完成时间</span>
+            <strong>{{ formatDateTime(task.completed_at) }}</strong>
           </div>
           <div class="info-cell">
             <span class="info-label">提醒设置</span>
@@ -124,6 +129,7 @@ const statusForm = reactive({
 const backTarget = route.query.from || '/admin/tasks'
 const statusMeta = computed(() => resolveTaskStatusTone(task.value || null))
 const priorityMeta = computed(() => resolvePriorityMeta(task.value?.priority))
+const delayStatus = computed(() => resolveDelayStatus(task.value))
 const responsibleText = computed(() => {
   const names = (task.value?.members || []).map((item) => item.name).filter(Boolean)
   return names.length > 0 ? names.join(', ') : '-'
@@ -134,6 +140,28 @@ const dueRemindText = computed(() => {
   }
   return `截止前 ${task.value.due_remind_days} 天提醒`
 })
+
+function resolveDelayStatus(item) {
+  if (!item || ['done', 'canceled'].includes(item.main_status)) {
+    return { text: '', className: '' }
+  }
+  const delayDays = Number(item.delay_days || 0)
+  if (delayDays > 0) {
+    return { text: `已延期${delayDays}天`, className: 'error-text task-delay-text' }
+  }
+  const endDate = new Date(item.end_at)
+  if (Number.isNaN(endDate.getTime())) {
+    return { text: '', className: '' }
+  }
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const endDay = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate()).getTime()
+  const daysToDue = Math.ceil((endDay - startOfToday) / 86400000)
+  if (daysToDue >= 0 && daysToDue <= 3) {
+    return { text: '即将延期', className: 'warning-text task-delay-text' }
+  }
+  return { text: '', className: '' }
+}
 const notificationRows = computed(() => {
   if (!task.value) return []
   if ((task.value.subtasks || []).length > 0) {

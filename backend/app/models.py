@@ -41,6 +41,7 @@ class Task(Base, TimestampMixin):
     end_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     planned_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     actual_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     main_status: Mapped[str] = mapped_column(String(16), nullable=False, default="not_started")
     delay_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     state_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

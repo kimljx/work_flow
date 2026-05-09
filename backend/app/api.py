@@ -11,10 +11,11 @@ import hashlib
 import io
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import jwt
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 from sqlalchemy.orm import Session
@@ -49,6 +50,7 @@ from app.schemas import (
     MailEventDetailOut,
     MailEventOut,
     MailPollStateOut,
+    MailBaselineRequest,
     NotificationDetailOut,
     NotificationPreviewOut,
     NotificationRecipientOut,
@@ -66,6 +68,7 @@ from app.schemas import (
     UserCreate,
     UserOut,
     UserUpdate,
+    RuntimeSettingsUpdate,
 )
 from app.security import create_token, decode_token, get_current_user, require_admin, verify_password
 from app.services.audit import cleanup_system_logs, write_audit
@@ -73,6 +76,7 @@ from app.services.delay import apply_delay_decision
 from app.services.mail import diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline, poll_mailbox
 from app.services.notifications import create_due_reminders, create_notification_with_recipients, preview_notification_content
 from app.services.qax import collect_qax_status
+from app.services.runtime_settings import load_runtime_settings, runtime_settings_dict, save_runtime_settings
 from app.services.templates import sort_templates, template_matches, validate_template_content
 from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
@@ -86,6 +90,23 @@ TASK_IMPORT_FIELDS = (
     "responsible_names",
     "deadline",
 )
+LEGACY_TASK_IMPORT_FIELDS = (
+    "title",
+    "content",
+    "owner_name",
+    "participant_names",
+    "start_at",
+    "end_at",
+    "priority",
+    "remark",
+    "due_remind_days",
+    "milestone_names",
+    "milestone_datetimes",
+    "remind_offsets",
+    "subtask_titles",
+    "subtask_contents",
+    "subtask_assignee_names",
+)
 
 
 def is_admin_role(role: str) -> bool:
@@ -97,6 +118,14 @@ def validate_user_role(role: str) -> None:
     """校验用户角色编码，避免录入无法识别的权限角色。"""
     if role not in ROLE_LABELS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户角色不存在")
+
+
+def _trim_text(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def _trim_import_match_text(value: object) -> str:
+    return "".join(str(value or "").split())
 
 
 def cleanup_task_scheduled_notifications(db: Session, task_id: int) -> int:
@@ -311,6 +340,7 @@ def serialize_task(task: Task, db: Session) -> TaskOut:
         end_at=task.end_at,
         planned_minutes=task.planned_minutes,
         actual_minutes=task.actual_minutes,
+        completed_at=task.completed_at,
         status_text=task_status_display(task),
         priority_text=PRIORITY_LABELS.get(task.priority, task.priority),
         owner_name=owner_name,
@@ -478,19 +508,24 @@ def serialize_mail_event_detail(mail_event: MailEvent, db: Session) -> MailEvent
 def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
     """读取自动收件配置和最近扫描时间，供前端展示倒计时。"""
     state = db.query(MailScanState).filter(MailScanState.id == 1).first()
-    interval_seconds = max(settings.mail_auto_poll_interval_seconds, 30)
+    runtime = load_runtime_settings()
+    interval_seconds = max(runtime.mail_auto_poll_interval_seconds, 30)
     last_scan_at = state.last_scan_at if state else None
     next_poll_at = None
-    if settings.mail_auto_poll_enabled and last_scan_at:
+    if runtime.mail_auto_poll_enabled and last_scan_at:
         next_poll_at = last_scan_at + timedelta(seconds=interval_seconds)
     protocol = settings.mail_inbox_protocol if settings.mail_inbox_protocol in {"imap", "pop3"} else "imap"
     return MailPollStateOut(
         inbox_protocol=protocol,
         inbox_protocol_text="POP3" if protocol == "pop3" else "IMAP",
-        auto_poll_enabled=settings.mail_auto_poll_enabled,
+        auto_poll_enabled=runtime.mail_auto_poll_enabled,
         interval_seconds=interval_seconds,
         last_scan_at=last_scan_at,
         next_poll_at=next_poll_at,
+        baseline_started_at=state.baseline_started_at if state else None,
+        qax_auto_collect_enabled=runtime.qax_auto_collect_enabled,
+        qax_interval_seconds=max(runtime.qax_auto_collect_interval_seconds, 30),
+        qax_browser_visible=runtime.qax_browser_visible,
     )
 
 
@@ -521,6 +556,7 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
         due_remind_days=max(payload.due_remind_days, 0),
         planned_minutes=int((payload.end_at - payload.start_at).total_seconds() // 60),
         main_status=inferred_status,
+        completed_at=shanghai_now_naive() if inferred_status == "done" else None,
         created_by=current_user.id,
     )
     db.add(task)
@@ -608,10 +644,14 @@ def _split_import_usernames(value: object) -> list[str]:
 
 def _find_active_user_by_name(db: Session, name: str, field_label: str) -> User:
     """按姓名查找启用中的系统用户，并阻止重名误导入。"""
-    user_name = str(name or "").strip()
+    user_name = _trim_import_match_text(name)
     if not user_name:
         raise ValueError(f"{field_label}不能为空")
-    matches = db.query(User).filter(User.name == user_name, User.is_active.is_(True)).all()
+    matches = [
+        user
+        for user in db.query(User).filter(User.is_active.is_(True)).all()
+        if _trim_import_match_text(user.name) == user_name
+    ]
     if not matches:
         raise ValueError(f"{field_label}不存在或已禁用：{user_name}")
     if len(matches) > 1:
@@ -654,7 +694,7 @@ def _collect_import_rows(rows: list[tuple[object, ...]]) -> tuple[list[tuple[int
     for index, row in enumerate(rows[1:], start=2):
         if not any(cell not in (None, "") for cell in row):
             continue
-        row_data = {field: row[position] if position < len(row) else None for position, field in enumerate(TASK_IMPORT_FIELDS)}
+        row_data = {field: row[position] if position < len(row) else None for position, field in enumerate(LEGACY_TASK_IMPORT_FIELDS)}
         signature = _build_import_row_signature(row_data)
         collected_rows.append((index, row_data))
         signatures.append(signature)
@@ -809,7 +849,7 @@ def _split_simple_import_names(value: object) -> list[str]:
     text = str(value or "")
     for marker in ("、", "，", "；", ";", "/", "|"):
         text = text.replace(marker, ",")
-    text = text.replace(" ", "").strip(",")
+    text = _trim_import_match_text(text).strip(",")
     if not text:
         return []
     names: list[str] = []
@@ -1021,19 +1061,26 @@ def me(current_user: User = Depends(get_current_user)) -> UserOut:
 
 @router.get("/admin/users", response_model=list[UserOut])
 def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[UserOut]:
-    return [serialize_user(user) for user in db.query(User).order_by(User.id.asc()).all()]
+    return [
+        serialize_user(user)
+        for user in db.query(User).filter(~User.username.like("deleted__%")).order_by(User.id.asc()).all()
+    ]
 
 
 @router.post("/admin/users", response_model=UserOut)
 def create_user(payload: UserCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> UserOut:
     validate_user_role(payload.role)
+    username = _trim_text(payload.username)
+    name = _trim_text(payload.name)
+    email = _trim_text(payload.email)
+    ip_address = _trim_text(payload.ip_address)
     user = User(
-        username=payload.username,
+        username=username,
         password_hash=build_default_password_hash(settings.default_password),
         role=payload.role,
-        name=payload.name,
-        email=payload.email,
-        ip_address=payload.ip_address,
+        name=name,
+        email=email,
+        ip_address=ip_address,
         is_active=True,
     )
     db.add(user)
@@ -1064,9 +1111,9 @@ def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(
     ensure_last_admin_not_removed(db, user, payload.role, payload.is_active)
     before = {"role": user.role, "is_active": user.is_active, "email": user.email, "ip_address": user.ip_address}
     user.role = payload.role
-    user.name = payload.name
-    user.email = payload.email
-    user.ip_address = payload.ip_address
+    user.name = _trim_text(payload.name)
+    user.email = _trim_text(payload.email)
+    user.ip_address = _trim_text(payload.ip_address)
     user.is_active = payload.is_active
     write_audit(
         db,
@@ -1083,6 +1130,35 @@ def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(
     db.commit()
     db.refresh(user)
     return serialize_user(user)
+
+
+@router.delete("/admin/users/{user_id}", response_model=ApiMessage)
+def delete_user(user_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    ensure_last_admin_not_removed(db, user, new_active=False)
+    before = {"username": user.username, "role": user.role, "email": user.email, "ip_address": user.ip_address}
+    user.username = f"deleted__{user.id}"
+    user.email = f"deleted__{user.id}@deleted.local"
+    user.ip_address = f"deleted__{user.id}"
+    user.name = f"{user.name}(已删除)"
+    user.role = "member"
+    user.is_active = False
+    write_audit(
+        db,
+        current_user.id,
+        "DELETE_USER",
+        "User",
+        user_id,
+        before,
+        {"deleted": True},
+        module_name="api.user",
+        message=f"删除用户 {user.name}",
+        detail=before,
+    )
+    db.commit()
+    return ApiMessage(message="用户已删除")
 
 
 @router.get("/dashboard/summary", response_model=DashboardSummary)
@@ -1165,6 +1241,68 @@ def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(ge
                 "value": sum(1 for item in tasks if item.priority == priority),
             }
         )
+
+    owner_stats: dict[str, dict[str, int | str]] = {}
+    warning_tasks = []
+    for task in tasks:
+        owner_member = next((member for member in task.members if member.member_role == "owner"), None)
+        owner_name = owner_member.user.name if owner_member and owner_member.user else "未指定"
+        stats = owner_stats.setdefault(
+            owner_name,
+            {
+                "owner_name": owner_name,
+                "task_total": 0,
+                "done_total": 0,
+                "delayed_total": 0,
+                "due_soon_total": 0,
+            },
+        )
+        stats["task_total"] = int(stats["task_total"]) + 1
+        if task.main_status == "done":
+            stats["done_total"] = int(stats["done_total"]) + 1
+        if task.main_status not in open_statuses:
+            continue
+
+        overdue_days = max((now.date() - task.end_at.date()).days, 0)
+        effective_delay_days = max(int(task.delay_days or 0), overdue_days)
+        days_to_due = (task.end_at.date() - now.date()).days
+        if effective_delay_days > 0:
+            stats["delayed_total"] = int(stats["delayed_total"]) + 1
+            warning_tasks.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "owner_name": owner_name,
+                    "end_at": task.end_at,
+                    "delay_days": effective_delay_days,
+                    "warning_type": "delayed",
+                    "warning_text": f"已延期{effective_delay_days}天",
+                    "route": f"/admin/tasks/{task.id}",
+                }
+            )
+        elif 0 <= days_to_due <= 3:
+            stats["due_soon_total"] = int(stats["due_soon_total"]) + 1
+            warning_tasks.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "owner_name": owner_name,
+                    "end_at": task.end_at,
+                    "delay_days": 0,
+                    "warning_type": "due_soon",
+                    "warning_text": "即将延期",
+                    "route": f"/admin/tasks/{task.id}",
+                }
+            )
+
+    owner_task_distribution = sorted(
+        owner_stats.values(),
+        key=lambda item: (-int(item["task_total"]), str(item["owner_name"])),
+    )
+    warning_tasks = sorted(
+        warning_tasks,
+        key=lambda item: (0 if item["warning_type"] == "delayed" else 1, item["end_at"]),
+    )[:8]
 
     kpis = [
         {
@@ -1317,6 +1455,8 @@ def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(ge
         priority_distribution=priority_distribution,
         task_trend=task_trend,
         attention_items=attention_items,
+        owner_task_distribution=owner_task_distribution,
+        warning_tasks=warning_tasks,
         quick_actions=quick_actions,
     )
 
@@ -1418,6 +1558,13 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
     - `任务导入模板` 工作表：用于直接录入导入数据；
     - `填写说明` 工作表：说明字段含义、格式与示例规则。
     """
+    config_template = (Path(__file__).resolve().parents[2] / "config" / "task-import-template.xlsx")
+    if config_template.exists():
+        return FileResponse(
+            config_template,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="task-import-template.xlsx",
+        )
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "任务导入模板"
@@ -1810,8 +1957,14 @@ def change_status(task_id: int, payload: TaskStatusUpdate, current_user: User = 
         raise HTTPException(status_code=404, detail="任务不存在")
     before = {"main_status": task.main_status}
     task.main_status = payload.main_status
-    if payload.main_status == "done" and task.actual_minutes == 0:
-        task.actual_minutes = int((shanghai_now_naive() - task.start_at).total_seconds() // 60)
+    now = shanghai_now_naive()
+    if payload.main_status == "done":
+        if task.actual_minutes == 0:
+            task.actual_minutes = int((now - task.start_at).total_seconds() // 60)
+        if task.completed_at is None:
+            task.completed_at = now
+    elif before["main_status"] == "done":
+        task.completed_at = None
     db.add(TaskStatusEvent(task_id=task.id, from_status=before["main_status"], to_status=task.main_status, source="web", remark=payload.remark, operator_id=current_user.id))
     write_audit(
         db,
@@ -2057,6 +2210,45 @@ def get_mail_poll_state(_: User = Depends(require_admin), db: Session = Depends(
     return serialize_mail_poll_state(db)
 
 
+@router.get("/admin/scheduler/settings", response_model=dict)
+def get_scheduler_settings(_: User = Depends(require_admin)) -> dict:
+    return runtime_settings_dict()
+
+
+@router.put("/admin/scheduler/settings", response_model=dict)
+def update_scheduler_settings(payload: RuntimeSettingsUpdate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    saved = save_runtime_settings(
+        {
+            "mail_auto_poll_enabled": payload.mail_auto_poll_enabled,
+            "mail_auto_poll_interval_seconds": payload.mail_auto_poll_interval_seconds,
+            "mail_inbox_max_scan": payload.mail_inbox_max_scan,
+            "due_remind_enabled": payload.due_remind_enabled,
+            "due_remind_run_at": payload.due_remind_run_at,
+            "overdue_remind_enabled": payload.overdue_remind_enabled,
+            "overdue_remind_run_at": payload.overdue_remind_run_at,
+            "qax_auto_collect_enabled": payload.qax_auto_collect_enabled,
+            "qax_auto_collect_interval_seconds": payload.qax_auto_collect_interval_seconds,
+            "mail_scan_baseline_at": payload.mail_scan_baseline_at.isoformat() if payload.mail_scan_baseline_at else "",
+            "qax_browser_visible": payload.qax_browser_visible,
+        }
+    )
+    data = runtime_settings_dict()
+    write_audit(
+        db,
+        current_user.id,
+        "UPDATE_SCHEDULER_SETTINGS",
+        "RuntimeSettings",
+        None,
+        {},
+        data,
+        module_name="api.scheduler",
+        message="更新定时任务设置",
+        detail=data,
+    )
+    db.commit()
+    return data
+
+
 @router.post("/admin/mail/test", response_model=dict)
 def test_mail_settings(_: User = Depends(require_admin)) -> dict:
     return diagnose_mail_settings()
@@ -2069,13 +2261,43 @@ def test_mail_inbox(_: User = Depends(require_admin)) -> dict:
 
 
 @router.post("/admin/mail/poll", response_model=dict)
-def poll_mail_inbox(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    return poll_mailbox(db)
+def poll_mail_inbox(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    result = poll_mailbox(db)
+    write_audit(
+        db,
+        current_user.id,
+        "MANUAL_MAIL_POLL",
+        "MailInbox",
+        None,
+        {},
+        {"status": result.get("status"), "count": result.get("count", 0)},
+        log_level="INFO" if result.get("status") in {"success", "initialized"} else "WARNING",
+        module_name="api.mail",
+        message=f"手动采集邮件：{result.get('status')}",
+        detail=result,
+    )
+    db.commit()
+    return result
 
 
 @router.post("/admin/mail/baseline", response_model=dict)
-def reset_mail_baseline(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    return initialize_mail_scan_baseline(db)
+def reset_mail_baseline(payload: MailBaselineRequest | None = None, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    baseline_at = payload.baseline_at if payload else None
+    result = initialize_mail_scan_baseline(db, baseline_at)
+    write_audit(
+        db,
+        current_user.id,
+        "RESET_MAIL_BASELINE",
+        "MailScanState",
+        1,
+        {},
+        {"baseline_at": baseline_at.isoformat() if baseline_at else ""},
+        module_name="api.mail",
+        message="设置邮件扫描基准时间",
+        detail=result,
+    )
+    db.commit()
+    return result
 
 
 @router.post("/admin/qax/collect", response_model=dict)
@@ -2337,7 +2559,11 @@ async def import_tasks(
     if len(rows) < 2:
         raise HTTPException(status_code=400, detail="模板中没有可导入的数据行")
 
-    import_rows, row_signatures, row_samples = _collect_simple_import_rows(rows)
+    use_legacy_template = len(rows[0]) >= 10
+    if use_legacy_template:
+        import_rows, row_signatures, row_samples = _collect_import_rows(rows)
+    else:
+        import_rows, row_signatures, row_samples = _collect_simple_import_rows(rows)
     overlap_count, overlap_rate, overlap_samples = _detect_import_overlap(db, row_signatures, row_samples)
     if overlap_count >= 3 and overlap_rate >= 0.6 and not confirm_duplicate:
         preview = TaskImportPreviewOut(
@@ -2353,7 +2579,11 @@ async def import_tasks(
     failures: list[dict[str, object]] = []
     for index, row_data in import_rows:
         try:
-            payload = _build_task_create_from_simple_import_row(row_data, db)
+            payload = (
+                _build_task_create_from_import_row(row_data, db)
+                if use_legacy_template
+                else _build_task_create_from_simple_import_row(row_data, db)
+            )
             task = _create_task_record(payload, current_user, db, source="import")
             db.commit()
             created_task_ids.append(task.id)
@@ -2401,11 +2631,11 @@ async def import_tasks(
 def export_report(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
-    writer.writerow(["task_id", "title", "status", "delay_days", "subtask_count", "subtask_summary"])
+    writer.writerow(["task_id", "title", "status", "completed_at", "delay_days", "subtask_count", "subtask_summary"])
     for task in db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.id.asc()).all():
         subtasks = sorted(task.subtasks, key=lambda item: item.sort_order)
         subtask_summary = "；".join(f"{item.title}({item.assignee.name if item.assignee else item.assignee_id})" for item in subtasks)
-        writer.writerow([task.id, task.title, task.main_status, task.delay_days, len(subtasks), subtask_summary])
+        writer.writerow([task.id, task.title, task.main_status, task.completed_at or "", task.delay_days, len(subtasks), subtask_summary])
     return StreamingResponse(iter([csv_buffer.getvalue().encode("utf-8")]), media_type="text/csv")
 
 

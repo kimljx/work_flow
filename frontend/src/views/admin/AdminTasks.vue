@@ -1,22 +1,19 @@
 <template>
   <section class="page">
-    <div class="panel workspace-header">
-      <div>
-        <div class="workspace-eyebrow">Task Center</div>
-        <h1 class="workspace-title">任务</h1>
-        <p class="workspace-subtitle">聚焦任务本身，只保留最重要的信息与操作入口。</p>
-      </div>
-      <div class="toolbar">
-        <button class="button secondary" @click="importOpen = true">导入任务</button>
-        <button @click="createOpen = true">新建任务</button>
-      </div>
-    </div>
-
     <div class="panel filter-shell">
+      <div class="section-head task-list-action-head">
+        <div>
+          <h2>任务列表</h2>
+        </div>
+        <div class="toolbar">
+          <button class="button secondary" @click="importOpen = true">导入任务</button>
+          <button @click="createOpen = true">新建任务</button>
+        </div>
+      </div>
       <div class="filter-grid task-simple-filter-grid">
         <div class="filter-field">
           <span class="filter-label">搜索</span>
-          <input v-model="keyword" placeholder="按任务名称或负责人搜索" />
+          <input v-model="keyword" placeholder="搜索任务名称或负责人" @keyup.enter="applyFilters" />
         </div>
         <div class="filter-field">
           <span class="filter-label">状态</span>
@@ -28,8 +25,31 @@
             <option value="canceled">已取消</option>
           </select>
         </div>
+        <div class="filter-field">
+          <span class="filter-label">延期</span>
+          <select v-model="delayFilter">
+            <option value="">全部</option>
+            <option value="delayed">已延期</option>
+            <option value="due_soon">即将延期</option>
+            <option value="normal">未延期</option>
+          </select>
+        </div>
+        <div class="filter-field">
+          <span class="filter-label">截止日期起</span>
+          <input v-model="dateFrom" type="date" @keyup.enter="applyFilters" />
+        </div>
+        <div class="filter-field">
+          <span class="filter-label">截止日期止</span>
+          <input v-model="dateTo" type="date" @keyup.enter="applyFilters" />
+        </div>
       </div>
-      <div class="filter-summary">共 {{ filteredTasks.length }} 项任务</div>
+      <div class="filter-footer">
+        <div class="filter-summary">共 {{ filteredTasks.length }} 项任务</div>
+        <div class="filter-actions">
+          <button class="button secondary" @click="resetFilters">重置</button>
+          <button @click="applyFilters">查询</button>
+        </div>
+      </div>
     </div>
 
     <div class="panel">
@@ -48,7 +68,7 @@
         </thead>
         <tbody>
           <tr v-if="pagedTasks.length === 0">
-            <td colspan="8">当前没有符合条件的任务</td>
+            <td colspan="8">暂无符合条件的任务</td>
           </tr>
           <tr v-for="task in pagedTasks" :key="task.id">
             <td>
@@ -57,18 +77,22 @@
             </td>
             <td>{{ joinNames(task.responsible_names) }}</td>
             <td><span :class="statusUi(task).tone">{{ statusUi(task).text }}</span></td>
-            <td>{{ formatDateTime(task.end_at) }}</td>
+            <td>
+              <div>{{ formatDateTime(task.end_at) }}</div>
+              <div v-if="task.completed_at" class="subtle-text">完成时间：{{ formatDateTime(task.completed_at) }}</div>
+              <div v-if="delayStatus(task).text" :class="delayStatus(task).className">{{ delayStatus(task).text }}</div>
+            </td>
             <td><span :class="resolvePriorityMeta(task.priority).tone">{{ resolvePriorityMeta(task.priority).label }}</span></td>
             <td>
               <div class="task-channel-stack">
-                <span>邮件：{{ task.latest_notifications?.email?.summary || '未发送' }}</span>
-                <span>即时消息：{{ task.latest_notifications?.qax?.summary || '未发送' }}</span>
+                <span>邮件：{{ task.latest_notifications?.email?.summary || '暂无' }}</span>
+                <span>即时消息：{{ task.latest_notifications?.qax?.summary || '暂无' }}</span>
               </div>
             </td>
             <td>{{ task.subtask_count || 0 }}</td>
             <td>
               <div class="toolbar">
-                <router-link class="button secondary small" :to="`/admin/tasks/${task.id}`">详情</router-link>
+                <router-link class="button secondary small" :to="`/admin/tasks/${task.id}`">查看</router-link>
                 <button class="button secondary small" @click="openEdit(task.id)">编辑</button>
                 <button class="button secondary small" @click="remind(task.id)">提醒</button>
                 <button class="button danger small" @click="removeTask(task.id)">删除</button>
@@ -102,7 +126,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
@@ -115,6 +139,16 @@ const router = useRouter()
 const tasks = ref([])
 const keyword = ref('')
 const status = ref('')
+const delayFilter = ref('')
+const dateFrom = ref('')
+const dateTo = ref('')
+const appliedFilters = ref({
+  keyword: '',
+  status: '',
+  delayFilter: '',
+  dateFrom: '',
+  dateTo: '',
+})
 const page = ref(1)
 const pageSize = 10
 const createOpen = ref(false)
@@ -122,14 +156,23 @@ const importOpen = ref(false)
 const editTaskId = ref(null)
 
 const filteredTasks = computed(() => {
-  const query = keyword.value.trim()
+  const filters = appliedFilters.value
+  const query = filters.keyword.trim()
   return tasks.value.filter((item) => {
     const matchKeyword =
       !query ||
       item.title.includes(query) ||
       joinNames(item.responsible_names).includes(query)
-    const matchStatus = !status.value || item.main_status === status.value
-    return matchKeyword && matchStatus
+    const matchStatus = !filters.status || item.main_status === filters.status
+    const delayState = delayStatus(item).state
+    const matchDelay =
+      !filters.delayFilter ||
+      filters.delayFilter === delayState ||
+      (filters.delayFilter === 'normal' && !delayState)
+    const endDate = toDateOnly(item.end_at)
+    const matchDateFrom = !filters.dateFrom || (endDate && endDate >= filters.dateFrom)
+    const matchDateTo = !filters.dateTo || (endDate && endDate <= filters.dateTo)
+    return matchKeyword && matchStatus && matchDelay && matchDateFrom && matchDateTo
   })
 })
 
@@ -138,9 +181,25 @@ const pagedTasks = computed(() => {
   return filteredTasks.value.slice(start, start + pageSize)
 })
 
-watch([keyword, status], () => {
+function applyFilters() {
+  appliedFilters.value = {
+    keyword: keyword.value,
+    status: status.value,
+    delayFilter: delayFilter.value,
+    dateFrom: dateFrom.value,
+    dateTo: dateTo.value,
+  }
   page.value = 1
-})
+}
+
+function resetFilters() {
+  keyword.value = ''
+  status.value = ''
+  delayFilter.value = ''
+  dateFrom.value = ''
+  dateTo.value = ''
+  applyFilters()
+}
 
 function statusUi(task) {
   return resolveTaskStatusTone(task)
@@ -148,6 +207,33 @@ function statusUi(task) {
 
 function joinNames(names) {
   return Array.isArray(names) && names.length > 0 ? names.join(', ') : '-'
+}
+
+function toDateOnly(value) {
+  if (!value) return ''
+  return String(value).slice(0, 10)
+}
+
+function isOpenTask(task) {
+  return !['done', 'canceled'].includes(task.main_status)
+}
+
+function delayStatus(task) {
+  if (!isOpenTask(task)) return { state: '', text: '', className: '' }
+  const delayDays = Number(task.delay_days || 0)
+  if (delayDays > 0) {
+    return { state: 'delayed', text: `已延期${delayDays}天`, className: 'error-text task-delay-text' }
+  }
+  const endDate = new Date(task.end_at)
+  if (Number.isNaN(endDate.getTime())) return { state: '', text: '', className: '' }
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const endDay = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate()).getTime()
+  const daysToDue = Math.ceil((endDay - startOfToday) / 86400000)
+  if (daysToDue >= 0 && daysToDue <= 3) {
+    return { state: 'due_soon', text: '即将延期', className: 'warning-text task-delay-text' }
+  }
+  return { state: '', text: '', className: '' }
 }
 
 async function loadTasks() {
@@ -188,13 +274,13 @@ async function handleImported() {
 }
 
 async function remind(taskId) {
-  if (!window.confirm('确认发送一次任务提醒吗？')) return
+  if (!window.confirm('确认向该任务负责人发送提醒？')) return
   await http.post(`/tasks/${taskId}/remind`)
   await loadTasks()
 }
 
 async function removeTask(taskId) {
-  if (!window.confirm('确认删除这项任务吗？')) return
+  if (!window.confirm('确认删除该任务？')) return
   await http.delete(`/tasks/${taskId}`)
   await loadTasks()
 }

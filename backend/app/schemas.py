@@ -116,6 +116,7 @@ class TaskOut(BaseModel):
     end_at: datetime
     planned_minutes: int
     actual_minutes: int
+    completed_at: datetime | None = None
     status_text: str = ""
     priority_text: str = ""
     owner_name: str = ""
@@ -300,6 +301,28 @@ class MailPollStateOut(BaseModel):
     interval_seconds: int
     last_scan_at: datetime | None = None
     next_poll_at: datetime | None = None
+    baseline_started_at: datetime | None = None
+    qax_auto_collect_enabled: bool = False
+    qax_interval_seconds: int = 3600
+    qax_browser_visible: bool = False
+
+
+class RuntimeSettingsUpdate(BaseModel):
+    mail_auto_poll_enabled: bool
+    mail_auto_poll_interval_seconds: int = 300
+    mail_inbox_max_scan: int = 20
+    due_remind_enabled: bool = True
+    due_remind_run_at: str = "09:00"
+    overdue_remind_enabled: bool = True
+    overdue_remind_run_at: str = "09:00"
+    qax_auto_collect_enabled: bool
+    qax_auto_collect_interval_seconds: int = 3600
+    mail_scan_baseline_at: datetime | None = None
+    qax_browser_visible: bool = False
+
+
+class MailBaselineRequest(BaseModel):
+    baseline_at: datetime | None = None
 
 
 class DashboardKpi(BaseModel):
@@ -330,6 +353,25 @@ class DashboardAttentionItem(BaseModel):
     tone: str = "neutral"
     route: str = ""
     action_label: str = ""
+
+
+class DashboardOwnerTaskItem(BaseModel):
+    owner_name: str
+    task_total: int = 0
+    done_total: int = 0
+    delayed_total: int = 0
+    due_soon_total: int = 0
+
+
+class DashboardWarningTask(BaseModel):
+    task_id: int
+    title: str
+    owner_name: str = ""
+    end_at: datetime
+    delay_days: int = 0
+    warning_type: str
+    warning_text: str
+    route: str = ""
 
 
 class DashboardQuickAction(BaseModel):
@@ -363,6 +405,8 @@ class DashboardSummary(BaseModel):
     priority_distribution: list[DashboardDistributionItem] = Field(default_factory=list)
     task_trend: list[DashboardTrendPoint] = Field(default_factory=list)
     attention_items: list[DashboardAttentionItem] = Field(default_factory=list)
+    owner_task_distribution: list[DashboardOwnerTaskItem] = Field(default_factory=list)
+    warning_tasks: list[DashboardWarningTask] = Field(default_factory=list)
     quick_actions: list[DashboardQuickAction] = Field(default_factory=list)
 
 

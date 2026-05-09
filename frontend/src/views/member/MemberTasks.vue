@@ -25,7 +25,10 @@
             <td>{{ task.title }}</td>
             <td>{{ task.status_text }}</td>
             <td>{{ task.owner_name || '-' }}</td>
-            <td>{{ formatDateTime(task.end_at) }}</td>
+            <td>
+              <div>{{ formatDateTime(task.end_at) }}</div>
+              <div v-if="delayStatus(task).text" :class="delayStatus(task).className">{{ delayStatus(task).text }}</div>
+            </td>
             <td><router-link class="button secondary" :to="`/member/tasks/${task.id}`">查看详情</router-link></td>
           </tr>
         </tbody>
@@ -49,6 +52,28 @@ const pagedTasks = computed(() => {
   const start = (page.value - 1) * pageSize
   return tasks.value.slice(start, start + pageSize)
 })
+
+function delayStatus(task) {
+  if (!task || ['done', 'canceled'].includes(task.main_status)) {
+    return { text: '', className: '' }
+  }
+  const delayDays = Number(task.delay_days || 0)
+  if (delayDays > 0) {
+    return { text: `已延期${delayDays}天`, className: 'error-text task-delay-text' }
+  }
+  const endDate = new Date(task.end_at)
+  if (Number.isNaN(endDate.getTime())) {
+    return { text: '', className: '' }
+  }
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const endDay = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate()).getTime()
+  const daysToDue = Math.ceil((endDay - startOfToday) / 86400000)
+  if (daysToDue >= 0 && daysToDue <= 3) {
+    return { text: '即将延期', className: 'warning-text task-delay-text' }
+  }
+  return { text: '', className: '' }
+}
 
 watch(
   () => tasks.value.length,

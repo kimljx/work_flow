@@ -1,0 +1,9 @@
+{
+  "mail_auto_poll_enabled": true,
+  "mail_auto_poll_interval_seconds": 3600,
+  "mail_inbox_max_scan": 100,
+  "qax_auto_collect_enabled": true,
+  "qax_auto_collect_interval_seconds": 3600,
+  "mail_scan_baseline_at": "2026-05-09T01:11:00+00:00",
+  "qax_browser_visible": false
+}

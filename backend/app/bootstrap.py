@@ -177,6 +177,8 @@ def _ensure_schema_columns() -> None:
         task_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(tasks)")).fetchall()}
         if "due_remind_days" not in task_columns:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN due_remind_days INTEGER NOT NULL DEFAULT 0"))
+        if "completed_at" not in task_columns:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN completed_at DATETIME"))
         recipient_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(notification_recipients)")).fetchall()}
         if "content_snapshot" not in recipient_columns:
             conn.execute(text("ALTER TABLE notification_recipients ADD COLUMN content_snapshot TEXT NOT NULL DEFAULT ''"))
@@ -280,4 +282,18 @@ def bootstrap_database() -> None:
             if legacy_content and latest_content and template.content == legacy_content:
                 # 仅在模板仍保持旧版默认正文时自动升级，避免覆盖管理员的自定义编辑。
                 template.content = latest_content
+            if template.template_kind == "MAIL_SEND" and template.notify_type in {"task_created", "manual_remind", "due_remind"}:
+                lines = []
+                for line in (template.content or "").splitlines():
+                    if "{task_remark}" in line or "延期" in line:
+                        continue
+                    lines.append(line)
+                cleaned = "\n".join(lines).strip()
+                if template.notify_type == "task_created" and "进行中" not in cleaned and "已完成" not in cleaned:
+                    cleaned = (
+                        f"{cleaned}\n\n回复指引：\n"
+                        "1. 回复“进行中 + 说明”可更新任务状态。\n"
+                        "2. 回复“已完成 + 说明”可将任务标记为完成。"
+                    )
+                template.content = cleaned
         db.commit()

@@ -110,7 +110,7 @@ class NotificationChainTestCase(unittest.TestCase):
             self.assertIn("负责人：任务负责人", notification.content_snapshot)
             self.assertIn("任务创建人：系统管理员", notification.content_snapshot)
             self.assertIn("主任务详情：主任务正文说明", notification.content_snapshot)
-            self.assertIn("主任务备注：主任务备注说明", notification.content_snapshot)
+            self.assertNotIn("主任务备注", notification.content_snapshot)
             self.assertEqual(notification.notify_type, "task_created")
             recipient_record = (
                 db.query(NotificationRecipient)
@@ -139,7 +139,7 @@ class NotificationChainTestCase(unittest.TestCase):
             self.assertIn("任务创建人：系统管理员", preview["content"])
             self.assertIn("负责人：任务负责人", preview["content"])
             self.assertIn("主任务详情：主任务正文说明", preview["content"])
-            self.assertIn("主任务备注：主任务备注说明", preview["content"])
+            self.assertNotIn("主任务备注", preview["content"])
             self.assertIn("整理测试子任务", preview["content"])
             self.assertEqual(preview["context"]["recipient_name"], "默认成员")
             self.assertEqual(preview["context"]["owner_name"], "任务负责人")

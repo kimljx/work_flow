@@ -10,6 +10,9 @@ from app.services.qax import sanitize_qax_content, send_qax_notification
 from app.timeutils import shanghai_now_naive
 
 
+REPLY_GUIDE = "回复指引：\n1. 回复“进行中 + 说明”可更新任务状态。\n2. 回复“已完成 + 说明”可将任务标记为完成。"
+
+
 def _render_template(content: str, context: dict[str, str]) -> str:
     """用上下文变量渲染模板正文。"""
     rendered = content
@@ -106,6 +109,7 @@ def _build_context(
         "remind_focus": "主任务整体进度跟进",
         "reply_guide": "请按“任务ID + 状态关键词 + 可选说明内容 / 日期 / 原因”回复。",
     }
+    context["reply_guide"] = REPLY_GUIDE
     if extra_context:
         context.update({key: "" if value is None else str(value) for key, value in extra_context.items()})
     return context
@@ -118,8 +122,19 @@ def _default_subject(task: Task | None, notify_type: str, extra_context: dict[st
         title = task.title if task else "未知任务"
         return f"延期审批待处理通知#{delay_request_id}：{title}"
     if task:
-        return f"任务通知提醒#{task.id}：{task.title}"
+        return f"【任务通知#{task.id}】{task.title}"
     return f"系统通知：{notify_type}"
+
+
+def _remove_deprecated_template_lines(content: str) -> str:
+    lines = []
+    for line in (content or "").splitlines():
+        if "{task_remark}" in line or "主任务备注" in line:
+            continue
+        if "延期" in line or "同意" in line or "拒绝" in line:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _default_content(
@@ -171,8 +186,11 @@ def _resolve_template_payload(
     context = _build_context(db, task, recipient=recipient, extra_context=extra_context)
     subject = _default_subject(task, notify_type, extra_context)
     content = _default_content(db, task, notify_type, recipient=recipient, extra_context=extra_context)
+    content = _remove_deprecated_template_lines(content)
     if template:
-        content = _render_template(template.content, context)
+        cleaned_template_content = _remove_deprecated_template_lines(template.content)
+        if cleaned_template_content:
+            content = _render_template(cleaned_template_content, context)
         if task and _task_subtasks(db, task) and "{subtask_" not in template.content and "子任务" not in content:
             # 老模板如果没显式带子任务变量，这里自动补一段，避免成员收到缺少拆分任务信息的正文。
             content = f"{content}\n子任务安排：\n{context.get('subtask_summary', '暂无子任务')}"
@@ -385,5 +403,44 @@ def create_due_reminders(db: Session) -> int:
 
         create_notification_with_recipients(db, task.id, "email", "due_remind", "")
         create_notification_with_recipients(db, task.id, "qax", "due_remind", "")
+        created += 1
+    return created
+
+
+def create_overdue_task_reminders(db: Session) -> int:
+    """为延期或已过截止时间但未完成的主任务每天生成一次提醒。"""
+    now = shanghai_now_naive()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    created = 0
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.deleted_at.is_(None),
+            Task.main_status.notin_(["done", "canceled"]),
+        )
+        .all()
+    )
+    for task in tasks:
+        overdue_days = max((now.date() - task.end_at.date()).days, 0)
+        if task.delay_days <= 0 and overdue_days <= 0:
+            continue
+        exists = (
+            db.query(Notification)
+            .filter(
+                Notification.task_id == task.id,
+                Notification.notify_type == "manual_remind",
+                Notification.created_at >= day_start,
+                Notification.created_at <= day_end,
+                Notification.content_snapshot.like("%延期任务提醒%"),
+            )
+            .first()
+        )
+        if exists:
+            continue
+        delay_text = f"已延期 {task.delay_days} 天" if task.delay_days > 0 else f"已超过截止时间 {overdue_days} 天"
+        focus = f"延期任务提醒：{delay_text}，请尽快反馈进展或完成任务。"
+        create_notification_with_recipients(db, task.id, "email", "manual_remind", "", extra_context={"remind_focus": focus})
+        create_notification_with_recipients(db, task.id, "qax", "manual_remind", "", extra_context={"remind_focus": focus})
         created += 1
     return created

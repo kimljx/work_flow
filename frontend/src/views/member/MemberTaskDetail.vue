@@ -4,6 +4,8 @@
       <div>
         <h1>{{ task.title }}</h1>
         <p>{{ task.status_text }}，截止时间：{{ formatDateTime(task.end_at) }}</p>
+        <p v-if="delayStatus.text" :class="delayStatus.className">{{ delayStatus.text }}</p>
+        <p v-if="task.completed_at">完成时间：{{ formatDateTime(task.completed_at) }}</p>
       </div>
       <div class="toolbar">
         <router-link class="button secondary" :to="backPath">返回上页</router-link>
@@ -15,6 +17,7 @@
       <p>{{ task.content }}</p>
       <p>开始时间：{{ formatDateTime(task.start_at) }}</p>
       <p>结束时间：{{ formatDateTime(task.end_at) }}</p>
+      <p v-if="delayStatus.text" :class="delayStatus.className">{{ delayStatus.text }}</p>
       <p>计划用时：{{ formatMinutes(task.planned_minutes) }}</p>
       <p>实际用时：{{ formatMinutes(task.actual_minutes) }}</p>
       <p>子任务数量：{{ task.subtask_count || 0 }}</p>
@@ -105,6 +108,29 @@ import { formatDateTime, formatMinutes } from '../../utils/format'
 const route = useRoute()
 const task = ref(null)
 const backPath = computed(() => route.query.from || '/member/tasks')
+const delayStatus = computed(() => resolveDelayStatus(task.value))
+
+function resolveDelayStatus(item) {
+  if (!item || ['done', 'canceled'].includes(item.main_status)) {
+    return { text: '', className: '' }
+  }
+  const delayDays = Number(item.delay_days || 0)
+  if (delayDays > 0) {
+    return { text: `已延期${delayDays}天`, className: 'error-text task-delay-text' }
+  }
+  const endDate = new Date(item.end_at)
+  if (Number.isNaN(endDate.getTime())) {
+    return { text: '', className: '' }
+  }
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const endDay = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate()).getTime()
+  const daysToDue = Math.ceil((endDay - startOfToday) / 86400000)
+  if (daysToDue >= 0 && daysToDue <= 3) {
+    return { text: '即将延期', className: 'warning-text task-delay-text' }
+  }
+  return { text: '', className: '' }
+}
 
 onMounted(async () => {
   const { data } = await http.get(`/tasks/${route.params.id}`)

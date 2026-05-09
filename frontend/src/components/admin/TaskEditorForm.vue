@@ -192,9 +192,9 @@ function nextSubtaskKey() {
   return `subtask-${Date.now()}-${subtaskSeed.value}`
 }
 
-function buildDefaultTaskDateTime(hour) {
+function buildDefaultTaskDateTime(hour, minute = 0) {
   const now = new Date()
-  now.setHours(hour, 0, 0, 0)
+  now.setHours(hour, minute, 0, 0)
   return toDateTimeLocal(now)
 }
 
@@ -237,7 +237,7 @@ async function loadUsers() {
 
 async function loadTask() {
   if (!isEdit.value) {
-    form.start_at = buildDefaultTaskDateTime(9)
+    form.start_at = buildDefaultTaskDateTime(8, 30)
     form.end_at = buildDefaultTaskDateTime(18)
     return
   }

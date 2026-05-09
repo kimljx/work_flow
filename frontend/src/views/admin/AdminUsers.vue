@@ -55,6 +55,7 @@
                 <button class="button secondary" v-if="item.is_active" @click="toggleUser(item, false)">禁用</button>
                 <button class="button secondary" v-else @click="toggleUser(item, true)">启用</button>
                 <button class="button danger" @click="resetPassword(item.id)">重置密码</button>
+                <button class="button danger" @click="deleteUser(item)">删除</button>
               </div>
             </td>
           </tr>
@@ -117,22 +118,34 @@ function editUser(item) {
   Object.assign(form, item)
 }
 
+function trimmedForm() {
+  return {
+    username: form.username.trim(),
+    role: form.role,
+    name: form.name.trim(),
+    email: form.email.trim(),
+    ip_address: form.ip_address.trim(),
+    is_active: form.is_active,
+  }
+}
+
 async function submitUser() {
+  const payload = trimmedForm()
   if (editingId.value) {
     await http.put(`/admin/users/${editingId.value}`, {
-      role: form.role,
-      name: form.name,
-      email: form.email,
-      ip_address: form.ip_address,
-      is_active: form.is_active,
+      role: payload.role,
+      name: payload.name,
+      email: payload.email,
+      ip_address: payload.ip_address,
+      is_active: payload.is_active,
     })
   } else {
     await http.post('/admin/users', {
-      username: form.username,
-      role: form.role,
-      name: form.name,
-      email: form.email,
-      ip_address: form.ip_address,
+      username: payload.username,
+      role: payload.role,
+      name: payload.name,
+      email: payload.email,
+      ip_address: payload.ip_address,
     })
   }
   resetForm()
@@ -149,6 +162,13 @@ async function resetPassword(userId) {
   if (!window.confirm('确认要将该用户密码重置为默认密码吗？')) return
   await http.post(`/admin/users/${userId}/reset-password`)
   window.alert('密码已重置为默认密码。')
+}
+
+async function deleteUser(item) {
+  if (!window.confirm(`确认删除用户 ${item.name || item.username}？`)) return
+  await http.delete(`/admin/users/${item.id}`)
+  if (editingId.value === item.id) resetForm()
+  await loadUsers()
 }
 
 onMounted(loadUsers)

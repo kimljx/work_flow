@@ -21,7 +21,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.models import Notification, NotificationRecipient, Task, User
 from app.services.runtime_settings import load_runtime_settings
 from app.services.templates import strip_reply_guides
@@ -35,10 +35,113 @@ QAX_DETAIL_READ_STATUSES = ("执行成功",)
 QAX_DETAIL_FAILED_STATUSES = ("执行失败",)
 
 
+QAX_CERTIFICATE_SUFFIXES = (".cer", ".crt", ".pem", ".p12", ".pfx")
+QAX_CLIENT_CERTIFICATE_SUFFIXES = (".p12", ".pfx")
+QAX_BROWSER_EXECUTABLE_GLOBS = (
+    "chromium-*/chrome-win/chrome.exe",
+    "chromium-*/chrome-linux/chrome",
+    "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+)
+
+
+@dataclass(frozen=True)
+class QaxCertificateState:
+    files: tuple[Path, ...]
+    empty_files: tuple[Path, ...]
+    public_files: tuple[Path, ...]
+    client_files: tuple[Path, ...]
+
+
+def _has_bundled_chromium(root: Path) -> bool:
+    return any(root.glob(pattern) for pattern in QAX_BROWSER_EXECUTABLE_GLOBS)
+
+
+def _relative_cert_paths(paths: tuple[Path, ...]) -> str:
+    if not paths:
+        return "无"
+    values = []
+    for path in paths:
+        try:
+            values.append(path.relative_to(PROJECT_ROOT).as_posix())
+        except ValueError:
+            values.append(path.as_posix())
+    return ", ".join(values)
+
+
+def _detect_qax_certificates() -> QaxCertificateState:
+    config_root = PROJECT_ROOT / "config"
+    if not config_root.exists():
+        return QaxCertificateState(files=(), empty_files=(), public_files=(), client_files=())
+
+    files = tuple(
+        sorted(
+            (
+                path
+                for path in config_root.iterdir()
+                if path.is_file() and path.suffix.lower() in QAX_CERTIFICATE_SUFFIXES
+            ),
+            key=lambda item: item.name.lower(),
+        )
+    )
+    empty_files = tuple(path for path in files if path.stat().st_size <= 0)
+    client_files = tuple(path for path in files if path.suffix.lower() in QAX_CLIENT_CERTIFICATE_SUFFIXES)
+    public_files = tuple(path for path in files if path.suffix.lower() not in QAX_CLIENT_CERTIFICATE_SUFFIXES)
+    return QaxCertificateState(
+        files=files,
+        empty_files=empty_files,
+        public_files=public_files,
+        client_files=client_files,
+    )
+
+
+def _validate_qax_certificates() -> QaxCertificateState:
+    state = _detect_qax_certificates()
+    if state.empty_files:
+        raise QaxAutomationError(
+            "QAX 证书文件为空，无法用于浏览器登录，请替换为真实证书后重试："
+            f"{_relative_cert_paths(state.empty_files)}"
+        )
+    return state
+
+
+def _build_qax_certificate_hint(state: QaxCertificateState) -> str:
+    if not state.files:
+        return "当前 config/ 下未发现证书文件。"
+
+    hints = [f"已发现证书文件：{_relative_cert_paths(state.files)}。"]
+    if state.public_files and not state.client_files:
+        hints.append("当前只有 .cer/.crt/.pem 公钥或信任链证书。若目标站点要求客户端证书登录，通常还需要带私钥的 .p12/.pfx。")
+    elif state.client_files:
+        hints.append("已发现 .p12/.pfx 客户端证书文件。")
+    hints.append("当前内置 Playwright 不支持在代码里直接挂载客户端证书，请优先将证书导入系统、容器或浏览器运行环境的信任链或证书存储后再登录。")
+    return "".join(hints)
+
+
+def _is_qax_certificate_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    keywords = (
+        "err_cert",
+        "ssl",
+        "tls",
+        "certificate",
+        "client auth cert",
+        "https",
+        "net::err",
+    )
+    return any(keyword in message for keyword in keywords)
+
+
+def _wrap_qax_startup_error(exc: BaseException, state: QaxCertificateState) -> QaxAutomationError:
+    message = str(exc).strip() or exc.__class__.__name__
+    if _is_qax_certificate_error(exc):
+        return QaxAutomationError(f"QAX 浏览器登录出现证书/TLS 错误：{message}。{_build_qax_certificate_hint(state)}")
+    return QaxAutomationError(message)
+
+
 def _ensure_local_playwright_browser_path() -> None:
     """Prefer the browser bundled inside the offline package."""
     configured = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-    if configured and list(Path(configured).glob("chromium-*/chrome-win/chrome.exe")):
+    if configured and _has_bundled_chromium(Path(configured)):
         return
     current = Path(__file__).resolve()
     candidates = [
@@ -58,10 +161,11 @@ def _local_chromium_executable() -> str | None:
     if not browser_root:
         return None
     root = Path(browser_root)
-    candidates = sorted(root.glob("chromium-*/chrome-win/chrome.exe"), reverse=True)
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
+    for pattern in QAX_BROWSER_EXECUTABLE_GLOBS:
+        candidates = sorted(root.glob(pattern), reverse=True)
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
     return None
 
 
@@ -151,16 +255,21 @@ class QaxAutomationClient:
         self._timeout_error = timeout_error
         self._playwright_cm = async_playwright()
         playwright = await self._playwright_cm.start()
-        runtime = load_runtime_settings()
-        launch_options = {"headless": not runtime.qax_browser_visible}
-        executable_path = _local_chromium_executable()
-        if executable_path:
-            launch_options["executable_path"] = executable_path
-        self._browser = await playwright.chromium.launch(**launch_options)
-        self._context = await self._browser.new_context(ignore_https_errors=settings.qax_ignore_https_errors)
-        self.page = await self._context.new_page()
-        await self._login_and_open_task_page()
-        return self
+        certificate_state = _validate_qax_certificates()
+        try:
+            runtime = load_runtime_settings()
+            launch_options = {"headless": not runtime.qax_browser_visible}
+            executable_path = _local_chromium_executable()
+            if executable_path:
+                launch_options["executable_path"] = executable_path
+            self._browser = await playwright.chromium.launch(**launch_options)
+            self._context = await self._browser.new_context(ignore_https_errors=settings.qax_ignore_https_errors)
+            self.page = await self._context.new_page()
+            await self._login_and_open_task_page()
+            return self
+        except Exception as exc:
+            await self.__aexit__(type(exc), exc, exc.__traceback__)
+            raise _wrap_qax_startup_error(exc, certificate_state) from exc
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if self._context is not None:

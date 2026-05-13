@@ -89,6 +89,29 @@ def download_python_packages(target_dir: Path) -> None:
             str(PROJECT_ROOT / "backend" / "requirements.txt"),
         ]
     )
+    # pip download may miss marker-gated runtime deps when cross-resolving for cp310.
+    # Pull them explicitly so the embedded Python 3.10 runtime can install offline.
+    run_command(
+        [
+            *PYTHON_BUILD_HOST_CMD,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            str(target_dir),
+            "--only-binary=:all:",
+            "--platform",
+            "manylinux2014_x86_64",
+            "--implementation",
+            "cp",
+            "--python-version",
+            "310",
+            "--abi",
+            "cp310",
+            "exceptiongroup",
+            "sniffio",
+        ]
+    )
     run_command(
         [
             *PYTHON_BUILD_HOST_CMD,
@@ -193,6 +216,23 @@ def copytree_filtered(source: Path, destination: Path) -> None:
     )
 
 
+def copy_runtime_config_files(destination: Path) -> None:
+    """复制运行期配置文件，并将浏览器证书一并打入离线包。"""
+
+    source_root = PROJECT_ROOT / "config"
+    destination.mkdir(parents=True, exist_ok=True)
+    if not source_root.exists():
+        return
+
+    allowed_suffixes = {".json", ".md", ".txt", ".xlsx", ".cer", ".crt", ".pem", ".p12", ".pfx"}
+    for source_path in source_root.iterdir():
+        if not source_path.is_file():
+            continue
+        if source_path.suffix.lower() not in allowed_suffixes:
+            continue
+        shutil.copy2(source_path, destination / source_path.name)
+
+
 def ensure_executable(path: Path) -> None:
     """为 shell 脚本补充可执行权限。"""
 
@@ -221,7 +261,7 @@ def copy_release_files(release_root: Path) -> None:
     copytree_filtered(PROJECT_ROOT / "docs", docs_root)
     copytree_filtered(LINUX_TEMPLATE_ROOT / "tools", tools_root)
 
-    config_root.mkdir(parents=True, exist_ok=True)
+    copy_runtime_config_files(config_root)
     backup_root.mkdir(parents=True, exist_ok=True)
     service_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LINUX_TEMPLATE_ROOT / ".env.offline.example", config_root / ".env.offline.example")
@@ -235,6 +275,7 @@ def copy_release_files(release_root: Path) -> None:
         "restore_data.sh",
         "upgrade_from_release.sh",
         "README.txt",
+        "DEPLOY_ON_LINUX_SERVER.txt",
     ):
         shutil.copy2(LINUX_TEMPLATE_ROOT / file_name, release_root / file_name)
         ensure_executable(release_root / file_name)

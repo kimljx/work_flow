@@ -205,6 +205,23 @@ def copytree_filtered(source: Path, destination: Path) -> None:
     )
 
 
+def copy_runtime_config_files(destination: Path) -> None:
+    """Copy runtime config files, including browser certificates, into the release package."""
+
+    source_root = PROJECT_ROOT / "config"
+    destination.mkdir(parents=True, exist_ok=True)
+    if not source_root.exists():
+        return
+
+    allowed_suffixes = {".json", ".md", ".txt", ".xlsx", ".cer", ".crt", ".pem", ".p12", ".pfx"}
+    for source_path in source_root.iterdir():
+        if not source_path.is_file():
+            continue
+        if source_path.suffix.lower() not in allowed_suffixes:
+            continue
+        shutil.copy2(source_path, destination / source_path.name)
+
+
 def file_sha256(path: Path) -> str:
     """Return the SHA256 checksum of a file."""
 
@@ -256,7 +273,7 @@ def copy_release_files(release_root: Path) -> None:
     copytree_filtered(PROJECT_ROOT / "docs", docs_root)
     copytree_filtered(WINDOWS_TEMPLATE_ROOT / "tools", tools_root)
 
-    config_root.mkdir(parents=True, exist_ok=True)
+    copy_runtime_config_files(config_root)
     backup_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(WINDOWS_TEMPLATE_ROOT / ".env.offline.example", config_root / ".env.offline.example")
     copy_windows_text_file(WINDOWS_TEMPLATE_ROOT / "install_offline.bat", release_root / "install_offline.bat")

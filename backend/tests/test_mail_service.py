@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import socket
 import ssl
+import tempfile
 import unittest
 from datetime import datetime
 from email.message import EmailMessage
+from pathlib import Path
+from unittest.mock import patch
 
+from app import config as app_config
 from app.config import settings
 from app.db import Base, SessionLocal, engine
 from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, Template, User
@@ -21,6 +25,7 @@ from app.services.mail import (
     poll_mailbox,
     send_mail_notification,
 )
+from app.services import runtime_settings
 
 
 class MailServiceTestCase(unittest.TestCase):

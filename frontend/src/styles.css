@@ -376,10 +376,60 @@ button:disabled {
   align-items: start;
 }
 
-.scheduler-setting-toggle,
-.scheduler-inline-checkbox {
-  min-height: 42px;
+.scheduler-config-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.scheduler-config-card,
+.scheduler-subcard {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.98));
+}
+
+.scheduler-config-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.scheduler-config-header h3,
+.scheduler-subcard h4 {
+  margin: 0;
+}
+
+.scheduler-config-header p,
+.scheduler-subcard p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.scheduler-toggle-row {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 10px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 14px;
+  background: #f8fbff;
+  font-weight: 600;
+}
+
+.scheduler-toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.scheduler-inline-toggle {
+  min-width: 220px;
 }
 
 .scheduler-setting-controls {
@@ -394,9 +444,26 @@ button:disabled {
   line-height: 1.5;
 }
 
+.scheduler-toggle-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.scheduler-dual-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
 @media (max-width: 760px) {
   .scheduler-setting-grid {
     grid-template-columns: 1fr;
+  }
+
+  .scheduler-config-card,
+  .scheduler-subcard {
+    padding: 16px;
   }
 }
 

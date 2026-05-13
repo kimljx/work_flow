@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -10,7 +12,17 @@ os.environ["DATABASE_URL"] = "sqlite:///./test_qax_service.db"
 from app.db import Base, SessionLocal, engine
 from app.models import Notification, NotificationRecipient, Task, TaskMember, Template, User
 from app.services.notifications import create_notification_with_recipients
-from app.services.qax import QaxTaskStatus, _map_qax_status, collect_qax_status, sanitize_qax_content
+from app.services.qax import (
+    QaxAutomationError,
+    QaxTaskStatus,
+    _build_qax_certificate_hint,
+    _local_chromium_executable,
+    _map_qax_status,
+    _validate_qax_certificates,
+    _wrap_qax_startup_error,
+    collect_qax_status,
+    sanitize_qax_content,
+)
 
 
 class _FakeQaxAutomationClient:
@@ -215,6 +227,53 @@ class QaxServiceTestCase(unittest.TestCase):
             self.assertEqual(recipient.last_error, "")
             self.assertEqual(refreshed_notification.status, "delivered")
             self.assertEqual(len(fake_client.deleted_task_names), 1)
+
+    def test_validate_qax_certificates_rejects_empty_certificate_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_root = root / "config"
+            config_root.mkdir()
+            (config_root / "client.cer").write_bytes(b"")
+            with patch("app.services.qax.PROJECT_ROOT", root):
+                with self.assertRaises(QaxAutomationError) as ctx:
+                    _validate_qax_certificates()
+            self.assertIn("证书文件为空", str(ctx.exception))
+            self.assertIn("config/client.cer", str(ctx.exception))
+
+    def test_build_qax_certificate_hint_mentions_p12_when_only_public_cert_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_root = root / "config"
+            config_root.mkdir()
+            (config_root / "login.cer").write_text("dummy", encoding="utf-8")
+            with patch("app.services.qax.PROJECT_ROOT", root):
+                state = _validate_qax_certificates()
+                hint = _build_qax_certificate_hint(state)
+            self.assertIn(".p12/.pfx", hint)
+            self.assertIn("config/login.cer", hint)
+
+    def test_wrap_qax_startup_error_adds_certificate_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_root = root / "config"
+            config_root.mkdir()
+            (config_root / "login.p12").write_text("dummy", encoding="utf-8")
+            with patch("app.services.qax.PROJECT_ROOT", root):
+                state = _validate_qax_certificates()
+                wrapped = _wrap_qax_startup_error(RuntimeError("net::ERR_BAD_SSL_CLIENT_AUTH_CERT"), state)
+            self.assertIsInstance(wrapped, QaxAutomationError)
+            self.assertIn("证书/TLS 错误", str(wrapped))
+            self.assertIn("config/login.p12", str(wrapped))
+
+    def test_local_chromium_executable_supports_linux_bundle_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            executable = root / "chromium-1234" / "chrome-linux" / "chrome"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("binary", encoding="utf-8")
+            with patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(root)}, clear=False):
+                resolved = _local_chromium_executable()
+            self.assertEqual(resolved, str(executable))
 
 
 if __name__ == "__main__":

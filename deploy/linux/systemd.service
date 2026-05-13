@@ -1,11 +1,19 @@
 [Unit]
-Description=Department Task Collaboration Backend
-After=network.target
+Description=Work Flow Offline Service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-WorkingDirectory=/opt/department-task/backend
-ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Type=forking
+WorkingDirectory=/opt/work_flow_release
+ExecStart=/opt/work_flow_release/start_system.sh
+ExecStop=/opt/work_flow_release/stop_system.sh
+PIDFile=/opt/work_flow_release/local/run/uvicorn.pid
 Restart=always
+RestartSec=5
+KillMode=process
+TimeoutStartSec=120
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

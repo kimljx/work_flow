@@ -82,6 +82,7 @@ from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
 
 router = APIRouter(prefix="/api/v1")
+OPEN_TASK_STATUSES = {"not_started", "in_progress"}
 TASK_IMPORT_FIELDS = (
     "sequence",
     "title",
@@ -155,6 +156,31 @@ def task_status_display(task: Task) -> str:
     if task.delay_days > 0:
         return f"{text}（延期{task.delay_days}天）"
     return text
+
+
+def effective_task_delay_days(task: Task, current: datetime) -> int:
+    if task.main_status not in OPEN_TASK_STATUSES:
+        return 0
+    overdue_days = max((current.date() - task.end_at.date()).days, 0)
+    return max(int(task.delay_days or 0), overdue_days)
+
+
+def is_task_due_soon(task: Task, current: datetime, window_days: int = 3) -> bool:
+    if task.main_status not in OPEN_TASK_STATUSES or effective_task_delay_days(task, current) > 0:
+        return False
+    days_to_due = (task.end_at.date() - current.date()).days
+    return 0 <= days_to_due <= window_days
+
+
+def task_import_template_file() -> Path | None:
+    api_path = Path(__file__).resolve()
+    for root in (api_path.parents[2], api_path.parents[3] if len(api_path.parents) > 3 else None):
+        if root is None:
+            continue
+        template_path = root / "config" / "task-import-template.xlsx"
+        if template_path.exists():
+            return template_path
+    return None
 
 
 def infer_task_status_by_time(start_at: datetime, end_at: datetime, now: datetime | None = None) -> str:
@@ -1163,7 +1189,6 @@ def delete_user(user_id: int, current_user: User = Depends(require_admin), db: S
 def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> DashboardSummary:
     now = shanghai_now_naive()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    open_statuses = {"not_started", "in_progress"}
     tasks = db.query(Task).filter(Task.deleted_at.is_(None)).all()
     notifications = db.query(Notification).all()
     recipients = db.query(NotificationRecipient).all()
@@ -1178,12 +1203,8 @@ def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(ge
     in_progress_total = sum(1 for item in tasks if item.main_status == "in_progress")
     done_total = sum(1 for item in tasks if item.main_status == "done")
     canceled_total = sum(1 for item in tasks if item.main_status == "canceled")
-    delayed_total = sum(1 for item in tasks if item.delay_days > 0)
-    due_soon_total = sum(
-        1
-        for item in tasks
-        if item.main_status in open_statuses and 0 <= (item.end_at - now).days <= 3
-    )
+    delayed_total = sum(1 for item in tasks if effective_task_delay_days(item, now) > 0)
+    due_soon_total = sum(1 for item in tasks if is_task_due_soon(item, now))
     pending_delay_requests = sum(1 for item in delay_requests if item.approval_status == "PENDING")
     failed_recipients = sum(1 for item in recipients if item.delivery_status == "failed")
     failed_mail_events = sum(1 for item in mail_events if item.process_status == "FAILED")
@@ -1209,7 +1230,7 @@ def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(ge
         delayed_stock_total = sum(
             1
             for item in tasks
-            if item.main_status in open_statuses and item.end_at < day_end
+            if effective_task_delay_days(item, day_start) > 0
         )
         task_trend.append(
             {
@@ -1258,12 +1279,10 @@ def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(ge
         stats["task_total"] = int(stats["task_total"]) + 1
         if task.main_status == "done":
             stats["done_total"] = int(stats["done_total"]) + 1
-        if task.main_status not in open_statuses:
+        if task.main_status not in OPEN_TASK_STATUSES:
             continue
 
-        overdue_days = max((now.date() - task.end_at.date()).days, 0)
-        effective_delay_days = max(int(task.delay_days or 0), overdue_days)
-        days_to_due = (task.end_at.date() - now.date()).days
+        effective_delay_days = effective_task_delay_days(task, now)
         if effective_delay_days > 0:
             stats["delayed_total"] = int(stats["delayed_total"]) + 1
             warning_tasks.append(
@@ -1278,7 +1297,7 @@ def dashboard_summary(_: User = Depends(require_admin), db: Session = Depends(ge
                     "route": f"/admin/tasks/{task.id}",
                 }
             )
-        elif 0 <= days_to_due <= 3:
+        elif is_task_due_soon(task, now):
             stats["due_soon_total"] = int(stats["due_soon_total"]) + 1
             warning_tasks.append(
                 {
@@ -1556,8 +1575,8 @@ def task_import_template(_: User = Depends(require_admin)) -> StreamingResponse:
     - `任务导入模板` 工作表：用于直接录入导入数据；
     - `填写说明` 工作表：说明字段含义、格式与示例规则。
     """
-    config_template = (Path(__file__).resolve().parents[2] / "config" / "task-import-template.xlsx")
-    if config_template.exists():
+    config_template = task_import_template_file()
+    if config_template is not None:
         return FileResponse(
             config_template,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2228,6 +2247,32 @@ def update_scheduler_settings(payload: RuntimeSettingsUpdate, current_user: User
             "qax_auto_collect_interval_seconds": payload.qax_auto_collect_interval_seconds,
             "mail_scan_baseline_at": payload.mail_scan_baseline_at.isoformat() if payload.mail_scan_baseline_at else "",
             "qax_browser_visible": payload.qax_browser_visible,
+            "qax_base_url": payload.qax_base_url,
+            "qax_username": payload.qax_username,
+            "qax_password": payload.qax_password,
+            "qax_group_name": payload.qax_group_name,
+            "qax_ignore_https_errors": payload.qax_ignore_https_errors,
+            "smtp_host": payload.smtp_host,
+            "smtp_port": payload.smtp_port,
+            "smtp_user": payload.smtp_user,
+            "smtp_password": payload.smtp_password,
+            "smtp_from_address": payload.smtp_from_address,
+            "smtp_use_tls": payload.smtp_use_tls,
+            "smtp_use_ssl": payload.smtp_use_ssl,
+            "smtp_timeout_seconds": payload.smtp_timeout_seconds,
+            "mail_inbox_protocol": payload.mail_inbox_protocol,
+            "imap_host": payload.imap_host,
+            "imap_port": payload.imap_port,
+            "imap_user": payload.imap_user,
+            "imap_password": payload.imap_password,
+            "imap_use_tls": payload.imap_use_tls,
+            "imap_use_ssl": payload.imap_use_ssl,
+            "pop3_host": payload.pop3_host,
+            "pop3_port": payload.pop3_port,
+            "pop3_user": payload.pop3_user,
+            "pop3_password": payload.pop3_password,
+            "pop3_use_tls": payload.pop3_use_tls,
+            "pop3_use_ssl": payload.pop3_use_ssl,
         }
     )
     data = runtime_settings_dict()

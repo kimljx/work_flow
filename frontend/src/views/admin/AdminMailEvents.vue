@@ -2,44 +2,36 @@
   <section class="page">
     <div class="panel workspace-header">
       <div>
-        <div class="workspace-eyebrow">邮件列表</div>
-        <h1 class="workspace-title">已匹配邮件</h1>
-        <p class="workspace-subtitle">这里仅展示命中模板的邮件记录，并提供详情页查看匹配内容和业务动作。收件测试会根据当前启用的 IMAP 或 POP3 协议自动切换。</p>
+        <div class="workspace-eyebrow">计划任务</div>
+        <h1 class="workspace-title">邮件与 QAX 调度中心</h1>
+        <p class="workspace-subtitle">
+          在这里统一维护自动收件、提醒任务、邮件收发配置和 QAX 采集配置，保存后测试和手动执行都会直接使用当前页面配置。
+        </p>
       </div>
       <div class="toolbar">
-        <button class="button secondary" @click="testMailSettings" :disabled="busy">
-          测试 SMTP
-        </button>
-        <button class="button secondary" @click="testInboxSettings" :disabled="busy">
-          测试收件配置
-        </button>
-        <button class="button secondary" @click="initializeBaseline" :disabled="busy">
-          设置扫描基准
-        </button>
-        <button class="button secondary" @click="collectQaxStatus" :disabled="busy">
-          手动采集 QAX
-        </button>
-        <button class="button" @click="pollInbox" :disabled="busy">
-          手动收取邮件
-        </button>
+        <button class="button secondary" @click="testMailSettings" :disabled="busy">测试 SMTP</button>
+        <button class="button secondary" @click="testInboxSettings" :disabled="busy">测试收件配置</button>
+        <button class="button secondary" @click="initializeBaseline" :disabled="busy">设置扫描基准</button>
+        <button class="button secondary" @click="collectQaxStatus" :disabled="busy">手动采集 QAX</button>
+        <button class="button" @click="pollInbox" :disabled="busy">手动收取邮件</button>
       </div>
     </div>
 
     <div class="stats">
       <div class="stat-card compact">
         <span class="metric-label">收件协议</span>
-        <strong>{{ pollState?.inbox_protocol_text || 'IMAP' }}</strong>
+        <strong>{{ pollState?.inbox_protocol_text || protocolLabel(schedulerForm.mail_inbox_protocol) }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">自动收取</span>
+        <span class="metric-label">自动收件</span>
         <strong>{{ pollState?.auto_poll_enabled ? '已开启' : '未开启' }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">下次收取倒计时</span>
+        <span class="metric-label">下次收件倒计时</span>
         <strong>{{ countdownText }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">上次收取时间</span>
+        <span class="metric-label">上次收件时间</span>
         <strong>{{ formatDateTime(pollState?.last_scan_at) }}</strong>
       </div>
       <div class="stat-card compact">
@@ -47,12 +39,12 @@
         <strong>{{ events.length }}</strong>
       </div>
       <div class="stat-card compact">
-        <span class="metric-label">未匹配落库</span>
+        <span class="metric-label">未匹配邮件</span>
         <strong>{{ unmatchedEvents.length }}</strong>
       </div>
     </div>
 
-    <div class="panel" v-if="feedback.message">
+    <div v-if="feedback.message" class="panel">
       <h2>{{ feedback.title }}</h2>
       <p :class="feedback.type === 'success' ? 'success-text' : 'error-text'">{{ feedback.message }}</p>
     </div>
@@ -60,67 +52,240 @@
     <div class="panel">
       <div class="section-head">
         <div>
-          <h2>定时任务设置</h2>
-          <p>按分钟配置后台自动采集节奏，并控制每次默认扫描邮件数量。</p>
+          <h2>计划任务与运行配置</h2>
+          <p>原来需要改 `.env` 的邮件和 QAX 参数，现在可以直接在这里维护。</p>
         </div>
         <button class="button" @click="saveSchedulerSettings" :disabled="busy">保存设置</button>
       </div>
-      <div class="scheduler-setting-grid">
-        <label class="checkbox-row scheduler-setting-toggle">
-          <input v-model="schedulerForm.mail_auto_poll_enabled" type="checkbox" />
-          <span>自动收取邮件</span>
-        </label>
-        <div class="scheduler-setting-controls">
-          <div>
-            <label>邮件采集间隔（分钟）</label>
-            <input v-model.number="schedulerForm.mail_auto_poll_interval_minutes" type="number" min="1" />
-          </div>
-          <div>
-            <label>默认邮件扫描数量</label>
-            <input v-model.number="schedulerForm.mail_inbox_max_scan" type="number" min="1" />
-          </div>
-          <div>
-            <label>扫描基准时间（可选）</label>
-            <input v-model="schedulerForm.mail_scan_baseline_at" type="datetime-local" />
-          </div>
-        </div>
-        <label class="checkbox-row scheduler-setting-toggle">
-          <input v-model="schedulerForm.qax_auto_collect_enabled" type="checkbox" />
-          <span>自动采集 QAX</span>
-        </label>
-        <div class="scheduler-setting-controls">
-          <div>
-            <label>QAX 采集间隔（分钟）</label>
-            <input v-model.number="schedulerForm.qax_auto_collect_interval_minutes" type="number" min="1" />
-          </div>
-          <label class="checkbox-row scheduler-inline-checkbox">
-            <input v-model="schedulerForm.qax_browser_visible" type="checkbox" />
-            <span>Playwright 界面可视化</span>
-          </label>
-        </div>
-        <label class="checkbox-row scheduler-setting-toggle">
-          <input v-model="schedulerForm.due_remind_enabled" type="checkbox" />
-          <span>主任务提前提醒</span>
-        </label>
-        <div class="scheduler-setting-controls">
-          <div>
-            <label>当天定时任务时间点</label>
-            <input v-model="schedulerForm.due_remind_run_at" type="time" />
-          </div>
-          <div class="subtle-text scheduler-setting-note">按主任务的“提前多少天提醒”配置，在该时间点生成到期提醒。</div>
-        </div>
 
-        <label class="checkbox-row scheduler-setting-toggle">
-          <input v-model="schedulerForm.overdue_remind_enabled" type="checkbox" />
-          <span>延期未完成任务提醒</span>
-        </label>
-        <div class="scheduler-setting-controls">
-          <div>
-            <label>当天定时任务时间点</label>
-            <input v-model="schedulerForm.overdue_remind_run_at" type="time" />
+      <div class="scheduler-config-stack">
+        <section class="scheduler-config-card">
+          <div class="scheduler-config-header">
+            <div>
+              <h3>自动任务</h3>
+              <p>控制自动收件、QAX 采集和提醒任务的执行节奏。</p>
+            </div>
           </div>
-          <div class="subtle-text scheduler-setting-note">每天扫描已延期或已超过截止时间且未完成的主任务，并发送提醒。</div>
-        </div>
+          <div class="scheduler-setting-grid">
+            <label class="scheduler-toggle-row">
+              <span>自动收取邮件</span>
+              <input v-model="schedulerForm.mail_auto_poll_enabled" type="checkbox" />
+            </label>
+            <div class="scheduler-setting-controls">
+              <div>
+                <label>邮件采集间隔（分钟）</label>
+                <input v-model.number="schedulerForm.mail_auto_poll_interval_minutes" type="number" min="1" />
+              </div>
+              <div>
+                <label>默认邮件扫描数量</label>
+                <input v-model.number="schedulerForm.mail_inbox_max_scan" type="number" min="1" />
+              </div>
+              <div>
+                <label>扫描基准时间（可选）</label>
+                <input v-model="schedulerForm.mail_scan_baseline_at" type="datetime-local" />
+              </div>
+            </div>
+
+            <label class="scheduler-toggle-row">
+              <span>自动采集 QAX</span>
+              <input v-model="schedulerForm.qax_auto_collect_enabled" type="checkbox" />
+            </label>
+            <div class="scheduler-setting-controls">
+              <div>
+                <label>QAX 采集间隔（分钟）</label>
+                <input v-model.number="schedulerForm.qax_auto_collect_interval_minutes" type="number" min="1" />
+              </div>
+              <label class="scheduler-toggle-row scheduler-inline-toggle">
+                <span>显示 Playwright 浏览器</span>
+                <input v-model="schedulerForm.qax_browser_visible" type="checkbox" />
+              </label>
+              <label class="scheduler-toggle-row scheduler-inline-toggle">
+                <span>忽略 HTTPS 证书错误</span>
+                <input v-model="schedulerForm.qax_ignore_https_errors" type="checkbox" />
+              </label>
+            </div>
+
+            <label class="scheduler-toggle-row">
+              <span>主任务到期前提醒</span>
+              <input v-model="schedulerForm.due_remind_enabled" type="checkbox" />
+            </label>
+            <div class="scheduler-setting-controls">
+              <div>
+                <label>每天执行时间</label>
+                <input v-model="schedulerForm.due_remind_run_at" type="time" />
+              </div>
+              <div class="subtle-text scheduler-setting-note">按主任务的“提前多少天提醒”配置，在该时间点生成到期提醒。</div>
+            </div>
+
+            <label class="scheduler-toggle-row">
+              <span>延期未完成任务提醒</span>
+              <input v-model="schedulerForm.overdue_remind_enabled" type="checkbox" />
+            </label>
+            <div class="scheduler-setting-controls">
+              <div>
+                <label>每天执行时间</label>
+                <input v-model="schedulerForm.overdue_remind_run_at" type="time" />
+              </div>
+              <div class="subtle-text scheduler-setting-note">每天扫描已延期或已超过截止时间且未完成的主任务，并自动发送提醒。</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="scheduler-config-card">
+          <div class="scheduler-config-header">
+            <div>
+              <h3>SMTP 发件配置</h3>
+              <p>保存后，“测试 SMTP”和业务通知发送都会立即使用这里的参数。</p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div>
+              <label>SMTP 主机</label>
+              <input v-model.trim="schedulerForm.smtp_host" type="text" placeholder="如 smtp.qq.com" />
+            </div>
+            <div>
+              <label>SMTP 端口</label>
+              <input v-model.number="schedulerForm.smtp_port" type="number" min="1" />
+            </div>
+            <div>
+              <label>SMTP 用户名</label>
+              <input v-model.trim="schedulerForm.smtp_user" type="text" />
+            </div>
+            <div>
+              <label>SMTP 密码 / 授权码</label>
+              <input v-model="schedulerForm.smtp_password" type="password" />
+            </div>
+            <div>
+              <label>发件人地址</label>
+              <input v-model.trim="schedulerForm.smtp_from_address" type="text" />
+            </div>
+            <div>
+              <label>SMTP 超时（秒）</label>
+              <input v-model.number="schedulerForm.smtp_timeout_seconds" type="number" min="1" />
+            </div>
+          </div>
+          <div class="scheduler-toggle-strip">
+            <label class="scheduler-toggle-row scheduler-inline-toggle">
+              <span>启用 STARTTLS</span>
+              <input v-model="schedulerForm.smtp_use_tls" type="checkbox" />
+            </label>
+            <label class="scheduler-toggle-row scheduler-inline-toggle">
+              <span>启用 SSL</span>
+              <input v-model="schedulerForm.smtp_use_ssl" type="checkbox" />
+            </label>
+          </div>
+        </section>
+
+        <section class="scheduler-config-card">
+          <div class="scheduler-config-header">
+            <div>
+              <h3>收件配置</h3>
+              <p>统一维护收件协议，以及 IMAP / POP3 两套参数。切换协议后，测试收件和手动收取会按当前选择执行。</p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div>
+              <label>收件协议</label>
+              <select v-model="schedulerForm.mail_inbox_protocol">
+                <option value="imap">IMAP</option>
+                <option value="pop3">POP3</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="scheduler-dual-grid">
+            <section class="scheduler-subcard">
+              <h4>IMAP</h4>
+              <div class="form-grid">
+                <div>
+                  <label>IMAP 主机</label>
+                  <input v-model.trim="schedulerForm.imap_host" type="text" />
+                </div>
+                <div>
+                  <label>IMAP 端口</label>
+                  <input v-model.number="schedulerForm.imap_port" type="number" min="1" />
+                </div>
+                <div>
+                  <label>IMAP 用户名</label>
+                  <input v-model.trim="schedulerForm.imap_user" type="text" />
+                </div>
+                <div>
+                  <label>IMAP 密码 / 授权码</label>
+                  <input v-model="schedulerForm.imap_password" type="password" />
+                </div>
+              </div>
+              <div class="scheduler-toggle-strip">
+                <label class="scheduler-toggle-row scheduler-inline-toggle">
+                  <span>启用 STARTTLS</span>
+                  <input v-model="schedulerForm.imap_use_tls" type="checkbox" />
+                </label>
+                <label class="scheduler-toggle-row scheduler-inline-toggle">
+                  <span>启用 SSL</span>
+                  <input v-model="schedulerForm.imap_use_ssl" type="checkbox" />
+                </label>
+              </div>
+            </section>
+
+            <section class="scheduler-subcard">
+              <h4>POP3</h4>
+              <div class="form-grid">
+                <div>
+                  <label>POP3 主机</label>
+                  <input v-model.trim="schedulerForm.pop3_host" type="text" />
+                </div>
+                <div>
+                  <label>POP3 端口</label>
+                  <input v-model.number="schedulerForm.pop3_port" type="number" min="1" />
+                </div>
+                <div>
+                  <label>POP3 用户名</label>
+                  <input v-model.trim="schedulerForm.pop3_user" type="text" />
+                </div>
+                <div>
+                  <label>POP3 密码 / 授权码</label>
+                  <input v-model="schedulerForm.pop3_password" type="password" />
+                </div>
+              </div>
+              <div class="scheduler-toggle-strip">
+                <label class="scheduler-toggle-row scheduler-inline-toggle">
+                  <span>启用 STLS / TLS</span>
+                  <input v-model="schedulerForm.pop3_use_tls" type="checkbox" />
+                </label>
+                <label class="scheduler-toggle-row scheduler-inline-toggle">
+                  <span>启用 SSL</span>
+                  <input v-model="schedulerForm.pop3_use_ssl" type="checkbox" />
+                </label>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="scheduler-config-card">
+          <div class="scheduler-config-header">
+            <div>
+              <h3>QAX 配置</h3>
+              <p>保存后，手动采集和自动采集都会直接读取这些参数。</p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div>
+              <label>QAX 登录地址</label>
+              <input v-model.trim="schedulerForm.qax_base_url" type="text" placeholder="如 https://127.0.0.1:28443/login" />
+            </div>
+            <div>
+              <label>QAX 分组名称</label>
+              <input v-model.trim="schedulerForm.qax_group_name" type="text" />
+            </div>
+            <div>
+              <label>QAX 用户名</label>
+              <input v-model.trim="schedulerForm.qax_username" type="text" />
+            </div>
+            <div>
+              <label>QAX 密码</label>
+              <input v-model="schedulerForm.qax_password" type="password" />
+            </div>
+          </div>
+        </section>
       </div>
     </div>
 
@@ -128,7 +293,7 @@
       <div class="section-head">
         <div>
           <h2>落库邮件列表</h2>
-          <p>包含匹配成功和未匹配的落库邮件，可进入详情查看正文、模板和处理结果。</p>
+          <p>包含匹配成功和未匹配的落库邮件，可进入详情页查看正文、模板和处理结果。</p>
         </div>
         <div class="toolbar">
           <button class="button secondary small" :class="{ active: eventFilter === 'all' }" @click="setEventFilter('all')">全部</button>
@@ -201,19 +366,7 @@ const feedback = ref({
   type: 'success',
 })
 const nowTick = ref(Date.now())
-const schedulerForm = ref({
-  mail_auto_poll_enabled: true,
-  mail_auto_poll_interval_minutes: 5,
-  mail_inbox_max_scan: 20,
-  due_remind_enabled: true,
-  due_remind_run_at: '09:00',
-  overdue_remind_enabled: true,
-  overdue_remind_run_at: '09:00',
-  qax_auto_collect_enabled: false,
-  qax_auto_collect_interval_minutes: 60,
-  mail_scan_baseline_at: '',
-  qax_browser_visible: false,
-})
+const schedulerForm = ref(buildDefaultSchedulerForm())
 
 const unmatchedEvents = computed(() => events.value.filter((item) => item.process_status === 'UNMATCHED'))
 
@@ -235,6 +388,52 @@ const countdownText = computed(() => {
 
 let timerId = null
 
+function buildDefaultSchedulerForm() {
+  return {
+    mail_auto_poll_enabled: true,
+    mail_auto_poll_interval_minutes: 5,
+    mail_inbox_max_scan: 20,
+    due_remind_enabled: true,
+    due_remind_run_at: '09:00',
+    overdue_remind_enabled: true,
+    overdue_remind_run_at: '09:00',
+    qax_auto_collect_enabled: false,
+    qax_auto_collect_interval_minutes: 60,
+    mail_scan_baseline_at: '',
+    qax_browser_visible: false,
+    qax_base_url: '',
+    qax_username: '',
+    qax_password: '',
+    qax_group_name: '',
+    qax_ignore_https_errors: true,
+    smtp_host: '',
+    smtp_port: 25,
+    smtp_user: '',
+    smtp_password: '',
+    smtp_from_address: '',
+    smtp_use_tls: false,
+    smtp_use_ssl: false,
+    smtp_timeout_seconds: 20,
+    mail_inbox_protocol: 'imap',
+    imap_host: '',
+    imap_port: 993,
+    imap_user: '',
+    imap_password: '',
+    imap_use_tls: false,
+    imap_use_ssl: true,
+    pop3_host: '',
+    pop3_port: 110,
+    pop3_user: '',
+    pop3_password: '',
+    pop3_use_tls: false,
+    pop3_use_ssl: false,
+  }
+}
+
+function protocolLabel(protocol) {
+  return String(protocol || '').toLowerCase() === 'pop3' ? 'POP3' : 'IMAP'
+}
+
 async function loadEvents() {
   const { data } = await http.get('/admin/mail/events')
   events.value = data
@@ -248,6 +447,7 @@ async function loadPollState() {
 async function loadSchedulerSettings() {
   const { data } = await http.get('/admin/scheduler/settings')
   schedulerForm.value = {
+    ...buildDefaultSchedulerForm(),
     mail_auto_poll_enabled: Boolean(data.mail_auto_poll_enabled),
     mail_auto_poll_interval_minutes: Math.max(1, Math.round(Number(data.mail_auto_poll_interval_seconds || 300) / 60)),
     mail_inbox_max_scan: Number(data.mail_inbox_max_scan || 20),
@@ -259,6 +459,34 @@ async function loadSchedulerSettings() {
     qax_auto_collect_interval_minutes: Math.max(1, Math.round(Number(data.qax_auto_collect_interval_seconds || 3600) / 60)),
     mail_scan_baseline_at: data.mail_scan_baseline_at ? String(data.mail_scan_baseline_at).slice(0, 16) : '',
     qax_browser_visible: Boolean(data.qax_browser_visible),
+    qax_base_url: data.qax_base_url || '',
+    qax_username: data.qax_username || '',
+    qax_password: data.qax_password || '',
+    qax_group_name: data.qax_group_name || '',
+    qax_ignore_https_errors: data.qax_ignore_https_errors !== false,
+    smtp_host: data.smtp_host || '',
+    smtp_port: Number(data.smtp_port || 25),
+    smtp_user: data.smtp_user || '',
+    smtp_password: data.smtp_password || '',
+    smtp_from_address: data.smtp_from_address || '',
+    smtp_use_tls: Boolean(data.smtp_use_tls),
+    smtp_use_ssl: Boolean(data.smtp_use_ssl),
+    smtp_timeout_seconds: Number(data.smtp_timeout_seconds || 20),
+    mail_inbox_protocol: ['imap', 'pop3'].includes(String(data.mail_inbox_protocol || '').toLowerCase())
+      ? String(data.mail_inbox_protocol).toLowerCase()
+      : 'imap',
+    imap_host: data.imap_host || '',
+    imap_port: Number(data.imap_port || 993),
+    imap_user: data.imap_user || '',
+    imap_password: data.imap_password || '',
+    imap_use_tls: Boolean(data.imap_use_tls),
+    imap_use_ssl: data.imap_use_ssl !== false,
+    pop3_host: data.pop3_host || '',
+    pop3_port: Number(data.pop3_port || 110),
+    pop3_user: data.pop3_user || '',
+    pop3_password: data.pop3_password || '',
+    pop3_use_tls: Boolean(data.pop3_use_tls),
+    pop3_use_ssl: Boolean(data.pop3_use_ssl),
   }
 }
 
@@ -308,7 +536,7 @@ async function initializeBaseline() {
   busy.value = true
   try {
     const payload = schedulerForm.value.mail_scan_baseline_at
-      ? { baseline_at: new Date(schedulerForm.value.mail_scan_baseline_at).toISOString() }
+      ? { baseline_at: schedulerForm.value.mail_scan_baseline_at }
       : {}
     const { data } = await http.post('/admin/mail/baseline', payload)
     showFeedback('扫描基准设置', data.message, data.status === 'success' ? 'success' : 'error')
@@ -328,14 +556,21 @@ async function saveSchedulerSettings() {
       mail_auto_poll_interval_seconds: Math.max(1, Number(schedulerForm.value.mail_auto_poll_interval_minutes || 5)) * 60,
       mail_inbox_max_scan: Math.max(1, Number(schedulerForm.value.mail_inbox_max_scan || 20)),
       qax_auto_collect_interval_seconds: Math.max(1, Number(schedulerForm.value.qax_auto_collect_interval_minutes || 60)) * 60,
+      smtp_port: Math.max(1, Number(schedulerForm.value.smtp_port || 25)),
+      smtp_timeout_seconds: Math.max(1, Number(schedulerForm.value.smtp_timeout_seconds || 20)),
+      imap_port: Math.max(1, Number(schedulerForm.value.imap_port || 993)),
+      pop3_port: Math.max(1, Number(schedulerForm.value.pop3_port || 110)),
+      mail_inbox_protocol: ['imap', 'pop3'].includes(String(schedulerForm.value.mail_inbox_protocol || '').toLowerCase())
+        ? String(schedulerForm.value.mail_inbox_protocol).toLowerCase()
+        : 'imap',
       mail_scan_baseline_at: schedulerForm.value.mail_scan_baseline_at
-        ? new Date(schedulerForm.value.mail_scan_baseline_at).toISOString()
+        ? schedulerForm.value.mail_scan_baseline_at
         : null,
     })
-    showFeedback('定时任务设置', '设置已保存', 'success')
-    await loadPollState()
+    showFeedback('计划任务设置', '设置已保存', 'success')
+    await Promise.all([loadPollState(), loadSchedulerSettings()])
   } catch (error) {
-    showFeedback('定时任务设置', error.response?.data?.detail || '保存失败', 'error')
+    showFeedback('计划任务设置', error.response?.data?.detail || '保存失败', 'error')
   } finally {
     busy.value = false
   }
@@ -358,9 +593,8 @@ async function collectQaxStatus() {
   busy.value = true
   try {
     const { data } = await http.post('/admin/qax/collect')
-    const statusType = data.status === 'success' ? 'success' : 'error'
     const summary = `本次采集：更新 ${data.updated_count || 0} 条，失败 ${data.failed_count || 0} 条`
-    showFeedback('QAX 状态采集结果', `${data.message}；${summary}`, statusType)
+    showFeedback('QAX 状态采集结果', `${data.message}；${summary}`, data.status === 'success' ? 'success' : 'error')
     await loadAll()
   } catch (error) {
     showFeedback('QAX 状态采集结果', error.response?.data?.detail || 'QAX 状态采集失败', 'error')

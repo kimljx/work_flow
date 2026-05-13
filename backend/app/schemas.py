@@ -319,6 +319,32 @@ class RuntimeSettingsUpdate(BaseModel):
     qax_auto_collect_interval_seconds: int = 3600
     mail_scan_baseline_at: datetime | None = None
     qax_browser_visible: bool = False
+    qax_base_url: str = ""
+    qax_username: str = ""
+    qax_password: str = ""
+    qax_group_name: str = ""
+    qax_ignore_https_errors: bool = True
+    smtp_host: str = ""
+    smtp_port: int = 25
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_address: str = ""
+    smtp_use_tls: bool = False
+    smtp_use_ssl: bool = False
+    smtp_timeout_seconds: int = 20
+    mail_inbox_protocol: str = "imap"
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_password: str = ""
+    imap_use_tls: bool = False
+    imap_use_ssl: bool = True
+    pop3_host: str = ""
+    pop3_port: int = 110
+    pop3_user: str = ""
+    pop3_password: str = ""
+    pop3_use_tls: bool = False
+    pop3_use_ssl: bool = False
 
 
 class MailBaselineRequest(BaseModel):

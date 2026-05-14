@@ -13,7 +13,7 @@
       <div class="filter-grid task-simple-filter-grid">
         <div class="filter-field">
           <span class="filter-label">搜索</span>
-          <input v-model="keyword" placeholder="搜索任务名称或负责人" @keyup.enter="applyFilters" />
+          <input v-model="keyword" placeholder="搜索任务名称或负责人" />
         </div>
         <div class="filter-field">
           <span class="filter-label">状态</span>
@@ -36,11 +36,11 @@
         </div>
         <div class="filter-field">
           <span class="filter-label">截止日期起</span>
-          <input v-model="dateFrom" type="date" @keyup.enter="applyFilters" />
+          <input v-model="dateFrom" type="date" />
         </div>
         <div class="filter-field">
           <span class="filter-label">截止日期止</span>
-          <input v-model="dateTo" type="date" @keyup.enter="applyFilters" />
+          <input v-model="dateTo" type="date" />
         </div>
       </div>
       <div class="filter-footer">
@@ -126,7 +126,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
@@ -142,13 +142,6 @@ const status = ref('')
 const delayFilter = ref('')
 const dateFrom = ref('')
 const dateTo = ref('')
-const appliedFilters = ref({
-  keyword: '',
-  status: '',
-  delayFilter: '',
-  dateFrom: '',
-  dateTo: '',
-})
 const page = ref(1)
 const pageSize = 10
 const createOpen = ref(false)
@@ -156,22 +149,21 @@ const importOpen = ref(false)
 const editTaskId = ref(null)
 
 const filteredTasks = computed(() => {
-  const filters = appliedFilters.value
-  const query = filters.keyword.trim()
+  const query = keyword.value.trim()
   return tasks.value.filter((item) => {
     const matchKeyword =
       !query ||
       item.title.includes(query) ||
       joinNames(item.responsible_names).includes(query)
-    const matchStatus = !filters.status || item.main_status === filters.status
+    const matchStatus = !status.value || item.main_status === status.value
     const delayState = delayStatus(item).state
     const matchDelay =
-      !filters.delayFilter ||
-      filters.delayFilter === delayState ||
-      (filters.delayFilter === 'normal' && !delayState)
+      !delayFilter.value ||
+      delayFilter.value === delayState ||
+      (delayFilter.value === 'normal' && !delayState)
     const endDate = toDateOnly(item.end_at)
-    const matchDateFrom = !filters.dateFrom || (endDate && endDate >= filters.dateFrom)
-    const matchDateTo = !filters.dateTo || (endDate && endDate <= filters.dateTo)
+    const matchDateFrom = !dateFrom.value || (endDate && endDate >= dateFrom.value)
+    const matchDateTo = !dateTo.value || (endDate && endDate <= dateTo.value)
     return matchKeyword && matchStatus && matchDelay && matchDateFrom && matchDateTo
   })
 })
@@ -181,14 +173,11 @@ const pagedTasks = computed(() => {
   return filteredTasks.value.slice(start, start + pageSize)
 })
 
+watch([keyword, status, delayFilter, dateFrom, dateTo], () => {
+  page.value = 1
+})
+
 function applyFilters() {
-  appliedFilters.value = {
-    keyword: keyword.value,
-    status: status.value,
-    delayFilter: delayFilter.value,
-    dateFrom: dateFrom.value,
-    dateTo: dateTo.value,
-  }
   page.value = 1
 }
 
@@ -198,7 +187,7 @@ function resetFilters() {
   delayFilter.value = ''
   dateFrom.value = ''
   dateTo.value = ''
-  applyFilters()
+  page.value = 1
 }
 
 function statusUi(task) {

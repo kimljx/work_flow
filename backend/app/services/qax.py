@@ -133,6 +133,12 @@ def _is_qax_certificate_error(exc: BaseException) -> bool:
 
 def _wrap_qax_startup_error(exc: BaseException, state: QaxCertificateState) -> QaxAutomationError:
     message = str(exc).strip() or exc.__class__.__name__
+    if "glibc_2.18" in message.lower() or "libc.so.6" in message.lower():
+        return QaxAutomationError(
+            "QAX 浏览器启动失败，当前 Linux 系统的 glibc 版本过低，内置 Chromium 无法运行。"
+            "请重新打包适配当前 Linux 服务器的离线版本，或更换到 glibc 版本兼容的服务器。"
+            f"原始错误：{message}"
+        )
     if _is_qax_certificate_error(exc):
         return QaxAutomationError(f"QAX 浏览器登录出现证书/TLS 错误：{message}。{_build_qax_certificate_hint(state)}")
     return QaxAutomationError(message)
@@ -258,7 +264,10 @@ class QaxAutomationClient:
         certificate_state = _validate_qax_certificates()
         try:
             runtime = load_runtime_settings()
-            launch_options = {"headless": not runtime.qax_browser_visible}
+            launch_options = {
+                "headless": not runtime.qax_browser_visible,
+                "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            }
             executable_path = _local_chromium_executable()
             if executable_path:
                 launch_options["executable_path"] = executable_path

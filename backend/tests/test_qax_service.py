@@ -265,6 +265,17 @@ class QaxServiceTestCase(unittest.TestCase):
             self.assertIn("证书/TLS 错误", str(wrapped))
             self.assertIn("config/login.p12", str(wrapped))
 
+    def test_wrap_qax_startup_error_mentions_glibc_browser_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_root = root / "config"
+            config_root.mkdir()
+            with patch("app.services.qax.PROJECT_ROOT", root):
+                state = _validate_qax_certificates()
+        wrapped = _wrap_qax_startup_error(RuntimeError("/lib64/libc.so.6: version `GLIBC_2.18' not found"), state)
+        self.assertIsInstance(wrapped, QaxAutomationError)
+        self.assertIn("重新打包", str(wrapped))
+
     def test_local_chromium_executable_supports_linux_bundle_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

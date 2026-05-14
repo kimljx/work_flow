@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-"""构建 Linux x86_64 内网离线发布包。
+"""Build the Linux x86_64 offline release package."""
 
-说明：
-1. 该脚本需要在 Linux x86_64 构建机上执行，才能打入匹配平台的 Python 运行时与 Playwright 浏览器。
-2. 目标机无需预装 Python、Node.js 或 Playwright 浏览器。
-3. 输出“目录版发布包 + tar.gz 压缩包”，便于复制、归档和升级。
-"""
-
+import hashlib
+import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -23,6 +20,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OFFLINE_ROOT = PROJECT_ROOT / "deploy" / "offline"
 LINUX_TEMPLATE_ROOT = OFFLINE_ROOT / "linux_py310"
 DIST_ROOT = OFFLINE_ROOT / "dist"
+CACHE_ROOT = OFFLINE_ROOT / "env_cache" / "linux_py310"
+CACHE_PACKAGES_ROOT = CACHE_ROOT / "packages"
+CACHE_RUNTIME_ROOT = CACHE_ROOT / "runtime"
+CACHE_BROWSER_ROOT = CACHE_ROOT / "ms-playwright"
+REQUIREMENTS_PATH = PROJECT_ROOT / "backend" / "requirements.txt"
 PYTHON_BUILD_HOST_CMD = ["python3"]
 LINUX_RUNTIME_RELEASE = "20260414"
 LINUX_RUNTIME_VERSION = "3.10.20"
@@ -37,37 +39,158 @@ LINUX_RUNTIME_URL = (
 BROWSER_NAME = "chromium"
 RELEASE_NAME = f"work_flow_linux_offline_py310_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 RELEASE_ROOT = DIST_ROOT / RELEASE_NAME
+PACKAGE_CACHE_META = CACHE_ROOT / "packages-meta.json"
+RUNTIME_CACHE_META = CACHE_ROOT / "runtime-meta.json"
+BROWSER_CACHE_META = CACHE_ROOT / "browser-meta.json"
+RUNTIME_IMPORT_PROBE = "import fastapi, playwright, zmail, sqlalchemy, anyio, exceptiongroup"
+PACKAGE_FILE_SUFFIXES = (".whl", ".gz", ".zip")
+BROWSER_EXECUTABLE_GLOBS = ("chromium-*/chrome-linux/chrome",)
 
 
 def run_command(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-    """执行外部命令，并在失败时立即终止构建。"""
-
     print(f"[执行] {' '.join(command)}")
     subprocess.run(command, cwd=cwd, check=True, env=env)
 
 
-def ensure_clean_directory(path: Path) -> None:
-    """确保输出目录为空目录。"""
+def run_command_capture(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    print(f"[检查] {' '.join(command)}")
+    return subprocess.run(command, cwd=cwd, env=env, check=False, text=True, capture_output=True)
 
+
+def ensure_clean_directory(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
 
 
-def build_frontend_dist() -> None:
-    """重新构建前端静态资源。"""
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
+
+def copy_directory(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+
+
+def copy_directory_contents(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+
+
+def build_frontend_dist() -> None:
     run_command(["npm", "run", "build"], cwd=PROJECT_ROOT / "frontend")
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def requirements_hash() -> str:
+    return file_sha256(REQUIREMENTS_PATH)
+
+
+def read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_json(path: Path, data: dict) -> None:
+    ensure_parent(path)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def current_cache_meta() -> dict[str, str]:
+    return {
+        "requirements_sha256": requirements_hash(),
+        "linux_runtime_version": LINUX_RUNTIME_VERSION,
+        "linux_runtime_release": LINUX_RUNTIME_RELEASE,
+        "browser_name": BROWSER_NAME,
+    }
+
+
+def package_name_tokens() -> set[str]:
+    names: set[str] = set()
+    requirement_pattern = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
+    for raw_line in REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = requirement_pattern.match(line)
+        if not match:
+            continue
+        names.add(normalize_package_token(match.group(1)))
+    names.update({"pip", "setuptools", "wheel", "exceptiongroup", "sniffio"})
+    return names
+
+
+def normalize_package_token(name: str) -> str:
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
+def package_dir_looks_usable(path: Path) -> bool:
+    if not path.exists():
+        return False
+    files = [item for item in path.iterdir() if item.is_file() and item.suffix.lower() in PACKAGE_FILE_SUFFIXES]
+    if not files:
+        return False
+    available = {normalize_package_token(item.name.split("-")[0]) for item in files}
+    required = package_name_tokens()
+    return required.issubset(available)
+
+
+def meta_matches(path: Path, expected: dict[str, str]) -> bool:
+    data = read_json(path)
+    return all(data.get(key) == value for key, value in expected.items())
+
+
+def discover_previous_linux_release_roots() -> list[Path]:
+    roots: list[Path] = []
+    if not DIST_ROOT.exists():
+        return roots
+    for item in sorted(DIST_ROOT.iterdir(), key=lambda candidate: candidate.name, reverse=True):
+        if not item.is_dir():
+            continue
+        if item == RELEASE_ROOT:
+            continue
+        if item.name.startswith("work_flow_linux_offline_py310_"):
+            roots.append(item)
+    return roots
+
+
+def restore_packages_from_cache_or_previous(target_dir: Path) -> bool:
+    meta = current_cache_meta()
+    if package_dir_looks_usable(CACHE_PACKAGES_ROOT) and meta_matches(PACKAGE_CACHE_META, meta):
+        print(f"[复用] 使用项目缓存依赖包：{CACHE_PACKAGES_ROOT}")
+        copy_directory_contents(CACHE_PACKAGES_ROOT, target_dir)
+        return True
+
+    for release_root in discover_previous_linux_release_roots():
+        candidate = release_root / "packages"
+        if package_dir_looks_usable(candidate):
+            print(f"[复用] 使用旧离线包依赖包：{candidate}")
+            copy_directory_contents(candidate, target_dir)
+            ensure_clean_directory(CACHE_PACKAGES_ROOT)
+            copy_directory_contents(candidate, CACHE_PACKAGES_ROOT)
+            write_json(PACKAGE_CACHE_META, meta)
+            return True
+    return False
+
+
 def download_python_packages(target_dir: Path) -> None:
-    """跨版本下载 Linux Python 3.10 对应的离线依赖包。
-
-    这里显式指定目标平台、实现、ABI 与 Python 版本，避免构建机必须本地安装 Python 3.10。
-    只要构建机有可联网的 Python 3 环境，就能提前把目标 Linux x86_64 所需 wheel 拉齐。
-    """
-
     target_dir.mkdir(parents=True, exist_ok=True)
+    if restore_packages_from_cache_or_previous(target_dir):
+        return
+
     run_command(
         [
             *PYTHON_BUILD_HOST_CMD,
@@ -86,11 +209,9 @@ def download_python_packages(target_dir: Path) -> None:
             "--abi",
             "cp310",
             "-r",
-            str(PROJECT_ROOT / "backend" / "requirements.txt"),
+            str(REQUIREMENTS_PATH),
         ]
     )
-    # pip download may miss marker-gated runtime deps when cross-resolving for cp310.
-    # Pull them explicitly so the embedded Python 3.10 runtime can install offline.
     run_command(
         [
             *PYTHON_BUILD_HOST_CMD,
@@ -127,18 +248,21 @@ def download_python_packages(target_dir: Path) -> None:
         ]
     )
 
+    ensure_clean_directory(CACHE_PACKAGES_ROOT)
+    copy_directory_contents(target_dir, CACHE_PACKAGES_ROOT)
+    write_json(PACKAGE_CACHE_META, current_cache_meta())
+
 
 def download_linux_runtime(target_archive: Path) -> None:
-    """下载 Linux 便携 Python 运行时压缩包。"""
-
+    if target_archive.exists():
+        print(f"[复用] 使用已缓存 Linux Python 运行时压缩包：{target_archive}")
+        return
     print(f"[下载] {LINUX_RUNTIME_URL}")
     target_archive.parent.mkdir(parents=True, exist_ok=True)
     urlretrieve(LINUX_RUNTIME_URL, target_archive)
 
 
 def resolve_linux_python(runtime_python_root: Path) -> Path:
-    """定位解压后的 Python 可执行文件。"""
-
     candidates = [
         runtime_python_root / "bin" / "python3.10",
         runtime_python_root / "install" / "bin" / "python3.10",
@@ -152,13 +276,46 @@ def resolve_linux_python(runtime_python_root: Path) -> Path:
     raise FileNotFoundError("未找到 Linux 离线运行时中的 python3.10")
 
 
-def prepare_linux_runtime(release_root: Path) -> Path:
-    """准备 Linux 内置 Python 运行时并预装依赖。"""
+def runtime_python_is_usable(runtime_python_root: Path) -> bool:
+    try:
+        runtime_python = resolve_linux_python(runtime_python_root)
+    except FileNotFoundError:
+        return False
+    result = run_command_capture([str(runtime_python), "-c", RUNTIME_IMPORT_PROBE])
+    if result.returncode == 0:
+        return True
+    if result.stderr:
+        print(result.stderr.strip())
+    return False
 
+
+def restore_runtime_from_cache_or_previous(target_root: Path) -> bool:
+    meta = current_cache_meta()
+    if CACHE_RUNTIME_ROOT.exists() and meta_matches(RUNTIME_CACHE_META, meta) and runtime_python_is_usable(CACHE_RUNTIME_ROOT):
+        print(f"[复用] 使用项目缓存 Python 运行时：{CACHE_RUNTIME_ROOT}")
+        copy_directory(CACHE_RUNTIME_ROOT, target_root)
+        return True
+
+    for release_root in discover_previous_linux_release_roots():
+        candidate = release_root / "runtime" / "python"
+        if runtime_python_is_usable(candidate):
+            print(f"[复用] 使用旧离线包 Python 运行时：{candidate}")
+            copy_directory(candidate, target_root)
+            ensure_clean_directory(CACHE_RUNTIME_ROOT)
+            copy_directory_contents(candidate, CACHE_RUNTIME_ROOT)
+            write_json(RUNTIME_CACHE_META, meta)
+            return True
+    return False
+
+
+def prepare_linux_runtime(release_root: Path) -> Path:
     runtime_root = release_root / "runtime"
     runtime_python_root = runtime_root / "python"
-    archive_path = runtime_root / LINUX_RUNTIME_ASSET
+    archive_path = CACHE_RUNTIME_ROOT / LINUX_RUNTIME_ASSET
     extract_root = runtime_root / "_extract"
+
+    if restore_runtime_from_cache_or_previous(runtime_python_root):
+        return resolve_linux_python(runtime_python_root)
 
     download_linux_runtime(archive_path)
     ensure_clean_directory(extract_root)
@@ -187,28 +344,59 @@ def prepare_linux_runtime(release_root: Path) -> Path:
             str(release_root / "packages"),
             "--upgrade",
             "-r",
-            str(PROJECT_ROOT / "backend" / "requirements.txt"),
+            str(REQUIREMENTS_PATH),
         ]
     )
+
+    ensure_clean_directory(CACHE_RUNTIME_ROOT)
+    copy_directory_contents(runtime_python_root, CACHE_RUNTIME_ROOT)
+    write_json(RUNTIME_CACHE_META, current_cache_meta())
     return runtime_python
 
 
+def browser_dir_looks_usable(path: Path) -> bool:
+    if not path.exists():
+        return False
+    return any(path.glob(pattern) for pattern in BROWSER_EXECUTABLE_GLOBS)
+
+
+def restore_browser_from_cache_or_previous(target_root: Path) -> bool:
+    meta = current_cache_meta()
+    if browser_dir_looks_usable(CACHE_BROWSER_ROOT) and meta_matches(BROWSER_CACHE_META, meta):
+        print(f"[复用] 使用项目缓存 Playwright 浏览器：{CACHE_BROWSER_ROOT}")
+        copy_directory(CACHE_BROWSER_ROOT, target_root)
+        return True
+
+    for release_root in discover_previous_linux_release_roots():
+        candidate = release_root / "runtime" / "ms-playwright"
+        if browser_dir_looks_usable(candidate):
+            print(f"[复用] 使用旧离线包 Playwright 浏览器：{candidate}")
+            copy_directory(candidate, target_root)
+            ensure_clean_directory(CACHE_BROWSER_ROOT)
+            copy_directory_contents(candidate, CACHE_BROWSER_ROOT)
+            write_json(BROWSER_CACHE_META, meta)
+            return True
+    return False
+
+
 def install_playwright_browser(runtime_python: Path, release_root: Path) -> None:
-    """将 QAX 依赖的 Chromium 浏览器安装到发布包内。"""
-
     browser_root = release_root / "runtime" / "ms-playwright"
-    browser_root.mkdir(parents=True, exist_ok=True)
+    if restore_browser_from_cache_or_previous(browser_root):
+        return
 
+    browser_root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_root)
     env["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
 
     run_command([str(runtime_python), "-m", "playwright", "install", BROWSER_NAME], env=env)
 
+    ensure_clean_directory(CACHE_BROWSER_ROOT)
+    copy_directory_contents(browser_root, CACHE_BROWSER_ROOT)
+    write_json(BROWSER_CACHE_META, current_cache_meta())
+
 
 def copytree_filtered(source: Path, destination: Path) -> None:
-    """复制目录，同时排除缓存文件。"""
-
     shutil.copytree(
         source,
         destination,
@@ -217,8 +405,6 @@ def copytree_filtered(source: Path, destination: Path) -> None:
 
 
 def copy_runtime_config_files(destination: Path) -> None:
-    """复制运行期配置文件，并将浏览器证书一并打入离线包。"""
-
     source_root = PROJECT_ROOT / "config"
     destination.mkdir(parents=True, exist_ok=True)
     if not source_root.exists():
@@ -234,15 +420,11 @@ def copy_runtime_config_files(destination: Path) -> None:
 
 
 def ensure_executable(path: Path) -> None:
-    """为 shell 脚本补充可执行权限。"""
-
     current_mode = path.stat().st_mode
     path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def copy_release_files(release_root: Path) -> None:
-    """复制 Linux 离线发布包所需文件。"""
-
     app_root = release_root / "app"
     backend_root = app_root / "backend"
     frontend_root = app_root / "frontend"
@@ -278,15 +460,14 @@ def copy_release_files(release_root: Path) -> None:
         "DEPLOY_ON_LINUX_SERVER.txt",
     ):
         shutil.copy2(LINUX_TEMPLATE_ROOT / file_name, release_root / file_name)
-        ensure_executable(release_root / file_name)
+        if file_name.endswith(".sh"):
+            ensure_executable(release_root / file_name)
 
     for script_path in tools_root.rglob("*.sh"):
         ensure_executable(script_path)
 
 
 def tar_release_directory(release_root: Path) -> Path:
-    """将目录版发布包压缩为 tar.gz 文件。"""
-
     tar_path = release_root.with_suffix(".tar.gz")
     if tar_path.exists():
         tar_path.unlink()
@@ -297,13 +478,12 @@ def tar_release_directory(release_root: Path) -> Path:
 
 
 def main() -> int:
-    """执行 Linux 离线发布包构建主流程。"""
-
     if sys.platform != "linux":
         print("Linux 离线发布包请在 Linux x86_64 构建机上执行。")
         return 1
 
     DIST_ROOT.mkdir(parents=True, exist_ok=True)
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     ensure_clean_directory(RELEASE_ROOT)
     ensure_clean_directory(RELEASE_ROOT / "packages")
 
@@ -318,6 +498,7 @@ def main() -> int:
     print("Linux 离线发布包已生成：")
     print(f"- 目录版：{RELEASE_ROOT}")
     print(f"- 压缩包：{tar_path}")
+    print(f"- 环境缓存：{CACHE_ROOT}")
     return 0
 
 

@@ -28,6 +28,13 @@ ENV/
 frontend/node_modules/
 frontend/dist/
 
+# Offline build cache
+deploy/offline/env_cache/
+deploy/offline/browser_cache/
+
+# Local certificates
+config/*.cer
+
 # IDE
 .idea/
 .vscode/

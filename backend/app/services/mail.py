@@ -13,6 +13,7 @@ import html as html_lib
 import imaplib
 import json
 import logging
+import os
 import poplib
 import re
 import ssl
@@ -33,7 +34,7 @@ from zmail.mime import Mail as ZmailMime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.constants import ADMIN_ROLES
 from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
@@ -49,8 +50,73 @@ _MAIL_POLL_EXECUTION_LOCK = threading.Lock()
 _MAIL_HEADER_FETCH = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)]"
 _MAIL_BODY_FETCH_BYTES = 64 * 1024
 _POP3_BODY_PREVIEW_LINES = 400
+_MAIL_HOSTS_PATH = PROJECT_ROOT / "config" / "mail-hosts.json"
 logger = logging.getLogger(__name__)
 PreparedMailTemplate = tuple[Template, tuple[str, ...], tuple[str, ...]]
+
+
+def _parse_mail_host_ip_map(value: str) -> dict[str, str]:
+    text = (value or "").strip()
+    if not text:
+        return {}
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        raw = None
+
+    if isinstance(raw, dict):
+        source = raw.get("hosts", raw)
+        if isinstance(source, dict):
+            return {str(host).strip().lower(): str(ip).strip() for host, ip in source.items() if str(host).strip() and str(ip).strip()}
+
+    result: dict[str, str] = {}
+    for item in re.split(r"[;,]\s*", text):
+        if not item.strip():
+            continue
+        if "=" in item:
+            host, ip = item.split("=", 1)
+        elif ":" in item:
+            host, ip = item.split(":", 1)
+        else:
+            continue
+        host = host.strip().lower()
+        ip = ip.strip()
+        if host and ip:
+            result[host] = ip
+    return result
+
+
+def _mail_host_ip_overrides() -> dict[str, str]:
+    overrides = _parse_mail_host_ip_map(os.getenv("MAIL_HOST_IP_MAP", ""))
+    if _MAIL_HOSTS_PATH.exists():
+        try:
+            file_overrides = _parse_mail_host_ip_map(_MAIL_HOSTS_PATH.read_text(encoding="utf-8"))
+        except OSError:
+            file_overrides = {}
+        overrides.update(file_overrides)
+    return overrides
+
+
+@contextmanager
+def _patched_mail_dns_resolution() -> Iterator[dict[str, str]]:
+    """Resolve configured mail hostnames to fixed IPs without changing system DNS."""
+
+    overrides = _mail_host_ip_overrides()
+    if not overrides:
+        yield overrides
+        return
+
+    original_getaddrinfo = socket.getaddrinfo
+
+    def mapped_getaddrinfo(host: object, port: object, *args: object, **kwargs: object) -> list[tuple]:
+        mapped_host = overrides.get(str(host).strip().lower()) if host is not None else None
+        return original_getaddrinfo(mapped_host or host, port, *args, **kwargs)
+
+    socket.getaddrinfo = mapped_getaddrinfo  # type: ignore[assignment]
+    try:
+        yield overrides
+    finally:
+        socket.getaddrinfo = original_getaddrinfo  # type: ignore[assignment]
 
 
 def _mark_notification_recipient_replied(
@@ -403,41 +469,43 @@ def _open_smtp_connection() -> Iterator[ZmailSMTPServer]:
     """统一通过 zmail SMTPServer 打开 SMTP 连接。"""
 
     server = _make_zmail_smtp_server()
-    if settings.smtp_user:
-        with server as opened_server:
-            yield opened_server
-        return
+    with _patched_mail_dns_resolution():
+        if settings.smtp_user:
+            with server as opened_server:
+                yield opened_server
+            return
 
-    server._make_server()
-    try:
-        if server.tls:
-            server.stls()
-        yield server
-    finally:
-        if server.server is not None:
-            try:
-                server.server.quit()
-            except smtplib.SMTPServerDisconnected:
-                pass
-            finally:
+        server._make_server()
+        try:
+            if server.tls:
+                server.stls()
+            yield server
+        finally:
+            if server.server is not None:
                 try:
-                    server.server.close()
-                except Exception:
+                    server.server.quit()
+                except smtplib.SMTPServerDisconnected:
                     pass
-                server._remove_server()
+                finally:
+                    try:
+                        server.server.close()
+                    except Exception:
+                        pass
+                    server._remove_server()
 
 
 def _open_imap_connection() -> imaplib.IMAP4:
     """按配置自动选择普通 IMAP、STARTTLS 或 SSL IMAP 连接。"""
     use_ssl = settings.imap_use_ssl or settings.imap_port == 993
-    if use_ssl:
-        return imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
+    with _patched_mail_dns_resolution():
+        if use_ssl:
+            return imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
 
-    mailbox = imaplib.IMAP4(settings.imap_host, settings.imap_port)
-    if settings.imap_use_tls:
-        # 仅在明确要求 STARTTLS 时升级连接，避免把纯明文端口误当成 SSL 端口处理。
-        mailbox.starttls()
-    return mailbox
+        mailbox = imaplib.IMAP4(settings.imap_host, settings.imap_port)
+        if settings.imap_use_tls:
+            # 仅在明确要求 STARTTLS 时升级连接，避免把纯明文端口误当成 SSL 端口处理。
+            mailbox.starttls()
+        return mailbox
 
 
 def _smtp_ssl_flag() -> bool:
@@ -853,8 +921,9 @@ def diagnose_inbox_settings() -> dict[str, str]:
             return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
         try:
             mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
-            with mail_server.pop_server:
-                pass
+            with _patched_mail_dns_resolution():
+                with mail_server.pop_server:
+                    pass
             return {"status": "success", "message": "POP3 连接与登录成功，可以正常读取收件箱。"}
         except ssl.SSLError as exc:
             return {"status": "failed", "message": _pop3_ssl_error_hint(exc)}
@@ -1230,7 +1299,7 @@ def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str |
 
     mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
 
-    with mail_server.pop_server as pop:
+    with _patched_mail_dns_resolution(), mail_server.pop_server as pop:
         _, listings, _ = pop.server.list()
         message_numbers = [int(line.split()[0]) for line in listings if line]
         total_count = len(message_numbers)

@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+BROWSER_EXECUTABLE_GLOBS = (
+    "chromium-*/chrome-linux/chrome",
+    "chromium-*/chrome-linux64/chrome",
+)
 
 
 def _print(message: str) -> None:
@@ -44,6 +50,51 @@ def _print_certificate_guidance(config_root: Path) -> None:
         _print("[证书提示] 当前只有公钥/信任链证书，若目标系统要求客户端证书登录，通常还需要 .p12 或 .pfx。")
     if certs:
         _print("[证书提示] 如内网页面依赖自签发或内网 CA，仍可能需要在容器、宿主机或浏览器环境中导入信任链。")
+
+
+def _find_browser_executable(browser_root: Path) -> Path | None:
+    for pattern in BROWSER_EXECUTABLE_GLOBS:
+        candidates = sorted(browser_root.glob(pattern), reverse=True)
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _missing_browser_libraries(browser_executable: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["ldd", str(browser_executable)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError:
+        return ["当前系统没有 ldd 命令，无法自动检查 Chromium 动态库依赖。"]
+    except subprocess.TimeoutExpired:
+        return ["ldd 检查 Chromium 动态库依赖超时，请手动执行 ldd 命令确认。"]
+
+    output = "\n".join(item for item in (result.stdout, result.stderr) if item)
+    return [line.strip() for line in output.splitlines() if "not found" in line]
+
+
+def _print_browser_dependency_guidance(browser_root: Path) -> None:
+    browser_executable = _find_browser_executable(browser_root)
+    if browser_executable is None:
+        _print("[浏览器检查] 未找到内置 Chromium 可执行文件，QAX 采集将无法启动浏览器。")
+        return
+
+    _print(f"[浏览器检查] Chromium 路径：{browser_executable}")
+    missing = _missing_browser_libraries(browser_executable)
+    if not missing:
+        _print("[浏览器检查] Chromium 动态库依赖检查通过。")
+        return
+
+    _print("[浏览器检查] Chromium 缺少以下 Linux 系统依赖库，QAX 采集可能报 driver 连接断开：")
+    for line in missing:
+        _print(f"  - {line}")
+    _print("[浏览器检查] 请在服务器补齐上述 RPM/系统依赖后再执行手动采集。")
 
 
 def main(argv: list[str]) -> int:
@@ -103,6 +154,7 @@ def main(argv: list[str]) -> int:
     os.environ["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
 
     _print("[5/5] 校验运行时依赖")
+    _print_browser_dependency_guidance(browser_root)
     try:
         __import__("fastapi")
         __import__("uvicorn")

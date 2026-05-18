@@ -12,7 +12,7 @@ import shutil
 import sys
 
 
-def _backup_current_files(root: Path, db_file: Path, env_file: Path) -> None:
+def _backup_current_files(root: Path, db_file: Path, env_file: Path, runtime_settings_file: Path) -> None:
     """恢复前先保护性备份当前数据。"""
 
     guard_dir = root / "backup" / f"_restore_guard_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -22,6 +22,10 @@ def _backup_current_files(root: Path, db_file: Path, env_file: Path) -> None:
         shutil.copy2(db_file, guard_dir / "app.db")
     if env_file.exists():
         shutil.copy2(env_file, guard_dir / ".env")
+    if runtime_settings_file.exists():
+        guard_config_dir = guard_dir / "config"
+        guard_config_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(runtime_settings_file, guard_config_dir / "runtime-settings.json")
 
     print(f"已先备份当前数据到：{guard_dir}")
 
@@ -69,6 +73,7 @@ def main(argv: list[str]) -> int:
     backup_root = root / "backup"
     db_file = app_root / "backend" / "data" / "app.db"
     env_file = app_root / ".env"
+    runtime_settings_file = app_root / "config" / "runtime-settings.json"
 
     backup_dir = _choose_backup_dir(backup_root, argv)
     if backup_dir is None:
@@ -82,10 +87,11 @@ def main(argv: list[str]) -> int:
         return 1
 
     db_file.parent.mkdir(parents=True, exist_ok=True)
-    _backup_current_files(root, db_file, env_file)
+    _backup_current_files(root, db_file, env_file, runtime_settings_file)
 
     source_db = backup_dir / "app.db"
     source_env = backup_dir / ".env"
+    source_runtime_settings = backup_dir / "config" / "runtime-settings.json"
 
     if source_db.exists():
         shutil.copy2(source_db, db_file)
@@ -98,6 +104,13 @@ def main(argv: list[str]) -> int:
         print("已恢复 .env 配置文件。")
     else:
         print("备份中未找到 .env，配置文件未恢复。")
+
+    if source_runtime_settings.exists():
+        runtime_settings_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_runtime_settings, runtime_settings_file)
+        print("已恢复界面运行时配置 config/runtime-settings.json。")
+    else:
+        print("备份中未找到 config/runtime-settings.json，界面运行时配置未恢复。")
 
     print()
     print("恢复完成。建议重新启动系统使配置与数据生效。")

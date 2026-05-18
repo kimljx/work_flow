@@ -5,6 +5,7 @@ from __future__ import annotations
 负责备份：
 1. SQLite 数据库 `app.db`
 2. 运行配置 `.env`
+3. 界面运行时配置 `config/runtime-settings.json`
 """
 
 from datetime import datetime
@@ -20,6 +21,7 @@ def main() -> int:
     backup_root = root / "backup"
     db_file = app_root / "backend" / "data" / "app.db"
     env_file = app_root / ".env"
+    runtime_settings_file = app_root / "config" / "runtime-settings.json"
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target_dir = backup_root / stamp
@@ -40,6 +42,15 @@ def main() -> int:
         copied_any = True
     else:
         print("未找到 .env 配置文件，已跳过配置备份。")
+
+    if runtime_settings_file.exists():
+        target_config_dir = target_dir / "config"
+        target_config_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(runtime_settings_file, target_config_dir / "runtime-settings.json")
+        print(f"已备份界面运行时配置：{target_config_dir / 'runtime-settings.json'}")
+        copied_any = True
+    else:
+        print("未找到 config/runtime-settings.json，已跳过界面运行时配置备份。")
 
     if not copied_any:
         print("当前没有可备份的数据文件。")

@@ -18,6 +18,8 @@ from app.services.mail import (
     _mark_notification_recipient_replied,
     _extract_text_body,
     _find_task_id,
+    _parse_mail_host_ip_map,
+    _patched_mail_dns_resolution,
     _plain_text_to_html,
     diagnose_imap_settings,
     diagnose_mail_settings,
@@ -32,6 +34,34 @@ class MailServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
+
+    def test_parse_mail_host_ip_map_supports_json_and_pairs(self) -> None:
+        self.assertEqual(
+            _parse_mail_host_ip_map('{"smtp.example.com":"10.0.0.8","POP.EXAMPLE.COM":"10.0.0.9"}'),
+            {"smtp.example.com": "10.0.0.8", "pop.example.com": "10.0.0.9"},
+        )
+        self.assertEqual(
+            _parse_mail_host_ip_map("smtp.example.com=10.0.0.8;pop.example.com=10.0.0.9"),
+            {"smtp.example.com": "10.0.0.8", "pop.example.com": "10.0.0.9"},
+        )
+
+    def test_patched_mail_dns_resolution_maps_domain_to_ip(self) -> None:
+        import app.services.mail as mail_module
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_file = Path(temp_dir) / "missing-mail-hosts.json"
+            with patch.dict("os.environ", {"MAIL_HOST_IP_MAP": "smtp.example.com=10.0.0.8"}), patch.object(
+                mail_module,
+                "_MAIL_HOSTS_PATH",
+                missing_file,
+            ), patch("app.services.mail.socket.getaddrinfo") as mocked_getaddrinfo:
+                mocked_getaddrinfo.return_value = []
+                with _patched_mail_dns_resolution():
+                    socket.getaddrinfo("smtp.example.com", 25)
+
+        mocked_getaddrinfo.assert_called_once()
+        self.assertEqual(mocked_getaddrinfo.call_args.args[0], "10.0.0.8")
+        self.assertEqual(mocked_getaddrinfo.call_args.args[1], 25)
 
     def test_send_mail_returns_reason_when_smtp_is_missing(self) -> None:
         original_host = settings.smtp_host

@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import urlretrieve
+from zipfile import ZipFile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OFFLINE_ROOT = PROJECT_ROOT / "deploy" / "offline"
@@ -24,6 +25,16 @@ CACHE_ROOT = OFFLINE_ROOT / "env_cache" / "linux_py310"
 CACHE_PACKAGES_ROOT = CACHE_ROOT / "packages"
 CACHE_RUNTIME_ROOT = CACHE_ROOT / "runtime"
 CACHE_BROWSER_ROOT = CACHE_ROOT / "ms-playwright"
+COMPAT_BROWSER_REVISION = "1169"
+COMPAT_BROWSER_VERSION = "136.0.7103.25"
+COMPAT_BROWSER_CACHE_ROOT = OFFLINE_ROOT / "browser_cache" / f"chromium-{COMPAT_BROWSER_REVISION}"
+COMPAT_BROWSER_LINUX_ROOT = COMPAT_BROWSER_CACHE_ROOT / "linux" / "chrome-linux"
+COMPAT_BROWSER_ZIP = COMPAT_BROWSER_CACHE_ROOT / "chromium-linux.zip"
+COMPAT_BROWSER_URLS = (
+    f"https://playwright.azureedge.net/builds/chromium/{COMPAT_BROWSER_REVISION}/chromium-linux.zip",
+    f"https://playwright-akamai.azureedge.net/builds/chromium/{COMPAT_BROWSER_REVISION}/chromium-linux.zip",
+    f"https://playwright-verizon.azureedge.net/builds/chromium/{COMPAT_BROWSER_REVISION}/chromium-linux.zip",
+)
 REQUIREMENTS_PATH = PROJECT_ROOT / "backend" / "requirements.txt"
 PYTHON_BUILD_HOST_CMD = ["python3"]
 LINUX_RUNTIME_RELEASE = "20260414"
@@ -115,6 +126,30 @@ def current_cache_meta() -> dict[str, str]:
         "linux_runtime_version": LINUX_RUNTIME_VERSION,
         "linux_runtime_release": LINUX_RUNTIME_RELEASE,
         "browser_name": BROWSER_NAME,
+        "browser_revision": COMPAT_BROWSER_REVISION,
+        "browser_version": COMPAT_BROWSER_VERSION,
+    }
+
+
+def package_cache_meta() -> dict[str, str]:
+    return {
+        "requirements_sha256": requirements_hash(),
+    }
+
+
+def runtime_cache_meta() -> dict[str, str]:
+    return {
+        "requirements_sha256": requirements_hash(),
+        "linux_runtime_version": LINUX_RUNTIME_VERSION,
+        "linux_runtime_release": LINUX_RUNTIME_RELEASE,
+    }
+
+
+def browser_cache_meta() -> dict[str, str]:
+    return {
+        "browser_name": BROWSER_NAME,
+        "browser_revision": COMPAT_BROWSER_REVISION,
+        "browser_version": COMPAT_BROWSER_VERSION,
     }
 
 
@@ -168,11 +203,13 @@ def discover_previous_linux_release_roots() -> list[Path]:
 
 
 def restore_packages_from_cache_or_previous(target_dir: Path) -> bool:
-    meta = current_cache_meta()
+    meta = package_cache_meta()
     if package_dir_looks_usable(CACHE_PACKAGES_ROOT) and meta_matches(PACKAGE_CACHE_META, meta):
         print(f"[复用] 使用项目缓存依赖包：{CACHE_PACKAGES_ROOT}")
         copy_directory_contents(CACHE_PACKAGES_ROOT, target_dir)
         return True
+
+    return False
 
     for release_root in discover_previous_linux_release_roots():
         candidate = release_root / "packages"
@@ -250,7 +287,7 @@ def download_python_packages(target_dir: Path) -> None:
 
     ensure_clean_directory(CACHE_PACKAGES_ROOT)
     copy_directory_contents(target_dir, CACHE_PACKAGES_ROOT)
-    write_json(PACKAGE_CACHE_META, current_cache_meta())
+    write_json(PACKAGE_CACHE_META, package_cache_meta())
 
 
 def download_linux_runtime(target_archive: Path) -> None:
@@ -290,7 +327,7 @@ def runtime_python_is_usable(runtime_python_root: Path) -> bool:
 
 
 def restore_runtime_from_cache_or_previous(target_root: Path) -> bool:
-    meta = current_cache_meta()
+    meta = runtime_cache_meta()
     if CACHE_RUNTIME_ROOT.exists() and meta_matches(RUNTIME_CACHE_META, meta) and runtime_python_is_usable(CACHE_RUNTIME_ROOT):
         print(f"[复用] 使用项目缓存 Python 运行时：{CACHE_RUNTIME_ROOT}")
         copy_directory(CACHE_RUNTIME_ROOT, target_root)
@@ -350,7 +387,7 @@ def prepare_linux_runtime(release_root: Path) -> Path:
 
     ensure_clean_directory(CACHE_RUNTIME_ROOT)
     copy_directory_contents(runtime_python_root, CACHE_RUNTIME_ROOT)
-    write_json(RUNTIME_CACHE_META, current_cache_meta())
+    write_json(RUNTIME_CACHE_META, runtime_cache_meta())
     return runtime_python
 
 
@@ -360,8 +397,15 @@ def browser_dir_looks_usable(path: Path) -> bool:
     return any(path.glob(pattern) for pattern in BROWSER_EXECUTABLE_GLOBS)
 
 
-def restore_browser_from_cache_or_previous(target_root: Path) -> bool:
-    meta = current_cache_meta()
+def compatible_browser_cache_looks_usable(path: Path) -> bool:
+    return (path / f"chromium-{COMPAT_BROWSER_REVISION}" / "chrome-linux" / "chrome").exists()
+
+
+def restore_browser_from_cache(target_root: Path) -> bool:
+    # Do not fall back to previous release browsers here. Linux packages must
+    # always use the Chromium revision paired with the pinned Playwright version.
+    return False
+    meta = browser_cache_meta()
     if browser_dir_looks_usable(CACHE_BROWSER_ROOT) and meta_matches(BROWSER_CACHE_META, meta):
         print(f"[复用] 使用项目缓存 Playwright 浏览器：{CACHE_BROWSER_ROOT}")
         copy_directory(CACHE_BROWSER_ROOT, target_root)
@@ -379,21 +423,58 @@ def restore_browser_from_cache_or_previous(target_root: Path) -> bool:
     return False
 
 
+def download_compatible_browser_archive() -> None:
+    if COMPAT_BROWSER_ZIP.exists():
+        return
+    COMPAT_BROWSER_ZIP.parent.mkdir(parents=True, exist_ok=True)
+    last_error: Exception | None = None
+    for url in COMPAT_BROWSER_URLS:
+        try:
+            print(f"[browser] Download Chromium {COMPAT_BROWSER_VERSION}: {url}")
+            urlretrieve(url, COMPAT_BROWSER_ZIP)
+            return
+        except Exception as exc:
+            last_error = exc
+            if COMPAT_BROWSER_ZIP.exists():
+                COMPAT_BROWSER_ZIP.unlink()
+            print(f"[browser] Download failed: {exc}")
+    raise RuntimeError(f"Failed to download Chromium {COMPAT_BROWSER_VERSION}") from last_error
+
+
+def ensure_compatible_browser_source() -> Path:
+    executable = COMPAT_BROWSER_LINUX_ROOT / "chrome"
+    if executable.exists():
+        return COMPAT_BROWSER_LINUX_ROOT
+
+    download_compatible_browser_archive()
+    extract_root = COMPAT_BROWSER_CACHE_ROOT / "linux"
+    ensure_clean_directory(extract_root)
+    with ZipFile(COMPAT_BROWSER_ZIP) as zip_file:
+        zip_file.extractall(extract_root)
+
+    if executable.exists():
+        return COMPAT_BROWSER_LINUX_ROOT
+    raise RuntimeError(f"Chromium archive did not contain expected executable: {executable}")
+
+
 def install_playwright_browser(runtime_python: Path, release_root: Path) -> None:
     browser_root = release_root / "runtime" / "ms-playwright"
-    if restore_browser_from_cache_or_previous(browser_root):
+    if compatible_browser_cache_looks_usable(CACHE_BROWSER_ROOT) and meta_matches(BROWSER_CACHE_META, browser_cache_meta()):
+        print(f"[browser] Reuse Playwright-compatible Chromium cache: {CACHE_BROWSER_ROOT}")
+        copy_directory(CACHE_BROWSER_ROOT, browser_root)
         return
 
-    browser_root.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_root)
-    env["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
-
-    run_command([str(runtime_python), "-m", "playwright", "install", BROWSER_NAME], env=env)
-
+    source_root = ensure_compatible_browser_source()
+    target_root = browser_root / f"chromium-{COMPAT_BROWSER_REVISION}" / "chrome-linux"
+    print(f"[browser] Package Playwright-compatible Chromium {COMPAT_BROWSER_VERSION}: {source_root}")
+    copy_directory(source_root, target_root)
+    for executable_name in ("chrome", "chrome_crashpad_handler", "chrome_sandbox"):
+        executable = target_root / executable_name
+        if executable.exists():
+            ensure_executable(executable)
     ensure_clean_directory(CACHE_BROWSER_ROOT)
     copy_directory_contents(browser_root, CACHE_BROWSER_ROOT)
-    write_json(BROWSER_CACHE_META, current_cache_meta())
+    write_json(BROWSER_CACHE_META, browser_cache_meta())
 
 
 def copytree_filtered(source: Path, destination: Path) -> None:

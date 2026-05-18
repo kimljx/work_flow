@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import threading
 from typing import Any
 
@@ -41,6 +44,12 @@ QAX_BROWSER_EXECUTABLE_GLOBS = (
     "chromium-*/chrome-win/chrome.exe",
     "chromium-*/chrome-linux/chrome",
     "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+)
+QAX_DEBUG_DIR = PROJECT_ROOT / "local" / "logs" / "qax_debug"
+QAX_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/136.0.0.0 Safari/537.36"
 )
 
 
@@ -175,6 +184,39 @@ def _local_chromium_executable() -> str | None:
     return None
 
 
+def _check_chromium_runtime_dependencies(executable_path: str | None) -> None:
+    if not executable_path or sys.platform.startswith("win"):
+        return
+    executable = Path(executable_path)
+    if not executable.exists():
+        return
+    try:
+        result = subprocess.run(
+            ["ldd", str(executable)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    output = "\n".join(item for item in (result.stdout, result.stderr) if item)
+    missing_lines = [line.strip() for line in output.splitlines() if "not found" in line]
+    if missing_lines:
+        missing = "; ".join(missing_lines)
+        raise QaxAutomationError(f"QAX 浏览器缺少 Linux 系统依赖库，请先在服务器补齐后再采集：{missing}")
+
+
+def _format_request_failure(request: Any) -> str:
+    failure = getattr(request, "failure", None)
+    if callable(failure):
+        try:
+            failure = failure()
+        except Exception as exc:  # noqa: BLE001
+            failure = str(exc)
+    return f"{getattr(request, 'method', '')} {getattr(request, 'url', '')} -> {failure or 'failed'}"
+
+
 @dataclass
 class QaxTaskStatus:
     """描述单条 QAX 任务的查询结果。"""
@@ -254,6 +296,10 @@ class QaxAutomationClient:
         self._context: Any | None = None
         self.page: Any | None = None
         self._timeout_error: Any | None = None
+        self._console_messages: list[str] = []
+        self._page_errors: list[str] = []
+        self._request_failures: list[str] = []
+        self._bad_responses: list[str] = []
 
     async def __aenter__(self) -> "QaxAutomationClient":
         _ensure_local_playwright_browser_path()
@@ -270,10 +316,17 @@ class QaxAutomationClient:
             }
             executable_path = _local_chromium_executable()
             if executable_path:
+                _check_chromium_runtime_dependencies(executable_path)
                 launch_options["executable_path"] = executable_path
             self._browser = await playwright.chromium.launch(**launch_options)
-            self._context = await self._browser.new_context(ignore_https_errors=settings.qax_ignore_https_errors)
+            self._context = await self._browser.new_context(
+                ignore_https_errors=settings.qax_ignore_https_errors,
+                locale="zh-CN",
+                user_agent=QAX_BROWSER_USER_AGENT,
+                viewport={"width": 1366, "height": 768},
+            )
             self.page = await self._context.new_page()
+            self._attach_page_diagnostics()
             await self._login_and_open_task_page()
             return self
         except Exception as exc:
@@ -288,12 +341,82 @@ class QaxAutomationClient:
         if self._playwright_cm is not None:
             await self._playwright_cm.__aexit__(exc_type, exc, tb)
 
+    def _attach_page_diagnostics(self) -> None:
+        assert self.page is not None
+
+        def on_console(message: Any) -> None:
+            self._console_messages.append(f"{message.type}: {message.text}")
+
+        def on_page_error(error: Any) -> None:
+            self._page_errors.append(str(error))
+
+        def on_request_failed(request: Any) -> None:
+            self._request_failures.append(_format_request_failure(request))
+
+        def on_response(response: Any) -> None:
+            status = getattr(response, "status", 0)
+            if status >= 400:
+                self._bad_responses.append(f"{status} {getattr(response, 'url', '')}")
+
+        self.page.on("console", on_console)
+        self.page.on("pageerror", on_page_error)
+        self.page.on("requestfailed", on_request_failed)
+        self.page.on("response", on_response)
+
+    async def _dump_qax_debug_artifacts(self, label: str) -> Path:
+        assert self.page is not None
+        QAX_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prefix = QAX_DEBUG_DIR / f"{timestamp}_{label}"
+
+        try:
+            await self.page.screenshot(path=str(prefix.with_suffix(".png")), full_page=True, timeout=10000)
+        except Exception as exc:  # noqa: BLE001
+            prefix.with_suffix(".screenshot_error.txt").write_text(str(exc), encoding="utf-8")
+
+        try:
+            prefix.with_suffix(".html").write_text(await self.page.content(), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            prefix.with_suffix(".html_error.txt").write_text(str(exc), encoding="utf-8")
+
+        diagnostics = [
+            f"url: {self.page.url}",
+            "",
+            "[console]",
+            *self._console_messages[-200:],
+            "",
+            "[pageerror]",
+            *self._page_errors[-100:],
+            "",
+            "[requestfailed]",
+            *self._request_failures[-100:],
+            "",
+            "[bad_responses]",
+            *self._bad_responses[-100:],
+        ]
+        prefix.with_suffix(".log").write_text("\n".join(diagnostics), encoding="utf-8")
+        return prefix
+
     async def _login_and_open_task_page(self) -> None:
         """登录 QAX 并进入“资产管理 -> 终端任务”页面。"""
 
         assert self.page is not None
-        await self.page.goto(settings.qax_base_url, wait_until="domcontentloaded")
-        await self.page.get_by_placeholder("用户名/手机号/邮箱").fill(settings.qax_username)
+        await self.page.goto(settings.qax_base_url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+
+        username_input = self.page.get_by_placeholder("用户名/手机号/邮箱")
+        try:
+            await username_input.wait_for(state="visible", timeout=30000)
+            await username_input.fill(settings.qax_username)
+        except Exception as exc:
+            debug_prefix = await self._dump_qax_debug_artifacts("login_username_missing")
+            raise QaxAutomationError(
+                "QAX 登录页未出现“用户名/手机号/邮箱”输入框，页面可能停留在加载状态。"
+                f"已保存诊断文件：{debug_prefix}.png / {debug_prefix}.html / {debug_prefix}.log"
+            ) from exc
         await self.page.get_by_role("button", name="下一步").click()
         await self.page.get_by_placeholder("请输入密码").fill(settings.qax_password)
         await self.page.get_by_role("button", name="立即登录").click()

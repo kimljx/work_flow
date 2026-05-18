@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from app.services.qax import (
     QaxAutomationError,
     QaxTaskStatus,
     _build_qax_certificate_hint,
+    _check_chromium_runtime_dependencies,
     _local_chromium_executable,
     _map_qax_status,
     _validate_qax_certificates,
@@ -275,6 +277,27 @@ class QaxServiceTestCase(unittest.TestCase):
         wrapped = _wrap_qax_startup_error(RuntimeError("/lib64/libc.so.6: version `GLIBC_2.18' not found"), state)
         self.assertIsInstance(wrapped, QaxAutomationError)
         self.assertIn("重新打包", str(wrapped))
+
+    def test_check_chromium_runtime_dependencies_reports_missing_libraries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "chrome"
+            executable.write_text("binary", encoding="utf-8")
+            completed = subprocess.CompletedProcess(
+                ["ldd", str(executable)],
+                0,
+                stdout="\tlibnss3.so => not found\n\tlibatk-1.0.so.0 => not found\n",
+                stderr="",
+            )
+
+            with patch("app.services.qax.sys.platform", "linux"), patch(
+                "app.services.qax.subprocess.run",
+                return_value=completed,
+            ):
+                with self.assertRaises(QaxAutomationError) as ctx:
+                    _check_chromium_runtime_dependencies(str(executable))
+
+            self.assertIn("libnss3.so", str(ctx.exception))
+            self.assertIn("libatk-1.0.so.0", str(ctx.exception))
 
     def test_local_chromium_executable_supports_linux_bundle_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

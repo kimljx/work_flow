@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from threading import Lock
+from typing import Any, Callable
 from datetime import datetime
 import os
 from pathlib import Path
@@ -20,12 +22,11 @@ import re
 import subprocess
 import sys
 import threading
-from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.config import PROJECT_ROOT, settings
-from app.models import Notification, NotificationRecipient, Task, User
+from app.models import Notification, NotificationRecipient, Task, TaskStatusEvent, User
 from app.services.runtime_settings import load_runtime_settings
 from app.services.templates import strip_reply_guides
 
@@ -51,6 +52,7 @@ QAX_BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/136.0.0.0 Safari/537.36"
 )
+_qax_collect_lock = Lock()
 
 
 @dataclass(frozen=True)
@@ -678,20 +680,61 @@ def _refresh_notification_status(db: Session, notification_id: int) -> None:
     notification.status = "pending"
 
 
-def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
+def _promote_task_started_by_qax_read(db: Session, notification: Notification) -> None:
+    """任务创建 QAX 被任一成员已读后，将主任务从未开始推进为进行中。"""
+
+    if notification.notify_type != "task_created" or not notification.task_id:
+        return
+    task = db.query(Task).filter(Task.id == notification.task_id, Task.deleted_at.is_(None)).first()
+    if not task or task.main_status != "not_started":
+        return
+    task.main_status = "in_progress"
+    task.completed_at = None
+    db.add(
+        TaskStatusEvent(
+            task_id=task.id,
+            from_status="not_started",
+            to_status="in_progress",
+            source="qax_read",
+            remark="任务创建即时消息已读，自动更新为进行中",
+            operator_id=None,
+        )
+    )
+
+
+def collect_qax_status(
+    db: Session,
+    limit: int = 50,
+    *,
+    task_id: int | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> dict[str, object]:
     """批量采集 QAX 通知状态并回写通知接收人记录。"""
 
-    qax_recipients = (
+    if not _qax_collect_lock.acquire(blocking=False):
+        return {
+            "status": "busy",
+            "message": "另一项 QAX 状态采集正在执行，请稍后重试。",
+            "processed": 0,
+            "processed_count": 0,
+            "updated": 0,
+            "updated_count": 0,
+            "failed": 0,
+            "failed_count": 0,
+        }
+
+    query = (
         db.query(NotificationRecipient, Notification, Task, User)
         .join(Notification, Notification.id == NotificationRecipient.notification_id)
         .outerjoin(Task, Task.id == Notification.task_id)
         .outerjoin(User, User.id == NotificationRecipient.user_id)
         .filter(Notification.channel == "qax")
-        .order_by(NotificationRecipient.id.asc())
-        .limit(max(limit, 1))
-        .all()
     )
+    if task_id is not None:
+        query = query.filter(Notification.task_id == task_id)
+    qax_recipients = query.order_by(NotificationRecipient.id.asc()).limit(max(limit, 1)).all()
     if not qax_recipients:
+        _qax_collect_lock.release()
         return {
             "status": "success",
             "message": "没有可采集的 QAX 通知",
@@ -706,6 +749,7 @@ def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
     try:
         _ensure_qax_settings()
     except Exception as exc:
+        _qax_collect_lock.release()
         return {
             "status": "failed",
             "message": str(exc),
@@ -728,8 +772,13 @@ def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
                 task_name = build_qax_task_name(notification, recipient, task)
                 ip_address = user.ip_address
                 touched_notifications.add(notification.id)
+                if progress_callback:
+                    progress_callback(recipient.user_id, "正在查询 QAX 状态")
                 if recipient.read_status == "read":
                     await client.delete_task_if_exists(task_name)
+                    _promote_task_started_by_qax_read(db, notification)
+                    if progress_callback:
+                        progress_callback(recipient.user_id, "QAX 已读")
                     continue
                 try:
                     result = await client.query_task_status(task_name, ip_address)
@@ -747,10 +796,14 @@ def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
                     failed += 1
                 if result.read_status == "read":
                     await client.delete_task_if_exists(task_name)
+                    _promote_task_started_by_qax_read(db, notification)
+                if progress_callback:
+                    progress_callback(recipient.user_id, "已读" if result.read_status == "read" else "未读")
 
     try:
         _run_async_blocking(_collect_async())
     except Exception as exc:
+        _qax_collect_lock.release()
         return {
             "status": "failed",
             "message": f"QAX 状态采集失败：{exc}",
@@ -765,13 +818,16 @@ def collect_qax_status(db: Session, limit: int = 50) -> dict[str, object]:
     for notification_id in touched_notifications:
         _refresh_notification_status(db, notification_id)
 
-    return {
-        "status": "success",
-        "message": f"已采集 {len(qax_recipients)} 条 QAX 通知状态",
-        "processed": len(qax_recipients),
-        "processed_count": len(qax_recipients),
-        "updated": updated,
-        "updated_count": updated,
-        "failed": failed,
-        "failed_count": failed,
-    }
+    try:
+        return {
+            "status": "success",
+            "message": f"已采集 {len(qax_recipients)} 条 QAX 通知状态",
+            "processed": len(qax_recipients),
+            "processed_count": len(qax_recipients),
+            "updated": updated,
+            "updated_count": updated,
+            "failed": failed,
+            "failed_count": failed,
+        }
+    finally:
+        _qax_collect_lock.release()

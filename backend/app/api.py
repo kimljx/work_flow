@@ -72,10 +72,10 @@ from app.schemas import (
 )
 from app.security import create_token, decode_token, get_current_user, require_admin, verify_password
 from app.services.audit import cleanup_system_logs, write_audit
+from app.services.collection import collect_state, start_collect
 from app.services.delay import apply_delay_decision
-from app.services.mail import diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline, poll_mailbox
+from app.services.mail import diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline
 from app.services.notifications import create_due_reminders, create_notification_with_recipients, preview_notification_content
-from app.services.qax import collect_qax_status
 from app.services.runtime_settings import load_runtime_settings, runtime_settings_dict, save_runtime_settings
 from app.services.templates import sort_templates, template_matches, validate_template_content
 from app.timeutils import shanghai_now_naive
@@ -183,14 +183,6 @@ def task_import_template_file() -> Path | None:
     return None
 
 
-def infer_task_status_by_time(start_at: datetime, end_at: datetime, now: datetime | None = None) -> str:
-    """根据开始时间推断默认主状态；截止时间不能自动将任务置为已完成。"""
-    current = now or shanghai_now_naive()
-    if current < start_at:
-        return "not_started"
-    return "in_progress"
-
-
 def notification_channel_text(channel: str) -> str:
     return NOTIFICATION_CHANNEL_LABELS.get(channel, channel)
 
@@ -234,6 +226,9 @@ def _empty_latest_notification(channel: str) -> dict[str, object]:
         "delivery_status_text": "未发送",
         "read_status": "unread",
         "read_status_text": read_status_text("unread", channel),
+        "pending_recipients": [],
+        "pending_recipient_names": [],
+        "pending_recipient_ids": [],
         "sent_at": None,
         "summary": "未发送",
     }
@@ -272,6 +267,7 @@ def _latest_notification_summary(
     summary = _empty_latest_notification(channel)
     summary.update(
         {
+            "notification_id": notification.id,
             "notify_type": notification.notify_type,
             "notify_type_text": NOTIFICATION_TYPE_LABELS.get(notification.notify_type, notification.notify_type),
             "sent_at": notification.created_at,
@@ -282,12 +278,28 @@ def _latest_notification_summary(
         delivered_count = sum(1 for item in recipients if item.delivery_status == "delivered")
         read_count = sum(1 for item in recipients if item.read_status == "read")
         recipient_total = len(recipients)
+        pending_user_ids = [item.user_id for item in recipients if item.read_status != "read"]
+        user_names = {
+            item.id: item.name
+            for item in db.query(User).filter(User.id.in_(pending_user_ids)).all()
+        } if pending_user_ids else {}
+        pending_recipients = [
+            {
+                "user_id": item.user_id,
+                "name": user_names.get(item.user_id) or f"成员 #{item.user_id}",
+            }
+            for item in recipients
+            if item.read_status != "read"
+        ]
         summary.update(
             {
                 "delivery_status": notification.status,
                 "delivery_status_text": notification_status_text(notification.status),
                 "read_status": "read" if read_count > 0 else "unread",
                 "read_status_text": f"{read_count}/{recipient_total} {feedback_label_text(channel)}" if recipient_total else read_status_text("unread", channel),
+                "pending_recipients": pending_recipients,
+                "pending_recipient_names": [item["name"] for item in pending_recipients],
+                "pending_recipient_ids": [item["user_id"] for item in pending_recipients],
                 "summary": (
                     f"已送达 {delivered_count}/{recipient_total}"
                     if recipient_total
@@ -565,21 +577,26 @@ def ensure_notification_access(notification: Notification, current_user: User, d
 
 
 def _create_task_record(payload: TaskCreate, current_user: User, db: Session, source: str = "web") -> Task:
-    """按统一规则落库任务、成员、里程碑、状态流水与初始通知。"""
-    if payload.start_at > payload.end_at:
+    """按统一规则落库任务、成员、里程碑、状态流水与初始通知。
+
+    Web 创建入口以服务端当前时间作为任务开始时间，避免旧前端或手工请求传入历史开始时间后，
+    让“任务是否开始”的展示口径重新退回到按时间判断；导入入口仍保留文件中的开始时间。
+    """
+    actual_start_at = shanghai_now_naive() if source == "web" else payload.start_at
+    if actual_start_at > payload.end_at:
         raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
 
-    inferred_status = infer_task_status_by_time(payload.start_at, payload.end_at)
+    initial_status = "not_started"
     task = Task(
         title=payload.title,
         content=payload.content,
         priority=payload.priority,
         remark=payload.remark,
-        start_at=payload.start_at,
+        start_at=actual_start_at,
         end_at=payload.end_at,
         due_remind_days=max(payload.due_remind_days, 0),
-        planned_minutes=int((payload.end_at - payload.start_at).total_seconds() // 60),
-        main_status=inferred_status,
+        planned_minutes=int((payload.end_at - actual_start_at).total_seconds() // 60),
+        main_status=initial_status,
         completed_at=None,
         created_by=current_user.id,
     )
@@ -593,7 +610,7 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
         db.add(TaskMember(task_id=task.id, user_id=user_id, member_role=member_role))
 
     for milestone in payload.milestones:
-        if milestone.planned_at < payload.start_at or milestone.planned_at > payload.end_at:
+        if milestone.planned_at < actual_start_at or milestone.planned_at > payload.end_at:
             raise HTTPException(status_code=400, detail="里程碑时间必须位于任务时间范围内")
         db.add(
             TaskMilestone(
@@ -619,7 +636,7 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
             )
         )
 
-    db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=inferred_status, source=source, remark="创建任务自动判定状态", operator_id=current_user.id))
+    db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=initial_status, source=source, remark="创建任务，等待成员确认已读", operator_id=current_user.id))
     # 创建任务后立即生成邮件和即时消息通知，确保成员在多个渠道都能收到任务分发信息。
     create_notification_with_recipients(db, task.id, "email", "task_created", "")
     create_notification_with_recipients(db, task.id, "qax", "task_created", "")
@@ -2026,26 +2043,20 @@ def _send_task_reminders(
     notify_type: str,
     extra_context: dict[str, str] | None = None,
     recipient_user_ids: list[int] | None = None,
+    channels: list[str] | None = None,
 ) -> None:
     """统一发送任务相关提醒，保证邮件与即时消息正文保持同一份上下文。"""
-    create_notification_with_recipients(
-        db,
-        task.id,
-        "email",
-        notify_type,
-        "",
-        recipient_user_ids=recipient_user_ids,
-        extra_context=extra_context,
-    )
-    create_notification_with_recipients(
-        db,
-        task.id,
-        "qax",
-        notify_type,
-        "",
-        recipient_user_ids=recipient_user_ids,
-        extra_context=extra_context,
-    )
+    target_channels = channels or ["email", "qax"]
+    for channel in target_channels:
+        create_notification_with_recipients(
+            db,
+            task.id,
+            channel,
+            notify_type,
+            "",
+            recipient_user_ids=recipient_user_ids,
+            extra_context=extra_context,
+        )
 
 
 @router.get("/templates", response_model=list[dict])
@@ -2305,7 +2316,7 @@ def test_mail_inbox(_: User = Depends(require_admin)) -> dict:
 
 @router.post("/admin/mail/poll", response_model=dict)
 def poll_mail_inbox(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    result = poll_mailbox(db)
+    result = start_collect("mail")
     write_audit(
         db,
         current_user.id,
@@ -2313,10 +2324,10 @@ def poll_mail_inbox(current_user: User = Depends(require_admin), db: Session = D
         "MailInbox",
         None,
         {},
-        {"status": result.get("status"), "count": result.get("count", 0)},
-        log_level="INFO" if result.get("status") in {"success", "initialized"} else "WARNING",
+        {"status": result.get("status"), "accepted": result.get("accepted", False)},
+        log_level="INFO" if result.get("accepted") else "WARNING",
         module_name="api.mail",
-        message=f"手动采集邮件：{result.get('status')}",
+        message="手动邮件采集已转入后台执行" if result.get("accepted") else "已有后台采集正在执行，忽略本次邮件采集",
         detail=result,
     )
     db.commit()
@@ -2346,7 +2357,7 @@ def reset_mail_baseline(payload: MailBaselineRequest | None = None, current_user
 @router.post("/admin/qax/collect", response_model=dict)
 def run_qax_collect(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """手动触发一次 QAX 状态采集。"""
-    result = collect_qax_status(db)
+    result = start_collect("qax")
     write_audit(
         db,
         current_user.id,
@@ -2354,10 +2365,42 @@ def run_qax_collect(current_user: User = Depends(require_admin), db: Session = D
         "Notification",
         None,
         {},
-        {"status": result.get("status"), "updated_count": result.get("updated_count", 0)},
-        log_level="INFO" if result.get("status") == "success" else "WARNING",
+        {"status": result.get("status"), "accepted": result.get("accepted", False)},
+        log_level="INFO" if result.get("accepted") else "WARNING",
         module_name="api.qax",
-        message=f"手动采集 QAX 状态完成，结果：{result.get('status')}",
+        message="手动 QAX 采集已转入后台执行" if result.get("accepted") else "已有后台采集正在执行，忽略本次 QAX 采集",
+        detail=result,
+    )
+    db.commit()
+    return result
+
+
+@router.get("/admin/collect/state", response_model=dict)
+def get_collect_state(task_id: int | None = Query(default=None), _: User = Depends(require_admin)) -> dict:
+    """返回邮件与 QAX 后台采集状态，供前端展示等待进度。"""
+
+    return collect_state(task_id)
+
+
+@router.post("/tasks/{task_id}/sync-collect", response_model=dict)
+def sync_collect_task(task_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """按任务触发邮件与 QAX 后台同步采集，并按参与人展示进度。"""
+
+    task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    result = start_collect("sync", task_id)
+    write_audit(
+        db,
+        current_user.id,
+        "SYNC_COLLECT_TASK",
+        "Task",
+        task.id,
+        {},
+        {"status": result.get("status"), "accepted": result.get("accepted", False)},
+        log_level="INFO" if result.get("accepted") else "WARNING",
+        module_name="api.collect",
+        message="任务同步采集已转入后台执行" if result.get("accepted") else "已有后台采集正在执行，忽略本次任务同步",
         detail=result,
     )
     db.commit()
@@ -2436,6 +2479,111 @@ def remind_task_subtask(
     )
     db.commit()
     return ApiMessage(message="已向子任务执行人发送提醒")
+
+
+@router.post("/tasks/{task_id}/members/{user_id}/task-remind", response_model=ApiMessage)
+def remind_task_member(
+    task_id: int,
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ApiMessage:
+    """按参与人发送任务提醒；有未完成子任务时聚焦子任务，否则按主任务提醒。"""
+
+    task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    member = db.query(TaskMember).filter(TaskMember.task_id == task.id, TaskMember.user_id == user_id).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="任务成员不存在")
+    user = db.query(User).filter(User.id == user_id).first()
+    subtasks = (
+        db.query(TaskSubtask)
+        .filter(TaskSubtask.task_id == task.id, TaskSubtask.assignee_id == user_id, TaskSubtask.status != "done")
+        .order_by(TaskSubtask.sort_order.asc())
+        .all()
+    )
+    if subtasks:
+        assignee_name = user.name if user else f"成员#{user_id}"
+        subtask_lines = []
+        for index, item in enumerate(subtasks, start=1):
+            line = f"{index}. {item.title}（执行人：{assignee_name}）"
+            if item.content:
+                line = f"{line}：{item.content}"
+            subtask_lines.append(line)
+        focus_text = f"请优先跟进 {len(subtasks)} 项未完成子任务"
+        extra_context = {
+            "remind_focus": focus_text,
+            "subtask_summary": "\n".join(subtask_lines),
+            "subtask_brief": "；".join(subtask_lines[:3]),
+        }
+    else:
+        focus_text = f"请及时处理主任务“{task.title}”并反馈状态"
+        extra_context = {"remind_focus": focus_text}
+    _send_task_reminders(
+        db,
+        task,
+        "manual_remind",
+        recipient_user_ids=[user_id],
+        extra_context=extra_context,
+    )
+    write_audit(
+        db,
+        current_user.id,
+        "REMIND_TASK_MEMBER",
+        "Task",
+        task.id,
+        {},
+        {"user_id": user_id, "notification_created": True, "remind_focus": focus_text},
+        module_name="api.task",
+        message=f"向{user.name if user else user_id}发送任务提醒",
+    )
+    db.commit()
+    return ApiMessage(message="已向该参与人发送提醒")
+
+
+@router.post("/tasks/{task_id}/members/{user_id}/remind", response_model=ApiMessage)
+def remind_task_member_channel(
+    task_id: int,
+    user_id: int,
+    channel: str = Query(...),
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> ApiMessage:
+    """按任务成员和指定渠道发送提醒，用于补发失败或未反馈的通知。"""
+
+    safe_channel = channel.lower()
+    if safe_channel not in {"email", "qax"}:
+        raise HTTPException(status_code=400, detail="仅支持邮件或即时消息提醒")
+    task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    member = db.query(TaskMember).filter(TaskMember.task_id == task.id, TaskMember.user_id == user_id).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="任务成员不存在")
+    user = db.query(User).filter(User.id == user_id).first()
+    focus_text = f"请及时处理任务“{task.title}”并反馈状态"
+    _send_task_reminders(
+        db,
+        task,
+        "manual_remind",
+        recipient_user_ids=[user_id],
+        channels=[safe_channel],
+        extra_context={"remind_focus": focus_text},
+    )
+    write_audit(
+        db,
+        current_user.id,
+        "REMIND_TASK_MEMBER_CHANNEL",
+        "Task",
+        task.id,
+        {},
+        {"user_id": user_id, "channel": safe_channel, "notification_created": True},
+        module_name="api.task",
+        message=f"向{user.name if user else user_id}发送{NOTIFICATION_CHANNEL_LABELS.get(safe_channel, safe_channel)}提醒",
+    )
+    db.commit()
+    return ApiMessage(message=f"已发送{NOTIFICATION_CHANNEL_LABELS.get(safe_channel, safe_channel)}提醒")
 
 
 @router.post("/tasks/{task_id}/milestones/{milestone_id}/remind", response_model=ApiMessage)

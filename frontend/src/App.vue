@@ -3,31 +3,52 @@
     <router-view />
   </div>
   <div v-else class="shell">
-    <aside class="sidebar" v-if="auth.isLoggedIn">
-      <div class="brand">{{ labels.brand }}</div>
-      <nav>
-        <router-link v-for="link in auth.isAdmin ? adminLinks : []" :key="link.to" :to="link.to">
-          <span class="nav-icon">{{ link.icon }}</span>
+    <header v-if="auth.isLoggedIn" class="app-topbar">
+      <div class="topbar-brand">{{ labels.brand }}</div>
+      <nav class="topbar-main-nav">
+        <router-link
+          v-for="link in primaryLinks"
+          :key="link.key"
+          :to="link.to"
+          :class="{ active: isPrimaryActive(link.key) }"
+        >
+          <img :src="link.icon" alt="" />
           <span>{{ link.label }}</span>
         </router-link>
-        <router-link v-if="auth.isMember" to="/member/tasks">
-          <span class="nav-icon">□</span>
-          <span>{{ labels.memberTasks }}</span>
-        </router-link>
-        <router-link v-if="auth.isMember" to="/member/notifications">
-          <span class="nav-icon">●</span>
-          <span>{{ labels.memberNotifications }}</span>
-        </router-link>
       </nav>
-    </aside>
-    <main class="content" :class="{ 'content-full': !auth.isLoggedIn }">
-      <div v-if="auth.isLoggedIn" class="top-note">
-        <span>{{ labels.currentUser }}{{ auth.profile?.name || auth.profile?.username }}</span>
-        <span class="top-note-role">{{ auth.profile?.role_text || fallbackRoleText }}</span>
-        <button class="button secondary small" :disabled="loading.isBusy" @click="handleLogout">{{ labels.logout }}</button>
+      <div class="topbar-spacer" />
+      <div class="topbar-user">{{ auth.profile?.name || auth.profile?.username }}</div>
+      <div class="settings-menu" @click.stop>
+        <button class="settings-trigger" type="button" :disabled="loading.isBusy" @click="settingsOpen = !settingsOpen">
+          <img :src="settingsIcon" alt="设置" />
+        </button>
+        <div v-if="settingsOpen" class="settings-popover">
+          <button v-for="link in settingsLinks" :key="link.key" type="button" @click="openSettingsModal(link)">
+            <img :src="link.icon" alt="" />
+            <span>{{ link.label }}</span>
+          </button>
+          <button type="button" class="settings-logout" :disabled="loading.isBusy" @click="handleLogout">
+            {{ labels.logout }}
+          </button>
+        </div>
       </div>
+    </header>
+    <main class="content" :class="{ 'content-full': !auth.isLoggedIn }">
       <router-view />
     </main>
+    <div v-if="settingsModal" class="modal-mask" @click.self="closeSettingsModal">
+      <div class="modal-card settings-modal-card">
+        <div class="settings-modal-head">
+          <div>
+            <h2>{{ settingsModal.label }}</h2>
+          </div>
+          <button type="button" class="button secondary small" @click="closeSettingsModal">关闭</button>
+        </div>
+        <div :key="settingsModal.key" class="settings-modal-body">
+          <component :is="settingsModal.component" />
+        </div>
+      </div>
+    </div>
     <div v-if="loading.isBusy" class="global-loading-mask">
       <div class="global-loading-card">
         <div class="global-loading-spinner" />
@@ -39,13 +60,28 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { useLoadingStore } from './stores/loading'
+import bellIcon from './assets/icons/bell.svg'
+import calendarClockIcon from './assets/icons/calendar-clock.svg'
+import chartGanttIcon from './assets/icons/chart-gantt.svg'
+import clipboardListIcon from './assets/icons/clipboard-list.svg'
+import fileTextIcon from './assets/icons/file-text.svg'
+import scrollTextIcon from './assets/icons/scroll-text.svg'
+import settingsIcon from './assets/icons/settings.svg'
+import uploadIcon from './assets/icons/upload.svg'
+import usersIcon from './assets/icons/users.svg'
+import AdminAuditLogs from './views/admin/AdminAuditLogs.vue'
+import AdminImportExport from './views/admin/AdminImportExport.vue'
+import AdminMailEvents from './views/admin/AdminMailEvents.vue'
+import AdminNotifications from './views/admin/AdminNotifications.vue'
+import AdminTemplates from './views/admin/AdminTemplates.vue'
+import AdminUsers from './views/admin/AdminUsers.vue'
 
 const labels = {
-  brand: '管理后台系统',
+  brand: '任务管理助手',
   dashboard: '看板',
   tasks: '任务管理',
   templates: '模板管理',
@@ -67,33 +103,77 @@ const auth = useAuthStore()
 const loading = useLoadingStore()
 const route = useRoute()
 const router = useRouter()
+const settingsOpen = ref(false)
+const settingsModal = ref(null)
 const isPublicPage = computed(() => Boolean(route.meta.public))
-const adminLinks = computed(() => {
-  const links = [
-    { to: '/admin/dashboard', label: labels.dashboard, icon: '▦' },
-    { to: '/admin/tasks', label: labels.tasks, icon: '□' },
-  ]
-  if (!auth.isSystemAdmin) {
-    return links
+const primaryLinks = computed(() => {
+  if (auth.isAdmin) {
+    return [
+      { key: 'gantt', to: { path: '/admin/dashboard', query: { view: 'gantt' } }, label: '甘特图', icon: chartGanttIcon },
+      { key: 'tasks', to: '/admin/tasks', label: labels.tasks, icon: clipboardListIcon },
+    ]
   }
-  return [
-    ...links,
-    { to: '/admin/templates', label: labels.templates, icon: '≡' },
-    { to: '/admin/notifications', label: labels.notifications, icon: '●' },
-    { to: '/admin/mail-events', label: labels.mailEvents, icon: '◷' },
-    { to: '/admin/users', label: labels.users, icon: '♙' },
-    { to: '/admin/import-export', label: labels.importExport, icon: '⇄' },
-    { to: '/admin/system-logs', label: labels.auditLogs, icon: '◴' },
-  ]
+  if (auth.isMember) {
+    return [
+      { key: 'memberTasks', to: '/member/tasks', label: labels.memberTasks, icon: clipboardListIcon },
+      { key: 'memberNotifications', to: '/member/notifications', label: labels.memberNotifications, icon: bellIcon },
+    ]
+  }
+  return []
 })
-const fallbackRoleText = computed(() => {
-  if (auth.isSystemAdmin) return labels.systemAdmin
-  return auth.isAdmin ? labels.admin : labels.member
+const settingsLinks = computed(() => {
+  if (!auth.isSystemAdmin) return []
+  return [
+    { key: 'templates', label: labels.templates, icon: fileTextIcon, component: AdminTemplates },
+    { key: 'notifications', label: labels.notifications, icon: bellIcon, component: AdminNotifications },
+    { key: 'mail-events', label: labels.mailEvents, icon: calendarClockIcon, component: AdminMailEvents },
+    { key: 'users', label: labels.users, icon: usersIcon, component: AdminUsers },
+    { key: 'import-export', label: labels.importExport, icon: uploadIcon, component: AdminImportExport },
+    { key: 'audit-logs', label: labels.auditLogs, icon: scrollTextIcon, component: AdminAuditLogs },
+  ]
 })
 
+function isPrimaryActive(key) {
+  if (key === 'gantt') {
+    return route.path === '/admin/dashboard'
+  }
+  if (key === 'tasks') return route.path.startsWith('/admin/tasks')
+  if (key === 'memberTasks') return route.path.startsWith('/member/tasks')
+  if (key === 'memberNotifications') return route.path.startsWith('/member/notifications')
+  return false
+}
+
 function handleLogout() {
+  settingsOpen.value = false
+  settingsModal.value = null
   auth.logout()
   loading.reset()
   router.push('/auth/login')
 }
+
+function openSettingsModal(link) {
+  settingsOpen.value = false
+  settingsModal.value = link
+}
+
+function closeSettingsModal() {
+  settingsModal.value = null
+}
+
+function closeSettingsPopover(event) {
+  if (event.target?.closest?.('.settings-menu')) return
+  settingsOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('click', closeSettingsPopover)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', closeSettingsPopover)
+})
+
+watch(() => route.fullPath, () => {
+  settingsOpen.value = false
+})
 </script>

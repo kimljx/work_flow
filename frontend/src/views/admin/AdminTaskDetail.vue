@@ -1,144 +1,151 @@
 <template>
-  <section v-if="task" class="page">
-    <div class="panel workspace-header">
-      <div>
-        <div class="workspace-eyebrow">Task Detail</div>
-        <h1 class="workspace-title">{{ task.title }}</h1>
-        <p class="workspace-subtitle">{{ task.content || '暂无任务内容' }}</p>
+  <section v-if="task" class="task-detail-dialog">
+    <button v-if="props.taskId" type="button" class="task-detail-close" @click="$emit('cancel')">×</button>
+    <div v-if="feedback.message" class="task-detail-feedback">
+      <strong>{{ feedback.title }}</strong>
+      <span :class="feedback.type === 'success' ? 'success-text' : 'error-text'">{{ feedback.message }}</span>
+    </div>
+    <div class="task-detail-floating-stack">
+      <span :class="['task-detail-status-floating', statusMeta.tone]">{{ statusMeta.text }}</span>
+      <span v-if="delayStatus.text" class="task-detail-delay-floating" :class="delayStatus.className">
+        {{ delayStatus.text }}
+      </span>
+    </div>
+
+    <div class="task-detail-head">
+      <div class="task-detail-title-line">
+        <h1>{{ task.title }}</h1>
+        <div class="task-detail-chip-line">
+          <span :class="priorityMeta.tone">{{ priorityMeta.label }}</span>
+        </div>
       </div>
-      <div class="toolbar">
-        <router-link class="button secondary" :to="backTarget">返回列表</router-link>
-        <router-link class="button secondary" :to="`/admin/tasks/${task.id}/edit`">编辑</router-link>
-        <button class="button secondary" :disabled="actionLoading" @click="remindTask">发送提醒</button>
-        <button class="button danger" :disabled="actionLoading" @click="removeTask">删除任务</button>
+      <div class="task-detail-date-line">
+        <img class="task-detail-line-icon" :src="calendarIcon" alt="" />
+        {{ formatDate(task.start_at) }}至{{ formatDate(task.end_at) }}
+      </div>
+      <div v-if="Number(task.due_remind_days || 0) > 0" class="task-detail-remind">
+        到期前 {{ task.due_remind_days }} 天提醒
       </div>
     </div>
 
-    <div class="detail-grid">
-      <div class="panel">
-        <div class="section-head">
-          <div>
-            <h2>基本信息</h2>
-          </div>
-        </div>
-        <div class="task-detail-meta-grid">
-          <div class="info-cell">
-            <span class="info-label">状态</span>
-            <strong><span :class="statusMeta.tone">{{ statusMeta.text }}</span></strong>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">优先级</span>
-            <strong><span :class="priorityMeta.tone">{{ priorityMeta.label }}</span></strong>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">负责人</span>
-            <strong>{{ responsibleText }}</strong>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">开始时间</span>
-            <strong>{{ formatDateTime(task.start_at) }}</strong>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">截止时间</span>
-            <strong>{{ formatDateTime(task.end_at) }}</strong>
-            <div v-if="delayStatus.text" :class="delayStatus.className">{{ delayStatus.text }}</div>
-          </div>
-          <div v-if="task.completed_at" class="info-cell">
-            <span class="info-label">完成时间</span>
-            <strong>{{ formatDateTime(task.completed_at) }}</strong>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">提醒设置</span>
-            <strong>{{ dueRemindText }}</strong>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="section-head">
-          <div>
-            <h2>状态更新</h2>
-            <p>保留管理员最常用的状态修改入口。</p>
-          </div>
-        </div>
-        <div class="task-detail-status-grid">
-          <select v-model="statusForm.main_status" :disabled="actionLoading">
-            <option value="not_started">未开始</option>
-            <option value="in_progress">进行中</option>
-            <option value="done">已完成</option>
-            <option value="canceled">已取消</option>
-          </select>
-          <input v-model="statusForm.remark" :disabled="actionLoading" placeholder="可选说明" />
-          <button :disabled="actionLoading" @click="changeStatus">更新状态</button>
-        </div>
-        <div class="task-notice-grid task-status-notice-grid">
-          <div class="info-cell">
-            <span class="info-label">邮件</span>
-            <strong>{{ task.latest_notifications?.email?.summary || '未发送' }}</strong>
-            <div class="subtle-text">{{ task.latest_notifications?.email?.read_status_text || '' }}</div>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">QAX</span>
-            <strong>{{ task.latest_notifications?.qax?.summary || '未发送' }}</strong>
-            <div class="subtle-text">{{ task.latest_notifications?.qax?.read_status_text || '' }}</div>
-          </div>
-        </div>
-      </div>
+    <div class="task-detail-description">
+      <span>任务描述</span>
+      <div>{{ task.content || '暂无任务内容' }}</div>
     </div>
 
-    <div class="panel">
-      <div class="section-head">
-        <div>
-          <h2>子任务</h2>
-        </div>
+    <div class="task-detail-subtask-section">
+      <div class="task-detail-subtask-head">
+        <h2><img class="task-detail-section-icon" :src="subtaskIcon" alt="" /> 子任务</h2>
+        <button class="button secondary small" :disabled="syncDisabled" @click="syncCollect">
+          {{ syncButtonText }}
+        </button>
       </div>
-      <div v-if="notificationRows.length === 0" class="muted-block">当前没有子任务。</div>
-      <div v-else class="task-simple-list">
-        <div v-for="item in notificationRows" :key="item.row_key" class="task-simple-row task-simple-row-detail">
-          <div class="task-simple-main">
-            <strong>{{ item.title }}</strong>
-            <div class="subtle-text">{{ item.assignee_name || '-' }} / {{ item.status_text }}</div>
+
+      <div v-if="participantRows.length === 0" class="muted-block">当前没有参与人。</div>
+      <div v-else class="task-participant-grid">
+        <article v-for="item in participantRows" :key="item.user_id" class="task-participant-card">
+          <div class="task-participant-head">
+            <div>
+              <strong>{{ item.name }}</strong>
+              <span>{{ item.email || '-' }}</span>
+            </div>
+            <button
+              v-if="!isParticipantDone(item)"
+              class="button secondary small"
+              :disabled="actionLoading"
+              @click="remindParticipant(item)"
+            >
+              发送提醒
+            </button>
+            <span v-else class="task-participant-done">已完成</span>
           </div>
-          <div class="task-channel-stack">
-            <span>邮件：{{ item.latest_notifications?.email?.summary || '未发送' }}</span>
-            <span>即时消息：{{ item.latest_notifications?.qax?.summary || '未发送' }}</span>
+
+          <div v-if="item.subtasks.length > 0" class="task-participant-subtasks">
+            <div v-for="subtask in item.subtasks" :key="subtask.id" class="task-participant-subtask">
+              <span>{{ subtask.title }}</span>
+            </div>
           </div>
-          <button v-if="item.id && item.status !== 'done'" class="button secondary small" :disabled="actionLoading" @click="remindSubtask(item)">提醒</button>
-        </div>
+
+          <div class="task-participant-status-row">
+            <span>邮件:</span>
+            <strong>
+              <span>{{ channelStatusText(item, 'email') }}</span>
+              <i v-if="channelCollecting(item.user_id, 'email')" class="inline-spinner" />
+            </strong>
+            <button
+              v-if="shouldShowChannelReminder(item, 'email')"
+              class="button secondary small"
+              :disabled="actionLoading"
+              @click="remindMemberChannel(item, 'email')"
+            >
+              邮件提醒
+            </button>
+          </div>
+          <div class="task-participant-status-row">
+            <span>即时消息:</span>
+            <strong>
+              <span>{{ channelStatusText(item, 'qax') }}</span>
+              <i v-if="channelCollecting(item.user_id, 'qax')" class="inline-spinner" />
+            </strong>
+            <button
+              v-if="shouldShowChannelReminder(item, 'qax')"
+              class="button secondary small"
+              :disabled="actionLoading"
+              @click="remindMemberChannel(item, 'qax')"
+            >
+              即时消息提醒
+            </button>
+          </div>
+        </article>
       </div>
     </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
-import { formatDateTime } from '../../utils/format'
+import { formatDate } from '../../utils/format'
+import calendarIcon from '../../assets/icons/calendar-days.svg'
+import subtaskIcon from '../../assets/icons/list-checks.svg'
+
+const props = defineProps({
+  taskId: {
+    type: [Number, String],
+    default: null,
+  },
+})
+defineEmits(['cancel'])
 
 const route = useRoute()
-const router = useRouter()
 const task = ref(null)
 const actionLoading = ref(false)
-const statusForm = reactive({
-  main_status: 'not_started',
-  remark: '',
-})
+const collectState = ref({})
+const feedback = ref({ title: '', message: '', type: 'success' })
+let collectTimerId = null
+let feedbackTimerId = null
 
-const backTarget = route.query.from || '/admin/tasks'
+const currentTaskId = computed(() => props.taskId || route.params.id)
 const statusMeta = computed(() => resolveTaskStatusTone(task.value || null))
 const priorityMeta = computed(() => resolvePriorityMeta(task.value?.priority))
 const delayStatus = computed(() => resolveDelayStatus(task.value))
-const responsibleText = computed(() => {
-  const names = (task.value?.members || []).map((item) => item.name).filter(Boolean)
-  return names.length > 0 ? names.join(', ') : '-'
+const collectParticipants = computed(() => collectState.value?.participants || [])
+const syncDisabled = computed(() => {
+  return actionLoading.value || Boolean(collectState.value?.running)
 })
-const dueRemindText = computed(() => {
-  if (!task.value || Number(task.value.due_remind_days || 0) <= 0) {
-    return '未启用'
-  }
-  return `截止前 ${task.value.due_remind_days} 天提醒`
+const syncButtonText = computed(() => (syncDisabled.value ? '收集中...' : '同步'))
+
+const participantRows = computed(() => {
+  if (!task.value) return []
+  return (task.value.members || []).map((item) => ({
+    user_id: item.user_id,
+    name: item.name || `成员 #${item.user_id}`,
+    email: item.email || '',
+    latest_notifications: item.latest_notifications || {},
+    subtasks: (task.value.subtasks || []).filter((subtask) => Number(subtask.assignee_id) === Number(item.user_id)),
+  }))
 })
 
 function resolveDelayStatus(item) {
@@ -165,73 +172,129 @@ function resolveDelayStatus(item) {
   }
   return { text: '', className: '' }
 }
-const notificationRows = computed(() => {
-  if (!task.value) return []
-  if ((task.value.subtasks || []).length > 0) {
-    return task.value.subtasks.map((item) => ({
-      ...item,
-      row_key: `subtask-${item.id}`,
-    }))
+
+function participantCollectText(userId) {
+  if (!collectState.value?.running || collectState.value?.task_id !== Number(currentTaskId.value)) return ''
+  const participant = collectParticipants.value.find((item) => Number(item.user_id) === Number(userId))
+  return participant?.status_text || ''
+}
+
+function channelCollecting(userId, channel) {
+  const text = participantCollectText(userId)
+  if (!text) return false
+  if (channel === 'email') {
+    return collectState.value?.mode === 'mail' || text.includes('邮件')
   }
-  return (task.value.members || []).map((item) => ({
-    id: null,
-    row_key: `member-${item.user_id}`,
-    title: item.name || `成员 #${item.user_id}`,
-    assignee_name: item.email || '-',
-    status: '',
-    status_text: item.member_role_text || item.display_role_text || '参与人',
-    latest_notifications: item.latest_notifications || {},
-  }))
-})
+  return collectState.value?.mode === 'qax' || text.includes('QAX') || text.includes('查询') || text.includes('已读') || text.includes('未读')
+}
+
+function channelStatusText(item, channel) {
+  const collectingText = participantCollectText(item.user_id)
+  if (channelCollecting(item.user_id, channel)) {
+    return collectingText || '收集中'
+  }
+  return item.latest_notifications?.[channel]?.summary || '未发送'
+}
+
+function shouldShowChannelReminder(item, channel) {
+  if (channelCollecting(item.user_id, channel)) return false
+  if (isParticipantDone(item)) return false
+  const status = item.latest_notifications?.[channel] || {}
+  return status.delivery_status === 'failed' || status.read_status !== 'read'
+}
+
+function isParticipantDone(item) {
+  const activeSubtasks = item.subtasks.filter((subtask) => subtask.status !== 'canceled')
+  if (activeSubtasks.length > 0) {
+    return activeSubtasks.every((subtask) => subtask.status === 'done')
+  }
+  return item.latest_notifications?.email?.read_status === 'read'
+}
 
 async function loadTask() {
-  const { data } = await http.get(`/tasks/${route.params.id}`)
+  if (!currentTaskId.value) return
+  const { data } = await http.get(`/tasks/${currentTaskId.value}`, { skipGlobalLoading: Boolean(props.taskId) })
   task.value = data
-  statusForm.main_status = data.main_status
 }
 
-async function remindTask() {
-  if (!window.confirm('确认发送一次任务提醒吗？')) return
-  actionLoading.value = true
-  try {
-    await http.post(`/tasks/${route.params.id}/remind`)
+async function loadCollectState() {
+  const { data } = await http.get('/admin/collect/state', {
+    params: { task_id: currentTaskId.value },
+    skipGlobalLoading: true,
+  })
+  const wasRunning = collectState.value?.running
+  collectState.value = data
+  if (wasRunning && !data.running) {
     await loadTask()
-  } finally {
-    actionLoading.value = false
   }
 }
 
-async function remindSubtask(item) {
-  if (!window.confirm(`确认提醒子任务“${item.title}”吗？`)) return
+async function remindParticipant(item) {
+  const unfinishedCount = item.subtasks.filter((subtask) => subtask.status !== 'done').length
+  const focusText = unfinishedCount > 0 ? `${unfinishedCount} 项未完成子任务` : '主任务'
+  if (!window.confirm(`确认提醒“${item.name}”处理${focusText}吗？`)) return
   actionLoading.value = true
   try {
-    await http.post(`/tasks/${route.params.id}/subtasks/${item.id}/remind`)
+    await http.post(`/tasks/${currentTaskId.value}/members/${item.user_id}/task-remind`)
     await loadTask()
+    showFeedback('发送成功', '提醒已发送，将在 3 秒后自动隐藏。')
   } finally {
     actionLoading.value = false
   }
 }
 
-async function changeStatus() {
+async function remindMemberChannel(item, channel) {
+  const channelName = channel === 'email' ? '邮件' : '即时消息'
+  if (!window.confirm(`确认向“${item.name}”发送${channelName}提醒吗？`)) return
   actionLoading.value = true
   try {
-    await http.post(`/tasks/${route.params.id}/status`, statusForm)
+    await http.post(`/tasks/${currentTaskId.value}/members/${item.user_id}/remind`, {}, {
+      params: { channel },
+    })
     await loadTask()
+    showFeedback('发送成功', `${channelName}提醒已发送，将在 3 秒后自动隐藏。`)
   } finally {
     actionLoading.value = false
   }
 }
 
-async function removeTask() {
-  if (!window.confirm('确认删除这项任务吗？')) return
+function showFeedback(title, message, type = 'success') {
+  feedback.value = { title, message, type }
+  if (feedbackTimerId) {
+    window.clearTimeout(feedbackTimerId)
+  }
+  feedbackTimerId = window.setTimeout(() => {
+    feedback.value = { title: '', message: '', type: 'success' }
+    feedbackTimerId = null
+  }, 3000)
+}
+
+async function syncCollect() {
   actionLoading.value = true
   try {
-    await http.delete(`/tasks/${route.params.id}`)
-    router.push(backTarget)
+    const { data } = await http.post(`/tasks/${currentTaskId.value}/sync-collect`, {}, { skipGlobalLoading: true })
+    collectState.value = data
+    await loadCollectState()
   } finally {
     actionLoading.value = false
   }
 }
 
-onMounted(loadTask)
+onMounted(async () => {
+  await Promise.all([loadTask(), loadCollectState()])
+  collectTimerId = window.setInterval(loadCollectState, 2000)
+})
+
+onUnmounted(() => {
+  if (collectTimerId) {
+    window.clearInterval(collectTimerId)
+  }
+  if (feedbackTimerId) {
+    window.clearTimeout(feedbackTimerId)
+  }
+})
+
+watch(currentTaskId, async () => {
+  await Promise.all([loadTask(), loadCollectState()])
+})
 </script>

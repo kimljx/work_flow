@@ -1,11 +1,7 @@
 <template>
   <section class="page dashboard-page">
     <header class="dashboard-page-head dashboard-page-head-compact">
-      <h1>{{ activeView === 'overview' ? '仪表盘概览' : '任务甘特图' }}</h1>
-      <div class="dashboard-view-switch">
-        <button :class="{ active: activeView === 'overview' }" @click="activeView = 'overview'">仪表盘</button>
-        <button :class="{ active: activeView === 'gantt' }" @click="activeView = 'gantt'">甘特图</button>
-      </div>
+      <h1>任务甘特图</h1>
     </header>
 
     <div v-if="feedback.message" class="panel dashboard-feedback">
@@ -13,214 +9,92 @@
       <p :class="feedback.type === 'success' ? 'success-text' : 'error-text'">{{ feedback.message }}</p>
     </div>
 
-    <template v-if="activeView === 'overview'">
-      <section class="panel dashboard-metrics-panel">
-        <div class="dashboard-panel-title">
-          <span class="dashboard-title-icon">□</span>
-          <h2>任务指标统计</h2>
+    <section class="gantt-summary-cards">
+      <article class="gantt-summary-card clickable" @click="openTaskList('inProgress')">
+        <div class="gantt-summary-top">
+          <span>进行中任务</span>
+          <img class="gantt-summary-icon icon-running" :src="iconRunning" alt="" aria-hidden="true" />
         </div>
-        <div class="dashboard-metrics-body">
-          <div class="dashboard-completion-ring">
-            <svg viewBox="0 0 180 180" aria-hidden="true">
-              <circle cx="90" cy="90" r="74" class="dashboard-ring-bg" />
-              <circle
-                cx="90"
-                cy="90"
-                r="74"
-                class="dashboard-ring-value"
-                :style="{ strokeDashoffset: completionCircleOffset }"
-              />
-            </svg>
-            <div>
-              <strong>{{ summary.completion_rate }}%</strong>
-              <span>总完成率</span>
-            </div>
-          </div>
-
-          <div class="dashboard-metric-cards">
-            <article class="dashboard-metric-card">
-              <span>总任务数</span>
-              <strong>{{ summary.task_total }}</strong>
-              <small>系统内全部任务</small>
-            </article>
-            <article class="dashboard-metric-card">
-              <span>未开始</span>
-              <strong>{{ summary.pending_total }}</strong>
-              <small>等待启动</small>
-            </article>
-            <article class="dashboard-metric-card">
-              <span>进行中</span>
-              <strong>{{ summary.in_progress_total }}</strong>
-              <small>正在推进</small>
-            </article>
-            <article class="dashboard-metric-card success">
-              <span>已完成</span>
-              <strong>{{ summary.done_total }}</strong>
-              <small>完成率 {{ summary.completion_rate }}%</small>
-            </article>
-            <article class="dashboard-metric-card danger">
-              <span>已延期</span>
-              <strong>{{ summary.delayed_total }}</strong>
-              <small>需重点跟进</small>
-            </article>
-          </div>
+        <strong>{{ summary.in_progress_total }}</strong>
+      </article>
+      <article v-if="notStartedTotal > 0" class="gantt-summary-card clickable" @click="openTaskList('notStarted')">
+        <div class="gantt-summary-top">
+          <span>未开始任务</span>
+          <img class="gantt-summary-icon icon-pending" :src="iconPending" alt="" aria-hidden="true" />
         </div>
-      </section>
+        <strong>{{ notStartedTotal }}</strong>
+      </article>
+      <article class="gantt-summary-card clickable" @click="openTaskList('dueToday')">
+        <div class="gantt-summary-top">
+          <span>今日到期</span>
+          <img class="gantt-summary-icon icon-due" :src="iconDue" alt="" aria-hidden="true" />
+        </div>
+        <strong>{{ dueTodayTotal }}</strong>
+        <small class="warning-text">{{ dueTodayUrgentText }}</small>
+      </article>
+      <article class="gantt-summary-card danger clickable" @click="openTaskList('delayed')">
+        <div class="gantt-summary-top">
+          <span>已延期</span>
+          <img class="gantt-summary-icon icon-delayed" :src="iconDelayed" alt="" aria-hidden="true" />
+        </div>
+        <strong>{{ summary.delayed_total }}!</strong>
+        <small>立即处理</small>
+      </article>
+      <article class="gantt-summary-card">
+        <div class="gantt-summary-top">
+          <span>待确认提醒</span>
+          <img class="gantt-summary-icon icon-notice" :src="iconNotice" alt="" aria-hidden="true" />
+        </div>
+        <strong>{{ pendingNoticeTotal }}</strong>
+        <div class="gantt-summary-links">
+          <button class="gantt-summary-link" type="button" @click="openTaskList('pendingEmail')">邮件:{{ pendingEmailTotal }}</button>
+          <button class="gantt-summary-link" type="button" @click="openTaskList('pendingQax')">即时消息:{{ pendingQaxTotal }}</button>
+        </div>
+      </article>
+    </section>
 
-      <div class="dashboard-grid-main">
-        <section class="panel dashboard-notice-analysis">
-          <div class="dashboard-panel-title split">
-            <h2>通知分析</h2>
-            <span class="dashboard-trend-icon">⌁</span>
-          </div>
-
-          <article class="dashboard-notice-block">
-            <div class="dashboard-notice-line">
-              <div>
-                <strong>邮件性能</strong>
-                <p>{{ summary.mail_failure_total }} 条异常 · {{ summary.retry_total }} 次重试</p>
-              </div>
-              <b>{{ percentText(summary.email_success_rate) }}</b>
-            </div>
-            <div class="dashboard-notice-meta">
-              <span>发送成功率</span>
-              <span>{{ percentText(summary.email_success_rate) }}</span>
-            </div>
-            <div class="dashboard-notice-track">
-              <span :style="{ width: `${safePercent(summary.email_success_rate)}%` }"></span>
-            </div>
-          </article>
-
-          <article class="dashboard-notice-block">
-            <div class="dashboard-notice-line">
-              <div>
-                <strong>即时消息性能</strong>
-                <p>企安信送达率 {{ percentText(summary.qax_delivery_rate) }}</p>
-              </div>
-              <b>{{ percentText(summary.qax_read_rate) }}</b>
-            </div>
-            <div class="dashboard-notice-meta">
-              <span>已读率</span>
-              <span>{{ percentText(summary.qax_read_rate) }}</span>
-            </div>
-            <div class="dashboard-notice-track active">
-              <span :style="{ width: `${safePercent(summary.qax_read_rate)}%` }"></span>
-            </div>
-          </article>
-        </section>
-
-        <section class="panel dashboard-sync-panel">
-          <div class="dashboard-panel-title">
-            <span class="dashboard-title-icon">↻</span>
-            <h2>同步控制中心</h2>
-          </div>
-          <div class="dashboard-sync-list">
-            <article class="dashboard-sync-card">
-              <div>
-                <span class="dashboard-sync-icon">✉</span>
-                <div>
-                  <strong>邮件通讯同步</strong>
-                  <p>手动采集邮箱任务回复和状态反馈</p>
-                </div>
-              </div>
-              <button :disabled="actionLoading" @click="pollInbox">刷新</button>
-            </article>
-            <article class="dashboard-sync-card">
-              <div>
-                <span class="dashboard-sync-icon">⚡</span>
-                <div>
-                  <strong>即时消息同步</strong>
-                  <p>采集 QAX 消息送达和已读状态</p>
-                </div>
-              </div>
-              <button :disabled="actionLoading" @click="collectQaxStatus">采集</button>
-            </article>
-          </div>
-          <div class="dashboard-system-line">
-            <span>系统运行状态</span>
-            <strong><i></i>正常运行中</strong>
-          </div>
-        </section>
-      </div>
-
-      <div class="dashboard-grid-bottom">
-        <section class="panel dashboard-distribution-panel dashboard-owner-panel">
-          <h2>任务按负责人分布</h2>
-          <div class="dashboard-distribution-body compact">
-            <div class="dashboard-donut small" :style="{ background: ownerDonutGradient }"></div>
-            <div class="dashboard-distribution-list">
-              <div v-for="item in ownerDistribution" :key="item.owner_name">
-                <span><i :style="{ background: item.color }"></i>{{ item.owner_name }}</span>
-                <strong>{{ item.task_total }}</strong>
-              </div>
-              <div v-if="ownerDistribution.length === 0">
-                <span><i></i>暂无负责人</span>
-                <strong>0</strong>
-              </div>
-            </div>
-          </div>
-          <div class="dashboard-owner-mini">
-            <span>已延期 {{ summary.delayed_total }}</span>
-            <span>即将延期 {{ summary.due_soon_total }}</span>
-          </div>
-        </section>
-
-        <section class="panel dashboard-warning-panel">
-          <div class="dashboard-panel-title split">
-            <h2>任务预警状态</h2>
-          </div>
-          <table class="table dashboard-warning-table">
-            <thead>
-              <tr>
-                <th>任务名称</th>
-                <th>负责人</th>
-                <th>延期状态</th>
-                <th>截止时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-if="warningTasks.length === 0">
-                <td colspan="5">暂无即将到期或已延期任务</td>
-              </tr>
-              <tr v-for="task in warningTasks" :key="task.task_id">
-                <td>{{ task.title }}</td>
-                <td>{{ task.owner_name || '-' }}</td>
-                <td>
-                  <span :class="task.warning_type === 'delayed' ? 'status-tone status-tone-danger' : 'status-tone status-tone-warning'">
-                    {{ task.warning_text }}
-                  </span>
-                </td>
-                <td>{{ formatDateTime(task.end_at) }}</td>
-                <td><router-link class="button secondary small" :to="task.route || `/admin/tasks/${task.task_id}`">查看详情</router-link></td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-      </div>
-    </template>
-
-    <template v-else>
       <section class="panel gantt-panel">
         <div class="gantt-toolbar">
           <div class="gantt-filters">
-            <label>
-              <span>成员</span>
-              <select v-model="ganttOwner">
-                <option value="">全部成员</option>
-                <option v-for="name in ganttOwners" :key="name" :value="name">{{ name }}</option>
-              </select>
-            </label>
-            <label>
-              <span>任务状态</span>
-              <select v-model="ganttStatus">
-                <option value="">所有状态</option>
-                <option value="not_started">未开始</option>
-                <option value="in_progress">进行中</option>
-                <option value="done">已完成</option>
-                <option value="canceled">已取消</option>
-              </select>
-            </label>
+            <div class="multi-filter">
+              <button class="button secondary small" @click="ownerFilterOpen = !ownerFilterOpen">成员：{{ selectedOwnerText }}</button>
+              <div v-if="ownerFilterOpen" class="multi-filter-menu">
+                <label class="multi-filter-all">
+                  <span>全选</span>
+                  <input type="checkbox" :checked="isAllOwnersSelected" @change="toggleAllOwners" />
+                </label>
+                <label v-for="name in ganttOwners" :key="name">
+                  <span>{{ name }}</span>
+                  <input v-model="ganttOwnersSelected" type="checkbox" :value="name" />
+                </label>
+              </div>
+            </div>
+            <div class="multi-filter">
+              <button class="button secondary small" @click="statusFilterOpen = !statusFilterOpen">状态：{{ selectedStatusText }}</button>
+              <div v-if="statusFilterOpen" class="multi-filter-menu">
+                <label class="multi-filter-all">
+                  <span>全选</span>
+                  <input type="checkbox" :checked="isAllStatusesSelected" @change="toggleAllStatuses" />
+                </label>
+                <label v-for="item in statusOptions" :key="item.value">
+                  <span>{{ item.label }}</span>
+                  <input v-model="ganttStatusesSelected" type="checkbox" :value="item.value" />
+                </label>
+              </div>
+            </div>
+            <div class="multi-filter">
+              <button class="button secondary small" @click="delayFilterOpen = !delayFilterOpen">延期：{{ selectedDelayText }}</button>
+              <div v-if="delayFilterOpen" class="multi-filter-menu">
+                <label class="multi-filter-all">
+                  <span>全选</span>
+                  <input type="checkbox" :checked="isAllDelaySelected" @change="toggleAllDelay" />
+                </label>
+                <label v-for="item in delayOptions" :key="item.value">
+                  <span>{{ item.label }}</span>
+                  <input v-model="ganttDelaySelected" type="checkbox" :value="item.value" />
+                </label>
+              </div>
+            </div>
             <div class="gantt-scale-switch" aria-label="时间维度">
               <button :class="{ active: ganttScale === 'day' }" @click="ganttScale = 'day'">日</button>
               <button :class="{ active: ganttScale === 'week' }" @click="ganttScale = 'week'">周</button>
@@ -231,7 +105,6 @@
             <span class="gantt-legend running"><i></i>进行中</span>
             <span class="gantt-legend done"><i></i>已完成</span>
             <span class="gantt-legend delayed"><i></i>已延期</span>
-            <button class="button secondary" @click="exportGantt">导出数据</button>
             <button @click="createOpen = true">新增任务</button>
           </div>
         </div>
@@ -280,30 +153,159 @@
           </template>
         </div>
       </section>
-    </template>
 
     <div v-if="createOpen" class="modal-mask" @click.self="closeCreate">
       <div class="modal-card task-modal-card">
         <TaskEditorForm @cancel="closeCreate" @saved="handleCreated" />
       </div>
     </div>
+
+    <div v-if="taskListModal" class="modal-mask" @click.self="closeTaskList">
+      <div class="modal-card gantt-list-modal">
+        <div class="gantt-list-modal-head">
+          <div>
+            <h2>{{ taskListModalTitle }}</h2>
+            <p>共 {{ taskListModalItems.length }} 项</p>
+          </div>
+          <button class="button secondary small" type="button" @click="closeTaskList">关闭</button>
+        </div>
+        <table v-if="!isNotificationListModal" class="table task-table">
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>负责人</th>
+              <th>状态</th>
+              <th>截止时间</th>
+              <th>优先级</th>
+              <th>通知</th>
+              <th>子任务</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="taskListModalItems.length === 0">
+              <td colspan="8">暂无相关任务</td>
+            </tr>
+            <tr v-for="task in taskListModalItems" :key="task.id">
+              <td>
+                <div class="task-table-title">{{ task.title }}</div>
+                <div class="subtle-text clamp-2">{{ task.content }}</div>
+              </td>
+              <td>{{ joinNames(task.responsible_names) || task.owner_name || '-' }}</td>
+              <td><span :class="statusUi(task).tone">{{ statusUi(task).text }}</span></td>
+              <td>
+                <div>{{ formatDateTime(task.end_at) }}</div>
+                <div v-if="task.completed_at" class="subtle-text">完成时间：{{ formatDateTime(task.completed_at) }}</div>
+                <div v-if="taskDelayStatus(task).text" :class="taskDelayStatus(task).className">{{ taskDelayStatus(task).text }}</div>
+              </td>
+              <td><span :class="resolvePriorityMeta(task.priority).tone">{{ resolvePriorityMeta(task.priority).label }}</span></td>
+              <td>
+                <div class="task-channel-stack">
+                  <span>邮件：{{ task.latest_notifications?.email?.summary || '暂无' }}</span>
+                  <span>即时消息：{{ task.latest_notifications?.qax?.summary || '暂无' }}</span>
+                </div>
+              </td>
+              <td>{{ task.subtask_count || 0 }}</td>
+              <td>
+                <div class="toolbar compact-toolbar">
+                  <button class="button secondary small" type="button" @click="openTaskDetail(task.id)">详情</button>
+                  <button class="button secondary small" type="button" :disabled="actionLoading" @click="remindTask(task.id)">提醒</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <table v-else class="table">
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>提醒场景</th>
+              <th>状态</th>
+              <th>送达</th>
+              <th>反馈</th>
+              <th>未读人员</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="taskListModalItems.length === 0">
+              <td colspan="8">暂无相关通知</td>
+            </tr>
+            <tr v-for="item in taskListModalItems" :key="`${taskListModal}-${item.pending_key || item.id}`">
+              <td>{{ item.task_title || item.title || '-' }}</td>
+              <td>
+                <div>{{ item.notify_scene_text || item.notify_type_text || item.latest_notifications?.[notificationChannel]?.notify_type_text || '-' }}</div>
+                <div class="subtle-text" v-if="item.remind_focus">{{ item.remind_focus }}</div>
+              </td>
+              <td>{{ item.status_text || notificationStatusText(item) }}</td>
+              <td>{{ notificationDeliveryText(item) }}</td>
+              <td>{{ notificationReadText(item) }}</td>
+              <td>{{ notificationUnreadNames(item) }}</td>
+              <td>{{ formatDateTime(item.created_at || item.latest_notifications?.[notificationChannel]?.sent_at) }}</td>
+              <td>
+                <div class="toolbar compact-toolbar">
+                  <button
+                    class="button secondary small"
+                    type="button"
+                    @click="openTaskDetail(item.task_id || item.id)"
+                  >
+                    任务详情
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div v-if="detailTaskId" class="modal-mask" @click.self="closeTaskDetail">
+      <div class="modal-card task-modal-card task-detail-modal-card">
+        <AdminTaskDetail :task-id="detailTaskId" @cancel="closeTaskDetail" />
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import http from '../../api/http'
+import AdminTaskDetail from './AdminTaskDetail.vue'
 import TaskEditorForm from '../../components/admin/TaskEditorForm.vue'
+import iconDue from '../../assets/icons/clock.svg'
+import iconDelayed from '../../assets/icons/triangle-alert.svg'
+import iconNotice from '../../assets/icons/mail.svg'
+import iconPending from '../../assets/icons/circle-play.svg'
+import iconRunning from '../../assets/icons/trending-up.svg'
+import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
+import { formatExportTimestamp } from '../../utils/exportTable'
 import { formatDateTime } from '../../utils/format'
 
 const actionLoading = ref(false)
-const activeView = ref('overview')
 const feedback = ref({ title: '', message: '', type: 'success' })
 const tasks = ref([])
+const taskDetails = ref([])
 const createOpen = ref(false)
-const ganttOwner = ref('')
-const ganttStatus = ref('')
+const ganttOwnersSelected = ref([])
+const ganttStatusesSelected = ref([])
+const ganttDelaySelected = ref([])
 const ganttScale = ref('day')
+const ownerFilterOpen = ref(false)
+const statusFilterOpen = ref(false)
+const delayFilterOpen = ref(false)
+const taskListModal = ref('')
+const detailTaskId = ref(null)
+let feedbackTimerId = null
+const statusOptions = [
+  { value: 'not_started', label: '未开始' },
+  { value: 'in_progress', label: '进行中' },
+  { value: 'done', label: '已完成' },
+]
+const delayOptions = [
+  { value: 'delayed', label: '已延期' },
+  { value: 'due_soon', label: '即将延期' },
+]
 const summary = ref({
   task_total: 0,
   in_progress_total: 0,
@@ -348,12 +350,76 @@ const ownerDonutGradient = computed(() => {
 
 const warningTasks = computed(() => summary.value.warning_tasks || [])
 const ganttOwners = computed(() => Array.from(new Set(tasks.value.map((task) => task.owner_name || joinNames(task.responsible_names)).filter(Boolean))).sort())
+const isAllOwnersSelected = computed(() => ganttOwners.value.length > 0 && ganttOwnersSelected.value.length === ganttOwners.value.length)
+const isAllStatusesSelected = computed(() => ganttStatusesSelected.value.length === statusOptions.length)
+const isAllDelaySelected = computed(() => ganttDelaySelected.value.length === delayOptions.length)
+const selectedOwnerText = computed(() => ganttOwnersSelected.value.length ? `${ganttOwnersSelected.value.length} 项` : '全部成员')
+const selectedStatusText = computed(() => {
+  if (!ganttStatusesSelected.value.length) return '所有状态'
+  return statusOptions.filter((item) => ganttStatusesSelected.value.includes(item.value)).map((item) => item.label).join('、')
+})
+const selectedDelayText = computed(() => {
+  if (!ganttDelaySelected.value.length) return '全部'
+  return delayOptions.filter((item) => ganttDelaySelected.value.includes(item.value)).map((item) => item.label).join('、')
+})
+const dueTodayTotal = computed(() => {
+  const today = startOfDay(new Date()).getTime()
+  return tasks.value.filter((task) => {
+    if (!task.end_at || ['done', 'canceled'].includes(task.main_status)) return false
+    const endDate = new Date(task.end_at)
+    return !Number.isNaN(endDate.getTime()) && startOfDay(endDate).getTime() === today
+  }).length
+})
+const dueTodayUrgentText = computed(() => dueTodayTotal.value > 0 ? `${dueTodayTotal.value} 项待跟进` : '暂无到期')
+const notStartedTasks = computed(() => tasks.value.filter((task) => task.main_status === 'not_started'))
+const notStartedTotal = computed(() => notStartedTasks.value.length)
+const dueTodayTasks = computed(() => {
+  const today = startOfDay(new Date()).getTime()
+  return tasks.value.filter((task) => {
+    if (!task.end_at || ['done', 'canceled'].includes(task.main_status)) return false
+    const endDate = new Date(task.end_at)
+    return !Number.isNaN(endDate.getTime()) && startOfDay(endDate).getTime() === today
+  })
+})
+const inProgressTasks = computed(() => tasks.value.filter((task) => task.main_status === 'in_progress'))
+const delayedTasks = computed(() => tasks.value.filter((task) => isGanttTaskDelayed(task)))
+const pendingEmailTasks = computed(() => buildPendingNotificationItems('email'))
+const pendingQaxTasks = computed(() => buildPendingNotificationItems('qax'))
+const pendingEmailTotal = computed(() => pendingEmailTasks.value.length)
+const pendingQaxTotal = computed(() => pendingQaxTasks.value.length)
+const pendingNoticeTotal = computed(() => pendingEmailTotal.value + pendingQaxTotal.value)
+const taskListModalTitle = computed(() => {
+  const titles = {
+    notStarted: '未开始任务',
+    inProgress: '进行中任务',
+    dueToday: '今日到期任务',
+    delayed: '已延期任务',
+    pendingEmail: '待确认邮件列表',
+    pendingQax: '待确认即时消息列表',
+  }
+  return titles[taskListModal.value] || '任务列表'
+})
+const isNotificationListModal = computed(() => ['pendingEmail', 'pendingQax'].includes(taskListModal.value))
+const notificationChannel = computed(() => (taskListModal.value === 'pendingEmail' ? 'email' : 'qax'))
+const taskListModalItems = computed(() => {
+  const groups = {
+    notStarted: notStartedTasks.value,
+    inProgress: inProgressTasks.value,
+    dueToday: dueTodayTasks.value,
+    delayed: delayedTasks.value,
+    pendingEmail: pendingEmailTasks.value,
+    pendingQax: pendingQaxTasks.value,
+  }
+  return groups[taskListModal.value] || []
+})
 const filteredGanttTasks = computed(() =>
   tasks.value.filter((task) => {
     const owner = task.owner_name || joinNames(task.responsible_names)
-    const matchOwner = !ganttOwner.value || owner === ganttOwner.value
-    const matchStatus = !ganttStatus.value || task.main_status === ganttStatus.value
-    return matchOwner && matchStatus
+    const matchOwner = ganttOwnersSelected.value.length === 0 || ganttOwnersSelected.value.includes(owner)
+    const matchStatus = ganttStatusesSelected.value.length === 0 || ganttStatusesSelected.value.includes(task.main_status)
+    const delayState = resolveGanttDelayState(task)
+    const matchDelay = ganttDelaySelected.value.length === 0 || ganttDelaySelected.value.includes(delayState)
+    return matchOwner && matchStatus && matchDelay
   })
 )
 
@@ -409,6 +475,196 @@ function percentText(value) {
 
 function joinNames(names) {
   return Array.isArray(names) && names.length > 0 ? names.join('、') : ''
+}
+
+function toggleAllOwners() {
+  ganttOwnersSelected.value = isAllOwnersSelected.value ? [] : [...ganttOwners.value]
+}
+
+function toggleAllStatuses() {
+  ganttStatusesSelected.value = isAllStatusesSelected.value ? [] : statusOptions.map((item) => item.value)
+}
+
+function toggleAllDelay() {
+  ganttDelaySelected.value = isAllDelaySelected.value ? [] : delayOptions.map((item) => item.value)
+}
+
+function closeFloatingFilters(event) {
+  if (event.target?.closest?.('.multi-filter')) return
+  ownerFilterOpen.value = false
+  statusFilterOpen.value = false
+  delayFilterOpen.value = false
+}
+
+function openTaskList(type) {
+  taskListModal.value = type
+}
+
+function closeTaskList() {
+  taskListModal.value = ''
+}
+
+function openTaskDetail(taskId) {
+  detailTaskId.value = taskId
+}
+
+function closeTaskDetail() {
+  detailTaskId.value = null
+}
+
+async function remindTask(taskId) {
+  if (!window.confirm('确认向该任务负责人发送提醒？')) return
+  actionLoading.value = true
+  try {
+    await http.post(`/tasks/${taskId}/remind`)
+    await loadSummary()
+    showFeedback('发送成功', '提醒已发送，将在 3 秒后自动隐藏。')
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+function statusUi(task) {
+  return resolveTaskStatusTone(task)
+}
+
+function taskDelayStatus(task) {
+  const status = resolveDelayStatus(task)
+  return {
+    text: status.text,
+    className: status.className,
+  }
+}
+
+function resolveDelayStatus(item) {
+  if (!item || ['done', 'canceled'].includes(item.main_status)) return { text: '', className: '' }
+  const delayDays = Number(item.delay_days || 0)
+  if (delayDays > 0) return { text: `已延期${delayDays}天`, className: 'error-text task-delay-text' }
+  const endDate = new Date(item.end_at)
+  if (Number.isNaN(endDate.getTime())) return { text: '', className: '' }
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const endDay = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate()).getTime()
+  const daysToDue = Math.ceil((endDay - startOfToday) / 86400000)
+  if (daysToDue < 0) return { text: `已延期${Math.abs(daysToDue)}天`, className: 'error-text task-delay-text' }
+  if (daysToDue >= 0 && daysToDue <= 3) return { text: '即将延期', className: 'warning-text task-delay-text' }
+  return { text: '', className: '' }
+}
+
+function resolveGanttDelayState(task) {
+  const status = resolveDelayStatus(task)
+  if (!status.text) return ''
+  return status.text.includes('即将延期') ? 'due_soon' : 'delayed'
+}
+
+function buildPendingNotificationItems(channel) {
+  return taskDetails.value
+    .map((task) => buildPendingNotificationItem(task, channel))
+    .filter(Boolean)
+}
+
+function buildPendingNotificationItem(task, channel) {
+  const sources = [
+    { label: '主任务', name: '', status: task.latest_notifications?.[channel] || {} },
+    ...(task.members || []).map((member) => ({
+      label: '主任务',
+      name: member.name,
+      status: member.latest_notifications?.[channel] || {},
+    })),
+    ...(task.subtasks || []).map((subtask) => ({
+      label: subtask.title || subtask.content || '子任务',
+      name: subtask.assignee_name,
+      status: subtask.latest_notifications?.[channel] || {},
+    })),
+  ].filter((source) => source.status?.notification_id || source.status?.sent_at)
+  if (sources.length === 0) return null
+  const latestKey = latestNotificationKey(sources)
+  const latestSources = sources.filter((source) => notificationKey(source.status) === latestKey)
+  const pendingSources = latestSources.filter((source) => isPendingNotificationStatus(source.status, channel))
+  if (pendingSources.length === 0) return null
+  const unreadNames = uniqueValues(pendingSources.flatMap((source) => {
+    const names = source.status.pending_recipient_names || []
+    return names.length ? names : [source.name || notificationUnreadName(source.status)]
+  }))
+  const focusText = uniqueValues(pendingSources.map((source) => source.label)).join('、')
+  const baseStatus = task.latest_notifications?.[channel]?.notification_id === latestSources[0].status.notification_id
+    ? task.latest_notifications[channel]
+    : latestSources[0].status
+  return {
+    ...task,
+    id: task.id,
+    task_id: task.id,
+    task_title: task.title,
+    pending_key: `${task.id}-${channel}-${latestKey}`,
+    remind_focus: focusText,
+    latest_notifications: {
+      [channel]: {
+        ...baseStatus,
+        delivery_status: pendingSources.some((source) => source.status.delivery_status === 'failed') ? 'failed' : baseStatus.delivery_status,
+        read_status: 'unread',
+        read_status_text: `${unreadNames.length || pendingSources.length} 人未确认`,
+        pending_recipient_names: unreadNames,
+      },
+    },
+  }
+}
+
+function latestNotificationKey(sources) {
+  return sources
+    .map((source) => notificationKey(source.status))
+    .sort()
+    .at(-1)
+}
+
+function notificationKey(status) {
+  if (status.notification_id != null) return `id:${String(status.notification_id).padStart(12, '0')}`
+  return `time:${status.sent_at || ''}`
+}
+
+function uniqueValues(values) {
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+function isPendingNotificationStatus(status, channel) {
+  if (status.delivery_status === 'failed') return true
+  return channel === 'email' ? status.read_status === 'unread' : status.read_status !== 'read'
+}
+
+function notificationUnreadName(status) {
+  const names = status.pending_recipient_names || []
+  return Array.isArray(names) && names.length > 0 ? names[0] : ''
+}
+
+function notificationChannelText(item) {
+  return notificationChannel.value === 'email' ? '邮件' : '即时消息'
+}
+
+function notificationStatusText(item) {
+  const status = item.latest_notifications?.[notificationChannel.value] || {}
+  if (status.delivery_status === 'failed') return '发送失败'
+  if (status.read_status === 'read') return '已确认'
+  return '待确认'
+}
+
+function notificationDeliveryText(item) {
+  const status = item.latest_notifications?.[notificationChannel.value] || {}
+  if (status.delivery_status_text) return status.delivery_status_text
+  if (status.delivery_status === 'failed') return '异常'
+  if (status.delivery_status === 'delivered') return '已送达'
+  return status.summary || '-'
+}
+
+function notificationReadText(item) {
+  const status = item.latest_notifications?.[notificationChannel.value] || {}
+  if (status.read_status_text) return status.read_status_text
+  if (status.read_status === 'read') return '已读'
+  return status.summary || '未读'
+}
+
+function notificationUnreadNames(item) {
+  const status = item.latest_notifications?.[notificationChannel.value] || {}
+  const names = status.pending_recipient_names || []
+  return Array.isArray(names) && names.length > 0 ? names.join('、') : '-'
 }
 
 function resolveGanttMembers(task) {
@@ -521,14 +777,72 @@ function resolveDateProgress(task, status) {
 }
 
 function exportGantt() {
-  const rows = ganttRows.value.map((row) => `${row.title},${row.owner},${row.statusText},${row.durationDays}天`).join('\n')
-  const blob = new Blob([`任务,负责人,状态,周期\n${rows}`], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = '任务甘特图.csv'
-  link.click()
-  URL.revokeObjectURL(url)
+  const printWindow = window.open('', '_blank')
+  if (!printWindow) {
+    window.alert('浏览器拦截了 PDF 导出窗口，请允许弹窗后重试。')
+    return
+  }
+  printWindow.document.write(buildGanttPrintHtml())
+  printWindow.document.close()
+  printWindow.focus()
+  printWindow.print()
+}
+
+function formatGanttTickDate(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+function taskCoversTick(task, tickDate) {
+  if (!task.start_at || !task.end_at) return false
+  const start = startOfDay(new Date(task.start_at)).getTime()
+  const end = startOfDay(new Date(task.end_at)).getTime()
+  const tick = startOfDay(tickDate).getTime()
+  return !Number.isNaN(start) && !Number.isNaN(end) && tick >= start && tick <= end
+}
+
+function buildGanttPrintHtml() {
+  const page = document.querySelector('.dashboard-page')?.cloneNode(true)
+  if (!page) return '<!doctype html><meta charset="utf-8"><body>暂无可导出的甘特图</body>'
+  page.querySelectorAll('.dashboard-feedback, .modal-mask').forEach((item) => item.remove())
+  page.querySelectorAll('button').forEach((button) => {
+    if (button.classList.contains('gantt-summary-link')) return
+    button.remove()
+  })
+  const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style'))
+    .map((item) => item.outerHTML)
+    .join('')
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>项目助手甘特图${formatExportTimestamp()}</title>
+  ${styles}
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body { margin: 0; background: #f6f8fc; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .page { padding: 0; }
+    .app-topbar, .gantt-actions, .gantt-filters { display: none !important; }
+    .gantt-panel { box-shadow: none; }
+    .gantt-board { overflow: visible !important; width: max-content; min-width: 100%; }
+    .gantt-left { width: 260px; }
+    .gantt-row, .gantt-timeline { min-width: 900px; }
+  </style>
+</head>
+<body>
+  ${page.outerHTML}
+  <script>window.addEventListener('afterprint', () => window.close())<\/script>
+</body>
+</html>`
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 function closeCreate() {
@@ -537,12 +851,18 @@ function closeCreate() {
 
 async function handleCreated() {
   closeCreate()
-  activeView.value = 'gantt'
   await loadSummary()
 }
 
 function showFeedback(title, message, type = 'success') {
   feedback.value = { title, message, type }
+  if (feedbackTimerId) {
+    window.clearTimeout(feedbackTimerId)
+  }
+  feedbackTimerId = window.setTimeout(() => {
+    feedback.value = { title: '', message: '', type: 'success' }
+    feedbackTimerId = null
+  }, 3000)
 }
 
 async function loadSummary() {
@@ -552,6 +872,7 @@ async function loadSummary() {
   ])
   summary.value = summaryData
   tasks.value = taskData
+  taskDetails.value = await Promise.all(taskData.map((task) => http.get(`/tasks/${task.id}`).then((response) => response.data)))
 }
 
 async function pollInbox() {
@@ -580,5 +901,15 @@ async function collectQaxStatus() {
   }
 }
 
-onMounted(loadSummary)
+onMounted(() => {
+  document.addEventListener('click', closeFloatingFilters)
+  loadSummary()
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', closeFloatingFilters)
+  if (feedbackTimerId) {
+    window.clearTimeout(feedbackTimerId)
+  }
+})
 </script>

@@ -1,6 +1,6 @@
 <template>
   <section class="page" v-if="detail">
-    <div class="panel workspace-header">
+    <div v-if="!embedded" class="panel workspace-header">
       <div>
         <div class="workspace-eyebrow">通知详情</div>
         <h1 class="workspace-title">{{ detail.task_title || `通知 #${detail.id}` }}</h1>
@@ -8,13 +8,17 @@
       </div>
       <div class="toolbar">
         <router-link class="button secondary" :to="backPath">返回列表</router-link>
-        <router-link
-          v-if="detail.task_id"
-          class="button"
-          :to="taskPath"
-        >
-          查看任务
-        </router-link>
+        <button v-if="detail.task_id" class="button" type="button" @click="openTask">查看任务</button>
+      </div>
+    </div>
+    <div v-else class="modal-section-head">
+      <div>
+        <h2>{{ detail.task_title || `通知 #${detail.id}` }}</h2>
+        <p>查看通知正文，以及每位成员的送达、邮件回复或即时消息已读状态。</p>
+      </div>
+      <div class="toolbar">
+        <button v-if="detail.task_id" class="button secondary small" type="button" @click="openTask">查看任务</button>
+        <button class="button secondary small" type="button" @click="$emit('cancel')">关闭</button>
       </div>
     </div>
 
@@ -123,7 +127,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import { useAuthStore } from '../../stores/auth'
@@ -132,20 +136,23 @@ import { formatDateTime } from '../../utils/format'
 
 const route = useRoute()
 const auth = useAuthStore()
+const props = defineProps({
+  notificationId: {
+    type: [Number, String],
+    default: null,
+  },
+  embedded: {
+    type: Boolean,
+    default: false,
+  },
+})
+const emit = defineEmits(['cancel', 'open-task'])
 const detail = ref(null)
 const recipientFilter = ref('all')
 
 const defaultBackPath = computed(() => (auth.isAdmin ? '/admin/notifications' : '/member/notifications'))
 const backPath = computed(() => route.query.from || defaultBackPath.value)
-const taskPath = computed(() => {
-  if (!detail.value?.task_id) return backPath.value
-  return {
-    path: auth.isAdmin ? `/admin/tasks/${detail.value.task_id}` : `/member/tasks/${detail.value.task_id}`,
-    query: {
-      from: route.fullPath,
-    },
-  }
-})
+const currentNotificationId = computed(() => props.notificationId || route.params.id)
 
 const recipientFilterOptions = computed(() => {
   const recipients = detail.value?.recipients || []
@@ -170,10 +177,22 @@ const filteredRecipients = computed(() => {
 })
 
 async function loadDetail() {
-  const { data } = await http.get(`/notifications/${route.params.id}`)
+  if (!currentNotificationId.value) return
+  const { data } = await http.get(`/notifications/${currentNotificationId.value}`, {
+    skipGlobalLoading: props.embedded,
+  })
   detail.value = data
   recipientFilter.value = 'all'
 }
 
 onMounted(loadDetail)
+watch(currentNotificationId, loadDetail)
+
+function openTask() {
+  if (props.embedded) {
+    emit('open-task', detail.value.task_id)
+    return
+  }
+  window.location.assign(auth.isAdmin ? `/admin/tasks/${detail.value.task_id}` : `/member/tasks/${detail.value.task_id}`)
+}
 </script>

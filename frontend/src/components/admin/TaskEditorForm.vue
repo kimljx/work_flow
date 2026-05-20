@@ -22,7 +22,7 @@
             <option value="low">低</option>
           </select>
         </div>
-        <div>
+        <div v-if="isEdit">
           <label>开始时间</label>
           <input v-model="form.start_at" type="datetime-local" required />
         </div>
@@ -70,7 +70,6 @@
               <div class="task-responsible-subtasks-head">
                 <div>
                   <strong>子任务</strong>
-                  <p class="subtle-text">直接以列表形式维护，不再单独使用子任务卡片。</p>
                 </div>
                 <button
                   type="button"
@@ -82,11 +81,7 @@
                 </button>
               </div>
 
-              <div v-if="subtasksForUser(user.id).length === 0" class="muted-block task-responsible-subtasks-empty">
-                当前没有子任务，可以只创建主任务。
-              </div>
-
-              <div v-else class="task-responsible-subtask-list">
+              <div v-if="subtasksForUser(user.id).length > 0" class="task-responsible-subtask-list">
                 <div
                   v-for="(item, index) in subtasksForUser(user.id)"
                   :key="item.local_key"
@@ -109,27 +104,6 @@
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="isEdit" class="panel">
-        <div class="section-head">
-          <div>
-            <h3>里程碑</h3>
-            <p>保留可选里程碑，未填写时不会创建。</p>
-          </div>
-          <button type="button" class="button secondary small" :disabled="submitting" @click="addMilestone">新增里程碑</button>
-        </div>
-        <div v-if="form.milestones.length === 0" class="muted-block">不需要里程碑时可以留空。</div>
-        <div v-else class="task-simple-list">
-          <div v-for="(item, index) in form.milestones" :key="index" class="task-simple-row task-simple-row-form">
-            <div class="task-simple-main task-milestone-inline">
-              <input v-model="item.name" placeholder="里程碑名称" />
-              <input v-model="item.planned_at" type="datetime-local" />
-              <input v-model="item.remind_offsets_text" placeholder="提醒天数，如 1,3" />
-            </div>
-            <button type="button" class="button danger small" :disabled="submitting" @click="removeMilestone(index)">删除</button>
           </div>
         </div>
       </div>
@@ -172,7 +146,7 @@ const form = reactive({
   content: '',
   start_at: '',
   end_at: '',
-  due_remind_days: 0,
+  due_remind_days: 2,
   priority: 'medium',
   milestones: [],
   subtasks: [],
@@ -196,6 +170,16 @@ function buildDefaultTaskDateTime(hour, minute = 0) {
   const now = new Date()
   now.setHours(hour, minute, 0, 0)
   return toDateTimeLocal(now)
+}
+
+function buildDefaultEndDateTime() {
+  const now = new Date()
+  const end = new Date()
+  end.setHours(18, 0, 0, 0)
+  if (end <= now) {
+    end.setDate(end.getDate() + 1)
+  }
+  return toDateTimeLocal(end)
 }
 
 function subtasksForUser(userId) {
@@ -237,8 +221,9 @@ async function loadUsers() {
 
 async function loadTask() {
   if (!isEdit.value) {
-    form.start_at = buildDefaultTaskDateTime(8, 30)
-    form.end_at = buildDefaultTaskDateTime(18)
+    form.start_at = toDateTimeLocal(new Date())
+    form.end_at = buildDefaultEndDateTime()
+    form.due_remind_days = 2
     return
   }
   const { data } = await http.get(`/tasks/${props.taskId}`)
@@ -269,9 +254,10 @@ async function submit() {
     return
   }
   const startAt = toBackendDateTime(form.start_at)
+  const createStartAt = isEdit.value ? startAt : toBackendDateTime(new Date())
   const endAt = toBackendDateTime(form.end_at)
-  if (!startAt || !endAt) {
-    window.alert('请填写完整的开始时间和截止时间')
+  if (!createStartAt || !endAt) {
+    window.alert('请填写完整的截止时间')
     return
   }
   const milestones = []
@@ -316,7 +302,7 @@ async function submit() {
     content: form.content,
     owner_id: responsibleIds[0],
     participant_ids: responsibleIds.slice(1),
-    start_at: startAt,
+    start_at: createStartAt,
     end_at: endAt,
     due_remind_days: Math.max(0, Number(form.due_remind_days || 0)),
     priority: form.priority,

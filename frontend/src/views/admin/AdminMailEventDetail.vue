@@ -1,6 +1,6 @@
 <template>
   <section class="page" v-if="detail">
-    <div class="panel workspace-header">
+    <div v-if="!embedded" class="panel workspace-header">
       <div>
         <div class="workspace-eyebrow">邮件详情</div>
         <h1 class="workspace-title">{{ detail.template_name || `匹配邮件 #${detail.id}` }}</h1>
@@ -8,7 +8,17 @@
       </div>
       <div class="toolbar">
         <router-link class="button secondary" to="/admin/mail-events">返回邮件列表</router-link>
-        <router-link v-if="detail.task_id" class="button" :to="`/admin/tasks/${detail.task_id}`">查看任务</router-link>
+        <button v-if="detail.task_id" class="button" type="button" @click="openTask">查看任务</button>
+      </div>
+    </div>
+    <div v-else class="modal-section-head">
+      <div>
+        <h2>{{ detail.template_name || `匹配邮件 #${detail.id}` }}</h2>
+        <p>查看匹配到的邮件内容、命中的模板和落库后的业务动作。</p>
+      </div>
+      <div class="toolbar">
+        <button v-if="detail.task_id" class="button secondary small" type="button" @click="openTask">查看任务</button>
+        <button class="button secondary small" type="button" @click="$emit('cancel')">关闭</button>
       </div>
     </div>
 
@@ -97,15 +107,27 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import { notifyTypeText } from '../../constants/notifyTypes'
 import { formatDateTime } from '../../utils/format'
 
 const route = useRoute()
+const props = defineProps({
+  eventId: {
+    type: [Number, String],
+    default: null,
+  },
+  embedded: {
+    type: Boolean,
+    default: false,
+  },
+})
+const emit = defineEmits(['cancel', 'open-task'])
 const detail = ref(null)
 const showOriginalMail = ref(false)
+const currentEventId = computed(() => props.eventId || route.params.id)
 
 const prettyActionResult = computed(() => {
   if (!detail.value?.action_result_json) return '暂无业务动作结果'
@@ -129,9 +151,21 @@ function decodeMailText(content) {
 }
 
 async function loadDetail() {
-  const { data } = await http.get(`/admin/mail/events/${route.params.id}`)
+  if (!currentEventId.value) return
+  const { data } = await http.get(`/admin/mail/events/${currentEventId.value}`, {
+    skipGlobalLoading: props.embedded,
+  })
   detail.value = data
 }
 
 onMounted(loadDetail)
+watch(currentEventId, loadDetail)
+
+function openTask() {
+  if (props.embedded) {
+    emit('open-task', detail.value.task_id)
+    return
+  }
+  window.location.assign(`/admin/tasks/${detail.value.task_id}`)
+}
 </script>

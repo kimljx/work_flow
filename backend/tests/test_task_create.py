@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timedelta
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_task_create.db"
 
@@ -43,6 +44,7 @@ class TaskCreateTestCase(unittest.TestCase):
             db.commit()
 
     def test_create_task_should_not_raise_owner_member_name_error(self) -> None:
+        end_at = datetime.now() + timedelta(days=2)
         with TestClient(app) as client:
             login_response = client.post("/api/v1/auth/login", json={"username": "admin", "password": "ChangeMe123"})
             self.assertEqual(login_response.status_code, 200)
@@ -56,7 +58,7 @@ class TaskCreateTestCase(unittest.TestCase):
                     "owner_id": 1,
                     "participant_ids": [2],
                     "start_at": "2026-05-01T09:00:00",
-                    "end_at": "2026-05-03T18:00:00",
+                    "end_at": end_at.isoformat(timespec="seconds"),
                     "priority": "high",
                     "remark": "测试备注",
                     "due_remind_days": 1,
@@ -74,7 +76,10 @@ class TaskCreateTestCase(unittest.TestCase):
             task = db.query(Task).filter(Task.title == "创建任务接口回归测试").first()
             self.assertIsNotNone(task)
 
-    def test_create_overdue_task_does_not_auto_complete(self) -> None:
+    def test_create_task_keeps_not_started_until_qax_read(self) -> None:
+        """Web 创建任务使用服务端创建时间作为开始时间，并保持未开始直到 QAX 已读。"""
+        request_started_at = datetime.now()
+        end_at = request_started_at + timedelta(days=2)
         with TestClient(app) as client:
             login_response = client.post("/api/v1/auth/login", json={"username": "admin", "password": "ChangeMe123"})
             self.assertEqual(login_response.status_code, 200)
@@ -83,12 +88,12 @@ class TaskCreateTestCase(unittest.TestCase):
             response = client.post(
                 "/api/v1/tasks",
                 json={
-                    "title": "overdue should stay active",
-                    "content": "deadline is past but status must not become done",
+                    "title": "time should not start task",
+                    "content": "start_at is in the past but status must stay not_started",
                     "owner_id": 1,
                     "participant_ids": [2],
-                    "start_at": "2026-05-07T09:00:00",
-                    "end_at": "2026-05-08T18:00:00",
+                    "start_at": "2000-01-01T09:00:00",
+                    "end_at": end_at.isoformat(timespec="seconds"),
                     "priority": "high",
                     "remark": "",
                     "due_remind_days": 1,
@@ -99,14 +104,19 @@ class TaskCreateTestCase(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["main_status"], "in_progress")
+            self.assertEqual(payload["main_status"], "not_started")
             self.assertIsNone(payload["completed_at"])
+            response_started_at = datetime.fromisoformat(payload["start_at"])
+            self.assertGreaterEqual(response_started_at, request_started_at - timedelta(seconds=2))
+            self.assertLessEqual(response_started_at, datetime.now() + timedelta(seconds=2))
 
         with SessionLocal() as db:
-            task = db.query(Task).filter(Task.title == "overdue should stay active").first()
+            task = db.query(Task).filter(Task.title == "time should not start task").first()
             self.assertIsNotNone(task)
-            self.assertEqual(task.main_status, "in_progress")
+            self.assertEqual(task.main_status, "not_started")
             self.assertIsNone(task.completed_at)
+            self.assertGreaterEqual(task.start_at, request_started_at - timedelta(seconds=2))
+            self.assertLessEqual(task.start_at, datetime.now() + timedelta(seconds=2))
 
 
 if __name__ == "__main__":

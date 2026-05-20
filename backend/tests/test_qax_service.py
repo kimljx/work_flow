@@ -56,6 +56,20 @@ class _FakeQaxAutomationClient:
         return True
 
 
+class _UnreadQaxAutomationClient(_FakeQaxAutomationClient):
+    """用于验证 QAX 送达但未读时，不应推进任务主状态。"""
+
+    async def query_task_status(self, task_name: str) -> QaxTaskStatus:
+        return QaxTaskStatus(
+            task_name=task_name,
+            found=True,
+            row_text="执行结束 未读",
+            delivery_status="delivered",
+            read_status="unread",
+            detail="执行结束，终端未读",
+        )
+
+
 class QaxServiceTestCase(unittest.TestCase):
     """覆盖 QAX 发送正文清洗与状态回写关键行为。"""
 
@@ -224,11 +238,55 @@ class QaxServiceTestCase(unittest.TestCase):
             self.assertEqual(result["failed_count"], 0)
             recipient = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).first()
             refreshed_notification = db.query(Notification).filter(Notification.id == notification.id).first()
+            refreshed_task = db.query(Task).filter(Task.id == notification.task_id).first()
             self.assertEqual(recipient.delivery_status, "delivered")
             self.assertEqual(recipient.read_status, "read")
             self.assertEqual(recipient.last_error, "")
             self.assertEqual(refreshed_notification.status, "delivered")
+            self.assertEqual(refreshed_task.main_status, "in_progress")
             self.assertEqual(len(fake_client.deleted_task_names), 1)
+
+    def test_collect_qax_delivered_but_unread_does_not_start_task(self) -> None:
+        """只有任务创建即时消息已读才能将任务推进为进行中，单纯送达不能推进。"""
+        with SessionLocal() as db:
+            notification = Notification(
+                task_id=1,
+                channel="qax",
+                notify_type="task_created",
+                content_snapshot="任务标题：QAX 链路测试任务",
+                status="pending",
+            )
+            db.add(notification)
+            db.flush()
+            db.add(
+                NotificationRecipient(
+                    notification_id=notification.id,
+                    user_id=2,
+                    recipient_role="participant",
+                    delivery_status="pending",
+                    read_status="unread",
+                    retry_count=0,
+                    content_snapshot="任务标题：QAX 链路测试任务",
+                    last_error="",
+                )
+            )
+            db.commit()
+
+            fake_client = _UnreadQaxAutomationClient()
+            with patch("app.services.qax._ensure_qax_settings", return_value=None), patch(
+                "app.services.qax.QaxAutomationClient",
+                return_value=fake_client,
+            ):
+                result = collect_qax_status(db)
+                db.commit()
+
+            recipient = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).first()
+            refreshed_task = db.query(Task).filter(Task.id == notification.task_id).first()
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(recipient.delivery_status, "delivered")
+            self.assertEqual(recipient.read_status, "unread")
+            self.assertEqual(refreshed_task.main_status, "not_started")
+            self.assertEqual(len(fake_client.deleted_task_names), 0)
 
     def test_validate_qax_certificates_rejects_empty_certificate_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

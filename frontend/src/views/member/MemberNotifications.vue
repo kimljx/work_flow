@@ -11,11 +11,19 @@
     <div class="panel filter-shell">
       <div class="filter-grid">
         <input v-model="keyword" placeholder="搜索任务名称" />
-        <select v-model="channel">
-          <option value="">全部渠道</option>
-          <option value="email">邮件</option>
-          <option value="qax">即时消息</option>
-        </select>
+        <div class="multi-filter">
+          <button class="button secondary small" type="button" @click="channelFilterOpen = !channelFilterOpen">{{ selectedChannelText }}</button>
+          <div v-if="channelFilterOpen" class="multi-filter-menu">
+            <label class="multi-filter-all">
+              <span>全选</span>
+              <input type="checkbox" :checked="isAllChannelsSelected" @change="toggleAllChannels" />
+            </label>
+            <label v-for="item in channelOptions" :key="item.value">
+              <span>{{ item.label }}</span>
+              <input v-model="channel" type="checkbox" :value="item.value" />
+            </label>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -68,15 +76,25 @@ import { formatDateTime } from '../../utils/format'
 const route = useRoute()
 const notifications = ref([])
 const keyword = ref('')
-const channel = ref('')
+const channel = ref([])
+const channelFilterOpen = ref(false)
+const channelOptions = [
+  { value: 'email', label: '邮件' },
+  { value: 'qax', label: '即时消息' },
+]
 const page = ref(1)
 const pageSize = 8
+const isAllChannelsSelected = computed(() => channel.value.length === channelOptions.length)
+const selectedChannelText = computed(() => {
+  if (!channel.value.length) return '全部渠道'
+  return channelOptions.filter((item) => channel.value.includes(item.value)).map((item) => item.label).join('、')
+})
 
 const filteredNotifications = computed(() =>
   notifications.value.filter((item) => {
     const query = keyword.value.trim()
     const matchKeyword = !query || (item.task_title || '').includes(query)
-    const matchChannel = !channel.value || item.channel === channel.value
+    const matchChannel = channel.value.length === 0 || channel.value.includes(item.channel)
     return matchKeyword && matchChannel
   })
 )
@@ -88,7 +106,11 @@ const pagedNotifications = computed(() => {
 
 watch([keyword, channel], () => {
   page.value = 1
-})
+}, { deep: true })
+
+function toggleAllChannels() {
+  channel.value = isAllChannelsSelected.value ? [] : channelOptions.map((item) => item.value)
+}
 
 onMounted(async () => {
   const { data } = await http.get('/notifications')

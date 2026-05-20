@@ -33,11 +33,19 @@
     <div class="panel filter-shell">
       <div class="filter-grid">
         <input v-model="keyword" placeholder="搜索任务名称" />
-        <select v-model="channel">
-          <option value="">全部渠道</option>
-          <option value="email">邮件</option>
-          <option value="qax">即时消息</option>
-        </select>
+        <div class="multi-filter">
+          <button class="button secondary small" type="button" @click="channelFilterOpen = !channelFilterOpen">{{ selectedChannelText }}</button>
+          <div v-if="channelFilterOpen" class="multi-filter-menu">
+            <label class="multi-filter-all">
+              <span>全选</span>
+              <input type="checkbox" :checked="isAllChannelsSelected" @change="toggleAllChannels" />
+            </label>
+            <label v-for="item in channelOptions" :key="item.value">
+              <span>{{ item.label }}</span>
+              <input v-model="channel" type="checkbox" :value="item.value" />
+            </label>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -71,36 +79,65 @@
             <td>{{ item.read_count }} {{ item.feedback_label }}</td>
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>
-              <router-link class="button secondary small" :to="{ path: `/admin/notifications/${item.id}`, query: { from: route.fullPath } }">查看详情</router-link>
+              <button class="button secondary small" type="button" @click="openNotificationDetail(item.id)">查看详情</button>
             </td>
           </tr>
         </tbody>
       </table>
       <AppPagination v-model="page" :total="filteredNotifications.length" :page-size="pageSize" />
     </div>
+
+    <div v-if="detailNotificationId" class="modal-mask" @click.self="closeNotificationDetail">
+      <div class="modal-card notification-detail-modal">
+        <NotificationDetailPage
+          :notification-id="detailNotificationId"
+          embedded
+          @cancel="closeNotificationDetail"
+          @open-task="openTaskDetail"
+        />
+      </div>
+    </div>
+
+    <div v-if="detailTaskId" class="modal-mask" @click.self="closeTaskDetail">
+      <div class="modal-card task-modal-card task-detail-modal-card">
+        <AdminTaskDetail :task-id="detailTaskId" @cancel="closeTaskDetail" />
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '../../api/http'
+import AdminTaskDetail from './AdminTaskDetail.vue'
 import AppPagination from '../../components/AppPagination.vue'
+import NotificationDetailPage from '../shared/NotificationDetailPage.vue'
 import { notifyTypeText } from '../../constants/notifyTypes'
 import { formatDateTime } from '../../utils/format'
 
-const route = useRoute()
 const notifications = ref([])
 const keyword = ref('')
-const channel = ref('')
+const channel = ref([])
+const channelFilterOpen = ref(false)
+const channelOptions = [
+  { value: 'email', label: '邮件' },
+  { value: 'qax', label: '即时消息' },
+]
 const page = ref(1)
 const pageSize = 8
+const detailNotificationId = ref(null)
+const detailTaskId = ref(null)
+const isAllChannelsSelected = computed(() => channel.value.length === channelOptions.length)
+const selectedChannelText = computed(() => {
+  if (!channel.value.length) return '全部渠道'
+  return channelOptions.filter((item) => channel.value.includes(item.value)).map((item) => item.label).join('、')
+})
 
 const filteredNotifications = computed(() =>
   notifications.value.filter((item) => {
     const query = keyword.value.trim()
     const matchKeyword = !query || (item.task_title || '').includes(query)
-    const matchChannel = !channel.value || item.channel === channel.value
+    const matchChannel = channel.value.length === 0 || channel.value.includes(item.channel)
     return matchKeyword && matchChannel
   })
 )
@@ -122,12 +159,44 @@ const retryTotal = computed(() =>
 
 watch([keyword, channel], () => {
   page.value = 1
-})
+}, { deep: true })
+
+function toggleAllChannels() {
+  channel.value = isAllChannelsSelected.value ? [] : channelOptions.map((item) => item.value)
+}
+
+function openNotificationDetail(id) {
+  detailNotificationId.value = id
+}
+
+function closeNotificationDetail() {
+  detailNotificationId.value = null
+}
+
+function openTaskDetail(taskId) {
+  detailTaskId.value = taskId
+}
+
+function closeTaskDetail() {
+  detailTaskId.value = null
+}
 
 async function loadNotifications() {
   const { data } = await http.get('/notifications')
   notifications.value = data
 }
 
-onMounted(loadNotifications)
+function closeFloatingFilters(event) {
+  if (event.target?.closest?.('.multi-filter')) return
+  channelFilterOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('click', closeFloatingFilters)
+  loadNotifications()
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', closeFloatingFilters)
+})
 </script>

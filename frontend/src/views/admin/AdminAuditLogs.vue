@@ -36,12 +36,19 @@
     <div class="panel">
       <div class="toolbar">
         <input v-model.trim="keyword" class="input" placeholder="搜索动作、模块、摘要、操作人或对象" />
-        <select v-model="levelFilter" class="select">
-          <option value="">全部等级</option>
-          <option value="INFO">INFO</option>
-          <option value="WARNING">WARNING</option>
-          <option value="ERROR">ERROR</option>
-        </select>
+        <div class="multi-filter">
+          <button class="button secondary small" type="button" @click="levelFilterOpen = !levelFilterOpen">{{ selectedLevelText }}</button>
+          <div v-if="levelFilterOpen" class="multi-filter-menu">
+            <label class="multi-filter-all">
+              <span>全选</span>
+              <input type="checkbox" :checked="isAllLevelsSelected" @change="toggleAllLevels" />
+            </label>
+            <label v-for="item in levelOptions" :key="item">
+              <span>{{ item }}</span>
+              <input v-model="levelFilter" type="checkbox" :value="item" />
+            </label>
+          </div>
+        </div>
       </div>
 
       <table class="table">
@@ -141,7 +148,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
 import { formatDateTime } from '../../utils/format'
@@ -150,17 +157,21 @@ const logs = ref([])
 const page = ref(1)
 const pageSize = 8
 const keyword = ref('')
-const levelFilter = ref('')
+const levelFilter = ref([])
+const levelFilterOpen = ref(false)
+const levelOptions = ['INFO', 'WARNING', 'ERROR']
 const cleaning = ref(false)
 const detailLog = ref(null)
 
 const warningTotal = computed(() => logs.value.filter((item) => ['WARNING', 'ERROR'].includes(item.log_level)).length)
 const schedulerTotal = computed(() => logs.value.filter((item) => (item.module_name || '').startsWith('scheduler.')).length)
+const isAllLevelsSelected = computed(() => levelFilter.value.length === levelOptions.length)
+const selectedLevelText = computed(() => levelFilter.value.length ? levelFilter.value.join('、') : '全部等级')
 
 const filteredLogs = computed(() => {
   const text = keyword.value.toLowerCase()
   return logs.value.filter((item) => {
-    if (levelFilter.value && item.log_level !== levelFilter.value) return false
+    if (levelFilter.value.length && !levelFilter.value.includes(item.log_level)) return false
     if (!text) return true
     const source = [
       item.action_type,
@@ -186,8 +197,13 @@ watch(
   () => [logs.value.length, keyword.value, levelFilter.value],
   () => {
     page.value = 1
-  }
+  },
+  { deep: true }
 )
+
+function toggleAllLevels() {
+  levelFilter.value = isAllLevelsSelected.value ? [] : [...levelOptions]
+}
 
 function levelClass(level) {
   if (level === 'ERROR') return 'status-tone status-tone-danger'
@@ -232,5 +248,17 @@ async function handleCleanup() {
   }
 }
 
-onMounted(loadLogs)
+function closeFloatingFilters(event) {
+  if (event.target?.closest?.('.multi-filter')) return
+  levelFilterOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('click', closeFloatingFilters)
+  loadLogs()
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', closeFloatingFilters)
+})
 </script>

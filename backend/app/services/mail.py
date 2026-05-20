@@ -863,17 +863,80 @@ def _append_mail_action(db: Session, mail_event_id: int, action_type: str, statu
     )
 
 
-def _derive_task_status_from_subtasks(task: Task, subtasks: list[TaskSubtask]) -> str:
+def _member_has_done_reply(db: Session, task_id: int, user: User | None) -> bool:
+    if not user:
+        return False
+    return (
+        db.query(MailAction)
+        .join(MailEvent, MailEvent.id == MailAction.mail_event_id)
+        .filter(
+            MailAction.target_task_id == task_id,
+            MailAction.action_type == "task_done",
+            MailAction.action_status.in_(["SUCCESS", "APPLIED"]),
+            MailEvent.from_addr == user.email,
+        )
+        .first()
+        is not None
+    )
+
+
+def _member_has_progress_reply(db: Session, task_id: int, user: User | None) -> bool:
+    if not user:
+        return False
+    return (
+        db.query(MailAction)
+        .join(MailEvent, MailEvent.id == MailAction.mail_event_id)
+        .filter(
+            MailAction.target_task_id == task_id,
+            MailAction.action_type.in_(["task_done", "task_in_progress"]),
+            MailAction.action_status.in_(["SUCCESS", "APPLIED"]),
+            MailEvent.from_addr == user.email,
+        )
+        .first()
+        is not None
+    )
+
+
+def _derive_task_status_from_subtasks(
+    db: Session,
+    task: Task,
+    subtasks: list[TaskSubtask],
+    *,
+    current_user_id: int | None = None,
+    current_status: str | None = None,
+) -> str:
     """根据子任务状态推导主任务状态。"""
-    if not subtasks:
+    members = db.query(TaskMember).filter(TaskMember.task_id == task.id).all()
+    if not members:
         return task.main_status
-    active_statuses = {item.status for item in subtasks}
-    if active_statuses and active_statuses <= {"done"}:
+    subtasks_by_member: dict[int, list[TaskSubtask]] = {}
+    for item in subtasks:
+        if item.status == "canceled":
+            continue
+        subtasks_by_member.setdefault(item.assignee_id, []).append(item)
+
+    all_complete = True
+    any_progress = False
+    for member in members:
+        member_subtasks = subtasks_by_member.get(member.user_id, [])
+        if member_subtasks:
+            statuses = {item.status for item in member_subtasks}
+            member_complete = bool(statuses) and statuses <= {"done"}
+            member_progress = "in_progress" in statuses or "done" in statuses
+        else:
+            member_complete = (
+                member.user_id == current_user_id and current_status == "done"
+            ) or _member_has_done_reply(db, task.id, member.user)
+            member_progress = (
+                member.user_id == current_user_id and current_status in {"done", "in_progress"}
+            ) or _member_has_progress_reply(db, task.id, member.user)
+        all_complete = all_complete and member_complete
+        any_progress = any_progress or member_progress
+
+    if all_complete:
         return "done"
-    if "in_progress" in active_statuses or "done" in active_statuses:
+    if any_progress:
         return "in_progress"
-    if active_statuses <= {"canceled"}:
-        return "canceled"
     return "not_started"
 
 
@@ -1018,12 +1081,21 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
             item.status = next_status
             updated_subtask_ids.append(item.id)
         task.main_status = _derive_task_status_from_subtasks(
+            db,
             task,
             db.query(TaskSubtask).filter(TaskSubtask.task_id == task.id).all(),
+            current_user_id=sender.id,
+            current_status=next_status,
         )
     else:
         # 未拆子任务时，仍沿用原有主任务状态回写逻辑。
-        task.main_status = next_status
+        task.main_status = _derive_task_status_from_subtasks(
+            db,
+            task,
+            db.query(TaskSubtask).filter(TaskSubtask.task_id == task.id).all(),
+            current_user_id=sender.id,
+            current_status=next_status,
+        )
     if task.main_status == "done" and task.actual_minutes == 0:
         # 首次完成时补算实际耗时，避免后续重复覆盖人工修正数据。
         task.actual_minutes = max(int((shanghai_now_naive() - task.start_at).total_seconds() // 60), 0)

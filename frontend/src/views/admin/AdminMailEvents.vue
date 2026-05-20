@@ -12,8 +12,8 @@
         <button class="button secondary" @click="testMailSettings" :disabled="busy">测试 SMTP</button>
         <button class="button secondary" @click="testInboxSettings" :disabled="busy">测试收件配置</button>
         <button class="button secondary" @click="initializeBaseline" :disabled="busy">设置扫描基准</button>
-        <button class="button secondary" @click="collectQaxStatus" :disabled="busy">手动采集 QAX</button>
-        <button class="button" @click="pollInbox" :disabled="busy">手动收取邮件</button>
+        <button class="button secondary" @click="collectQaxStatus" :disabled="busy || collectState.running">手动采集 QAX</button>
+        <button class="button" @click="pollInbox" :disabled="busy || collectState.running">手动收取邮件</button>
       </div>
     </div>
 
@@ -47,6 +47,16 @@
     <div v-if="feedback.message" class="panel">
       <h2>{{ feedback.title }}</h2>
       <p :class="feedback.type === 'success' ? 'success-text' : 'error-text'">{{ feedback.message }}</p>
+    </div>
+
+    <div v-if="collectState.running" class="panel task-collect-panel">
+      <div class="section-head">
+        <div>
+          <h2>后台收集中</h2>
+          <p>{{ collectState.message }}</p>
+        </div>
+      </div>
+      <div class="subtle-text">页面可继续操作，列表会在采集结束后自动刷新。</div>
     </div>
 
     <div class="panel">
@@ -331,18 +341,35 @@
             </td>
             <td>{{ item.process_status_text }}</td>
             <td>
-              <router-link v-if="item.task_id" :to="`/admin/tasks/${item.task_id}`">
+              <button v-if="item.task_id" class="link-button" type="button" @click="openTaskDetail(item.task_id)">
                 {{ item.task_title || `任务 #${item.task_id}` }}
-              </router-link>
+              </button>
               <span v-else>-</span>
             </td>
             <td>
-              <router-link class="button secondary small" :to="`/admin/mail-events/${item.id}`">查看详情</router-link>
+              <button class="button secondary small" type="button" @click="openMailDetail(item.id)">查看详情</button>
             </td>
           </tr>
         </tbody>
       </table>
       <AppPagination v-model="page" :total="filteredEvents.length" :page-size="pageSize" />
+    </div>
+
+    <div v-if="detailMailEventId" class="modal-mask" @click.self="closeMailDetail">
+      <div class="modal-card mail-event-detail-modal">
+        <AdminMailEventDetail
+          :event-id="detailMailEventId"
+          embedded
+          @cancel="closeMailDetail"
+          @open-task="openTaskDetail"
+        />
+      </div>
+    </div>
+
+    <div v-if="detailTaskId" class="modal-mask" @click.self="closeTaskDetail">
+      <div class="modal-card task-modal-card task-detail-modal-card">
+        <AdminTaskDetail :task-id="detailTaskId" @cancel="closeTaskDetail" />
+      </div>
     </div>
   </section>
 </template>
@@ -350,6 +377,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import http from '../../api/http'
+import AdminMailEventDetail from './AdminMailEventDetail.vue'
+import AdminTaskDetail from './AdminTaskDetail.vue'
 import AppPagination from '../../components/AppPagination.vue'
 import { notifyTypeText } from '../../constants/notifyTypes'
 import { formatCountdown, formatDateTime } from '../../utils/format'
@@ -367,6 +396,9 @@ const feedback = ref({
 })
 const nowTick = ref(Date.now())
 const schedulerForm = ref(buildDefaultSchedulerForm())
+const collectState = ref({})
+const detailMailEventId = ref(null)
+const detailTaskId = ref(null)
 
 const unmatchedEvents = computed(() => events.value.filter((item) => item.process_status === 'UNMATCHED'))
 
@@ -434,6 +466,22 @@ function protocolLabel(protocol) {
   return String(protocol || '').toLowerCase() === 'pop3' ? 'POP3' : 'IMAP'
 }
 
+function openMailDetail(id) {
+  detailMailEventId.value = id
+}
+
+function closeMailDetail() {
+  detailMailEventId.value = null
+}
+
+function openTaskDetail(taskId) {
+  detailTaskId.value = taskId
+}
+
+function closeTaskDetail() {
+  detailTaskId.value = null
+}
+
 async function loadEvents() {
   const { data } = await http.get('/admin/mail/events')
   events.value = data
@@ -493,9 +541,18 @@ async function loadSchedulerSettings() {
 async function loadAll() {
   busy.value = true
   try {
-    await Promise.all([loadEvents(), loadPollState(), loadSchedulerSettings()])
+    await Promise.all([loadEvents(), loadPollState(), loadSchedulerSettings(), loadCollectState()])
   } finally {
     busy.value = false
+  }
+}
+
+async function loadCollectState() {
+  const { data } = await http.get('/admin/collect/state', { skipGlobalLoading: true })
+  const wasRunning = collectState.value?.running
+  collectState.value = data
+  if (wasRunning && !data.running) {
+    await Promise.all([loadEvents(), loadPollState()])
   }
 }
 
@@ -579,9 +636,10 @@ async function saveSchedulerSettings() {
 async function pollInbox() {
   busy.value = true
   try {
-    const { data } = await http.post('/admin/mail/poll')
-    showFeedback('邮件收取结果', data.message, ['success', 'initialized'].includes(data.status) ? 'success' : 'error')
-    await Promise.all([loadEvents(), loadPollState()])
+    const { data } = await http.post('/admin/mail/poll', {}, { skipGlobalLoading: true })
+    collectState.value = data
+    showFeedback('邮件收取结果', data.message || '邮件收取已进入后台执行', data.accepted === false ? 'error' : 'success')
+    await loadCollectState()
   } catch (error) {
     showFeedback('邮件收取结果', error.response?.data?.detail || '邮件收取失败', 'error')
   } finally {
@@ -592,10 +650,10 @@ async function pollInbox() {
 async function collectQaxStatus() {
   busy.value = true
   try {
-    const { data } = await http.post('/admin/qax/collect')
-    const summary = `本次采集：更新 ${data.updated_count || 0} 条，失败 ${data.failed_count || 0} 条`
-    showFeedback('QAX 状态采集结果', `${data.message}；${summary}`, data.status === 'success' ? 'success' : 'error')
-    await loadAll()
+    const { data } = await http.post('/admin/qax/collect', {}, { skipGlobalLoading: true })
+    collectState.value = data
+    showFeedback('QAX 状态采集结果', data.message || 'QAX 采集已进入后台执行', data.accepted === false ? 'error' : 'success')
+    await loadCollectState()
   } catch (error) {
     showFeedback('QAX 状态采集结果', error.response?.data?.detail || 'QAX 状态采集失败', 'error')
   } finally {
@@ -607,6 +665,7 @@ onMounted(async () => {
   await loadAll()
   timerId = window.setInterval(() => {
     nowTick.value = Date.now()
+    loadCollectState()
   }, 1000)
 })
 

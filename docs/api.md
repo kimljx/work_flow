@@ -77,8 +77,13 @@
 - `POST /admin/mail/test` 在遇到 SMTP SSL/TLS 握手错误时，会返回中文排障提示，明确提示 `465 / 587 / 25` 端口与 `SMTP_USE_SSL`、`SMTP_USE_TLS` 的推荐组合。
 - `POST /admin/mail/inbox-test` 与自动收件链路会读取 `IMAP_USE_SSL`、`IMAP_USE_TLS` 配置，支持明文、STARTTLS、SSL 三种收信连接方式。
 - `POST /admin/mail/inbox-test` 与 `POST /admin/mail/poll` 还会读取 `MAIL_INBOX_PROTOCOL`；当配置为 `pop3` 时，接口会按 `POP3_HOST / POP3_PORT / POP3_USER / POP3_PASSWORD / POP3_USE_SSL / POP3_USE_TLS` 工作。
-- `POST /admin/qax/collect` 会按通知 ID、接收人 ID、通知类型和任务标题拼出的 QAX 任务名回查状态，并把送达 / 已读结果写回通知接收人记录。
-- `POST /admin/qax/collect` 现在会同时返回 `processed_count`、`updated_count`、`failed_count` 统计字段，便于前端直接展示本次采集摘要。
+- `POST /admin/mail/poll` 与 `POST /admin/qax/collect` 会转入后台采集并立即返回当前采集状态，不再阻塞前端界面；重复触发时会忽略本次请求并返回正在运行的状态。
+- `GET /admin/collect/state` 返回当前邮件 / QAX 后台采集状态；传入 `task_id` 时会返回该任务参与人的收集中进度。
+- `POST /tasks/{task_id}/sync-collect` 会按任务触发邮件与 QAX 后台同步采集，采集过程按参与人更新状态，结束后前端可刷新任务详情。
+- `POST /tasks/{task_id}/members/{user_id}/remind?channel=email|qax` 支持对任务内单个成员补发指定渠道提醒，用于前端针对发送失败或未读状态单独补发。
 - `GET /system-logs` 会返回更适合运维排障的系统日志明细，包括等级、模块、摘要、操作人、来源 IP、变更前后快照与扩展详情。
 - `GET /audit-logs` 仍保留为兼容入口，实际返回内容与 `GET /system-logs` 一致。
 - `POST /system-logs/cleanup` 会按 `SYSTEM_LOG_RETENTION_DAYS` 手动清理过期系统日志，并补记一条清理结果日志。
+## 2026-05-19 任务提醒接口
+
+- `POST /tasks/{task_id}/members/{user_id}/task-remind`：按参与人发送任务提醒；若该参与人存在未完成子任务，提醒内容聚焦子任务，否则按主任务提醒。

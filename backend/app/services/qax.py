@@ -681,9 +681,9 @@ def _refresh_notification_status(db: Session, notification_id: int) -> None:
 
 
 def _promote_task_started_by_qax_read(db: Session, notification: Notification) -> None:
-    """任务创建 QAX 被任一成员已读后，将主任务从未开始推进为进行中。"""
+    """任一任务 QAX 通知被成员已读后，将未开始主任务推进为进行中。"""
 
-    if notification.notify_type != "task_created" or not notification.task_id:
+    if not notification.task_id:
         return
     task = db.query(Task).filter(Task.id == notification.task_id, Task.deleted_at.is_(None)).first()
     if not task or task.main_status != "not_started":
@@ -696,7 +696,7 @@ def _promote_task_started_by_qax_read(db: Session, notification: Notification) -
             from_status="not_started",
             to_status="in_progress",
             source="qax_read",
-            remark="任务创建即时消息已读，自动更新为进行中",
+            remark="任务即时消息已读，自动更新为进行中",
             operator_id=None,
         )
     )

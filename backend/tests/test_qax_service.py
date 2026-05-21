@@ -246,6 +246,44 @@ class QaxServiceTestCase(unittest.TestCase):
             self.assertEqual(refreshed_task.main_status, "in_progress")
             self.assertEqual(len(fake_client.deleted_task_names), 1)
 
+    def test_collect_any_qax_read_starts_not_started_task(self) -> None:
+        """未开始任务收到任意类型 QAX 已读反馈后，都应推进为进行中。"""
+        with SessionLocal() as db:
+            notification = Notification(
+                task_id=1,
+                channel="qax",
+                notify_type="manual_remind",
+                content_snapshot="手动提醒 QAX",
+                status="pending",
+            )
+            db.add(notification)
+            db.flush()
+            db.add(
+                NotificationRecipient(
+                    notification_id=notification.id,
+                    user_id=2,
+                    recipient_role="participant",
+                    delivery_status="pending",
+                    read_status="unread",
+                    retry_count=0,
+                    content_snapshot="手动提醒 QAX",
+                    last_error="",
+                )
+            )
+            db.commit()
+
+            fake_client = _FakeQaxAutomationClient()
+            with patch("app.services.qax._ensure_qax_settings", return_value=None), patch(
+                "app.services.qax.QaxAutomationClient",
+                return_value=fake_client,
+            ):
+                result = collect_qax_status(db)
+                db.commit()
+
+            refreshed_task = db.query(Task).filter(Task.id == notification.task_id).first()
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(refreshed_task.main_status, "in_progress")
+
     def test_collect_qax_delivered_but_unread_does_not_start_task(self) -> None:
         """只有任务创建即时消息已读才能将任务推进为进行中，单纯送达不能推进。"""
         with SessionLocal() as db:

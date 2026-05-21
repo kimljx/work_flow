@@ -598,6 +598,17 @@ button:disabled {
   align-items: start;
 }
 
+.scheduler-modal-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  max-width: 620px;
+}
+
+.scheduler-modal-actions .button,
+.scheduler-modal-actions button {
+  white-space: nowrap;
+}
+
 .scheduler-config-header h3,
 .scheduler-subcard h4 {
   margin: 0;
@@ -664,6 +675,15 @@ button:disabled {
   .scheduler-config-card,
   .scheduler-subcard {
     padding: 16px;
+  }
+
+  .scheduler-config-header {
+    display: grid;
+  }
+
+  .scheduler-modal-actions {
+    justify-content: flex-start;
+    max-width: none;
   }
 }
 

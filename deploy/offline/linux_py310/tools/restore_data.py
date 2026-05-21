@@ -1,37 +1,110 @@
 from __future__ import annotations
 
-"""离线发布包数据恢复脚本。
-
-恢复前会先把当前版本中的数据库与配置做一份保护性备份，
-避免误恢复后无法回退。
-"""
+"""Restore mutable data into a Linux offline release."""
 
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 import shutil
 import sys
 
 
-def _backup_current_files(root: Path, db_file: Path, env_file: Path, runtime_settings_file: Path) -> None:
-    """恢复前先保护性备份当前数据。"""
+def _read_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
 
+
+def _sqlite_path_from_url(database_url: str, app_root: Path) -> Path | None:
+    if not database_url.startswith("sqlite"):
+        return None
+    parsed = urlparse(database_url)
+    if parsed.scheme != "sqlite":
+        return None
+    raw_path = unquote(parsed.path or "")
+    if database_url.startswith("sqlite:///./"):
+        return app_root / database_url.removeprefix("sqlite:///./")
+    if database_url.startswith("sqlite:///"):
+        return Path(raw_path)
+    if database_url.startswith("sqlite://"):
+        return app_root / raw_path.lstrip("/")
+    return None
+
+
+def _database_candidates(root: Path, env_file: Path | None = None) -> list[Path]:
+    app_root = root / "app"
+    env_path = env_file or app_root / ".env"
+    candidates = [app_root / "backend" / "data" / "app.db"]
+    db_from_env = _sqlite_path_from_url(_read_env(env_path).get("DATABASE_URL", ""), app_root)
+    if db_from_env is not None:
+        candidates.insert(0, db_from_env)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
+def _copy_file_if_exists(source: Path, destination: Path, label: str) -> bool:
+    if not source.exists():
+        print(f"Skip missing {label}: {source}")
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    print(f"Restored {label}: {destination}")
+    return True
+
+
+def _copy_dir_if_exists(source: Path, destination: Path, label: str) -> bool:
+    if not source.exists():
+        print(f"Skip missing {label}: {source}")
+        return False
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+    print(f"Restored {label}: {destination}")
+    return True
+
+
+def _backup_current_files(root: Path) -> None:
+    app_root = root / "app"
     guard_dir = root / "backup" / f"_restore_guard_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     guard_dir.mkdir(parents=True, exist_ok=True)
 
-    if db_file.exists():
-        shutil.copy2(db_file, guard_dir / "app.db")
-    if env_file.exists():
-        shutil.copy2(env_file, guard_dir / ".env")
-    if runtime_settings_file.exists():
-        guard_config_dir = guard_dir / "config"
-        guard_config_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(runtime_settings_file, guard_config_dir / "runtime-settings.json")
+    for index, db_path in enumerate(_database_candidates(root)):
+        destination = guard_dir / ("app.db" if index == 0 else f"app_extra_{index}.db")
+        _copy_file_if_exists(db_path, destination, "current SQLite database guard copy")
+    _copy_file_if_exists(app_root / ".env", guard_dir / ".env", "current app/.env guard copy")
+    _copy_dir_if_exists(app_root / "config", guard_dir / "app_config", "current app/config guard copy")
+    _copy_dir_if_exists(root / "config", guard_dir / "config", "current config guard copy")
 
-    print(f"已先备份当前数据到：{guard_dir}")
+    print(f"Created pre-restore guard backup: {guard_dir}")
 
 
 def _choose_backup_dir(backup_root: Path, argv: list[str]) -> Path | None:
-    """确定需要恢复的备份目录。"""
+    if not backup_root.exists():
+        print("Missing backup directory. Run ./backup_data.sh first.")
+        return None
+
+    if len(argv) > 1:
+        target = backup_root / argv[1]
+        if target.exists() and target.is_dir():
+            return target
+        print(f"Requested backup directory does not exist: {target}")
+        return None
 
     backups = sorted(
         [item for item in backup_root.iterdir() if item.is_dir() and not item.name.startswith("_restore_guard_")],
@@ -39,81 +112,86 @@ def _choose_backup_dir(backup_root: Path, argv: list[str]) -> Path | None:
         reverse=True,
     )
     if not backups:
-        print("未找到可用备份目录，请先执行 ./backup_data.sh。")
+        print("No usable backup directories found. Run ./backup_data.sh first.")
         return None
 
-    if len(argv) > 1:
-        target = backup_root / argv[1]
-        if target.exists() and target.is_dir():
-            return target
-        print(f"指定的备份目录不存在：{target}")
-        return None
-
-    print("可用备份列表：")
+    print("Available backup directories:")
     for item in backups:
         print(f"- {item.name}")
     print()
-    backup_name = input("请输入要恢复的备份目录名称：").strip()
+    backup_name = input("Backup directory to restore: ").strip()
     if not backup_name:
-        print("未输入备份目录名称，已取消恢复。")
+        print("No backup directory provided; restore canceled.")
         return None
 
     target = backup_root / backup_name
     if not target.exists() or not target.is_dir():
-        print(f"指定的备份目录不存在：{target}")
+        print(f"Requested backup directory does not exist: {target}")
         return None
     return target
 
 
-def main(argv: list[str]) -> int:
-    """执行数据库与配置恢复。"""
+def _restore_database(backup_dir: Path, root: Path) -> bool:
+    source_db = backup_dir / "app.db"
+    if not source_db.exists():
+        print(f"Skip missing SQLite database: {source_db}")
+        return False
 
+    env_source = backup_dir / ".env"
+    destinations = _database_candidates(root, env_source if env_source.exists() else None)
+    restored = False
+    for destination in destinations:
+        restored |= _copy_file_if_exists(source_db, destination, "SQLite database")
+    return restored
+
+
+def _restore_legacy_runtime_settings(backup_dir: Path, root: Path) -> bool:
+    legacy = backup_dir / "config" / "runtime-settings.json"
+    if not legacy.exists():
+        return False
+    restored = False
+    for destination in (
+        root / "app" / "config" / "runtime-settings.json",
+        root / "config" / "runtime-settings.json",
+    ):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, destination)
+        print(f"Restored legacy runtime settings: {destination}")
+        restored = True
+    return restored
+
+
+def main(argv: list[str]) -> int:
     root = Path(__file__).resolve().parents[1]
     app_root = root / "app"
     backup_root = root / "backup"
-    db_file = app_root / "backend" / "data" / "app.db"
-    env_file = app_root / ".env"
-    runtime_settings_file = app_root / "config" / "runtime-settings.json"
 
     backup_dir = _choose_backup_dir(backup_root, argv)
     if backup_dir is None:
         return 1
 
     print()
-    print(f"即将从以下目录恢复：{backup_dir}")
-    confirm = input("请输入 YES 确认恢复：").strip()
+    print(f"Restore from: {backup_dir}")
+    confirm = input("Type YES to restore: ").strip()
     if confirm.upper() != "YES":
-        print("已取消恢复。")
+        print("Restore canceled.")
         return 1
 
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-    _backup_current_files(root, db_file, env_file, runtime_settings_file)
+    _backup_current_files(root)
 
-    source_db = backup_dir / "app.db"
-    source_env = backup_dir / ".env"
-    source_runtime_settings = backup_dir / "config" / "runtime-settings.json"
+    restored_any = False
+    restored_any |= _copy_file_if_exists(backup_dir / ".env", app_root / ".env", "app/.env")
+    restored_any |= _restore_database(backup_dir, root)
+    restored_any |= _copy_dir_if_exists(backup_dir / "app_config", app_root / "config", "app/config")
+    restored_any |= _copy_dir_if_exists(backup_dir / "config", root / "config", "config")
+    restored_any |= _restore_legacy_runtime_settings(backup_dir, root)
 
-    if source_db.exists():
-        shutil.copy2(source_db, db_file)
-        print("已恢复数据库文件。")
-    else:
-        print("备份中未找到 app.db，数据库未恢复。")
-
-    if source_env.exists():
-        shutil.copy2(source_env, env_file)
-        print("已恢复 .env 配置文件。")
-    else:
-        print("备份中未找到 .env，配置文件未恢复。")
-
-    if source_runtime_settings.exists():
-        runtime_settings_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_runtime_settings, runtime_settings_file)
-        print("已恢复界面运行时配置 config/runtime-settings.json。")
-    else:
-        print("备份中未找到 config/runtime-settings.json，界面运行时配置未恢复。")
+    if not restored_any:
+        print("No restorable data or config was found in the backup directory.")
+        return 1
 
     print()
-    print("恢复完成。建议重新启动系统使配置与数据生效。")
+    print("Restore complete.")
     return 0
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_task_import.db"
 
@@ -17,6 +18,8 @@ from app.security import hash_password
 
 class TaskImportTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        self.enqueue_patcher = patch("app.api._enqueue_task_created_notifications", return_value=None)
+        self.enqueue_mock = self.enqueue_patcher.start()
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         with SessionLocal() as db:
@@ -43,6 +46,9 @@ class TaskImportTestCase(unittest.TestCase):
                 ]
             )
             db.commit()
+
+    def tearDown(self) -> None:
+        self.enqueue_patcher.stop()
 
     def _build_workbook_bytes(self) -> bytes:
         workbook = Workbook()
@@ -160,6 +166,7 @@ class TaskImportTestCase(unittest.TestCase):
             payload = response.json()
             self.assertEqual(payload["success_count"], 1)
             self.assertEqual(payload["failure_count"], 0)
+            self.enqueue_mock.assert_called_once()
 
             list_response = client.get("/api/v1/tasks", headers={"Authorization": f"Bearer {token}"})
             self.assertEqual(list_response.status_code, 200)
@@ -236,6 +243,7 @@ class TaskImportTestCase(unittest.TestCase):
             self.assertTrue(histories[0]["confirmed_duplicate"])
             self.assertEqual(histories[0]["overlap_count"], 3)
             self.assertGreaterEqual(len(histories[0]["overlap_samples"]), 1)
+            self.assertEqual(self.enqueue_mock.call_count, 6)
 
 
 if __name__ == "__main__":

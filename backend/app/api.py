@@ -10,6 +10,8 @@ import csv
 import hashlib
 import io
 import json
+import logging
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -38,7 +40,7 @@ from app.constants import (
     TEMPLATE_NOTIFY_TYPE_OPTIONS,
     TASK_STATUS_LABELS,
 )
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.models import AuditLog, DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskImportHistory, TaskMember, TaskMilestone, TaskStatusEvent, TaskSubtask, Template, User
 from app.schemas import (
     ApiMessage,
@@ -82,6 +84,7 @@ from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
 
 router = APIRouter(prefix="/api/v1")
+logger = logging.getLogger(__name__)
 OPEN_TASK_STATUSES = {"not_started", "in_progress"}
 TASK_IMPORT_FIELDS = (
     "sequence",
@@ -108,6 +111,46 @@ LEGACY_TASK_IMPORT_FIELDS = (
     "subtask_contents",
     "subtask_assignee_names",
 )
+
+
+def _create_task_created_notifications(db: Session, task_id: int) -> None:
+    """为新建任务生成邮件和即时消息通知。
+
+    参数:
+    - db: 当前数据库会话，调用方负责提交或回滚事务。
+    - task_id: 已经落库的任务编号。
+
+    副作用:
+    - 写入通知和接收人记录。
+    - 邮件通道会尝试发送邮件，QAX 通道会尝试创建即时消息任务。
+    """
+    create_notification_with_recipients(db, task_id, "email", "task_created", "")
+    create_notification_with_recipients(db, task_id, "qax", "task_created", "")
+
+
+def _run_task_created_notifications(task_id: int) -> None:
+    """在后台会话中发送任务创建通知，避免阻塞创建任务接口。"""
+    with SessionLocal() as task_db:
+        try:
+            _create_task_created_notifications(task_db, task_id)
+            task_db.commit()
+        except Exception:
+            task_db.rollback()
+            logger.exception("后台发送任务创建通知失败，任务ID：%s", task_id)
+
+
+def _enqueue_task_created_notifications(task_id: int) -> None:
+    """启动后台线程发送任务创建通知。
+
+    Web 新建任务需要先把任务创建结果返回给前端，邮件和即时消息发送耗时不可阻塞请求。
+    """
+    thread = threading.Thread(
+        target=_run_task_created_notifications,
+        args=(task_id,),
+        name=f"task-created-notify-{task_id}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def is_admin_role(role: str) -> bool:
@@ -637,9 +680,6 @@ def _create_task_record(payload: TaskCreate, current_user: User, db: Session, so
         )
 
     db.add(TaskStatusEvent(task_id=task.id, from_status="", to_status=initial_status, source=source, remark="创建任务，等待成员确认已读", operator_id=current_user.id))
-    # 创建任务后立即生成邮件和即时消息通知，确保成员在多个渠道都能收到任务分发信息。
-    create_notification_with_recipients(db, task.id, "email", "task_created", "")
-    create_notification_with_recipients(db, task.id, "qax", "task_created", "")
     write_audit(
         db,
         current_user.id,
@@ -1577,11 +1617,13 @@ def list_tasks(current_user: User = Depends(get_current_user), db: Session = Dep
 
 @router.post("/tasks", response_model=TaskOut)
 def create_task(payload: TaskCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> TaskOut:
-    """创建任务并同步生成初始通知。"""
+    """创建任务并立即返回，任务创建通知交由后台发送。"""
     task = _create_task_record(payload, current_user, db, source="web")
     db.commit()
     db.refresh(task)
-    return serialize_task(task, db)
+    task_out = serialize_task(task, db)
+    _enqueue_task_created_notifications(task.id)
+    return task_out
 
 
 @router.get("/tasks/import-template")
@@ -2776,8 +2818,9 @@ async def import_tasks(
                 else _build_task_create_from_simple_import_row(row_data, db)
             )
             task = _create_task_record(payload, current_user, db, source="import")
+            task_id = task.id
             db.commit()
-            created_task_ids.append(task.id)
+            created_task_ids.append(task_id)
         except Exception as exc:
             db.rollback()
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
@@ -2806,6 +2849,8 @@ async def import_tasks(
         workbook_bytes=workbook_bytes,
     )
     db.commit()
+    for task_id in created_task_ids:
+        _enqueue_task_created_notifications(task_id)
     return {
         "message": f"任务导入完成：成功 {success_count} 条，失败 {failure_count} 条",
         "needs_confirmation": False,

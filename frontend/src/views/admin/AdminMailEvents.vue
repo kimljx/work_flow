@@ -8,13 +8,6 @@
           在这里统一维护自动收件、提醒任务、邮件收发配置和 QAX 采集配置，保存后测试和手动执行都会直接使用当前页面配置。
         </p>
       </div>
-      <div class="toolbar">
-        <button class="button secondary" @click="testMailSettings" :disabled="busy">测试 SMTP</button>
-        <button class="button secondary" @click="testInboxSettings" :disabled="busy">测试收件配置</button>
-        <button class="button secondary" @click="initializeBaseline" :disabled="busy">设置扫描基准</button>
-        <button class="button secondary" @click="collectQaxStatus" :disabled="busy || collectState.running">手动采集 QAX</button>
-        <button class="button" @click="pollInbox" :disabled="busy || collectState.running">手动收取邮件</button>
-      </div>
     </div>
 
     <div class="stats">
@@ -65,7 +58,14 @@
           <h2>计划任务与运行配置</h2>
           <p>原来需要改 `.env` 的邮件和 QAX 参数，现在可以直接在这里维护。</p>
         </div>
-        <button class="button" @click="saveSchedulerSettings" :disabled="busy">保存设置</button>
+        <div class="toolbar scheduler-modal-actions">
+          <button class="button secondary" @click="testMailSettings" :disabled="busy">测试 SMTP</button>
+          <button class="button secondary" @click="testInboxSettings" :disabled="busy">测试收件配置</button>
+          <button class="button secondary" @click="initializeBaseline" :disabled="busy">设置扫描基准</button>
+          <button class="button secondary" @click="collectQaxStatus" :disabled="busy || collectState.running">手动采集 QAX</button>
+          <button class="button secondary" @click="pollInbox" :disabled="busy || collectState.running">手动收取邮件</button>
+          <button class="button" @click="saveSchedulerSettings" :disabled="busy">保存设置</button>
+        </div>
       </div>
 
       <div class="scheduler-config-stack">

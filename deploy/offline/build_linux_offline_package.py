@@ -36,7 +36,7 @@ COMPAT_BROWSER_URLS = (
     f"https://playwright-verizon.azureedge.net/builds/chromium/{COMPAT_BROWSER_REVISION}/chromium-linux.zip",
 )
 REQUIREMENTS_PATH = PROJECT_ROOT / "backend" / "requirements.txt"
-PYTHON_BUILD_HOST_CMD = ["python3"]
+PYTHON_BUILD_HOST_CMD = [sys.executable]
 LINUX_RUNTIME_RELEASE = "20260414"
 LINUX_RUNTIME_VERSION = "3.10.20"
 LINUX_RUNTIME_ASSET = (
@@ -505,10 +505,56 @@ def ensure_executable(path: Path) -> None:
     path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def ensure_runtime_executables(release_root: Path) -> None:
+    executable_names = {
+        "python",
+        "python3",
+        "python3.10",
+        "pip",
+        "pip3",
+        "pip3.10",
+        "uvicorn",
+        "fastapi",
+        "playwright",
+        "dotenv",
+        "2to3",
+        "2to3-3.10",
+        "idle3",
+        "idle3.10",
+        "pydoc3",
+        "pydoc3.10",
+        "python3-config",
+        "python3.10-config",
+    }
+    python_bin = release_root / "runtime" / "python" / "bin"
+    if python_bin.exists():
+        for path in python_bin.iterdir():
+            if path.is_file() and path.name in executable_names:
+                ensure_executable(path)
+
+    playwright_driver = (
+        release_root
+        / "runtime"
+        / "python"
+        / "lib"
+        / "python3.10"
+        / "site-packages"
+        / "playwright"
+        / "driver"
+    )
+    for path in (
+        playwright_driver / "node",
+        playwright_driver / "package" / "cli.js",
+    ):
+        if path.exists():
+            ensure_executable(path)
+
+
 def copy_release_files(release_root: Path) -> None:
     app_root = release_root / "app"
     backend_root = app_root / "backend"
     frontend_root = app_root / "frontend"
+    app_config_root = app_root / "config"
     docs_root = release_root / "docs"
     config_root = release_root / "config"
     tools_root = release_root / "tools"
@@ -525,6 +571,7 @@ def copy_release_files(release_root: Path) -> None:
     copytree_filtered(LINUX_TEMPLATE_ROOT / "tools", tools_root)
 
     copy_runtime_config_files(config_root)
+    copy_runtime_config_files(app_config_root)
     backup_root.mkdir(parents=True, exist_ok=True)
     service_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LINUX_TEMPLATE_ROOT / ".env.offline.example", config_root / ".env.offline.example")
@@ -546,6 +593,7 @@ def copy_release_files(release_root: Path) -> None:
 
     for script_path in tools_root.rglob("*.sh"):
         ensure_executable(script_path)
+    ensure_runtime_executables(release_root)
 
 
 def tar_release_directory(release_root: Path) -> Path:

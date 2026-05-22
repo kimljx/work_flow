@@ -314,7 +314,7 @@ async function submit() {
   try {
     const { data } = isEdit.value
       ? await http.put(`/tasks/${props.taskId}`, payload)
-      : await http.post('/tasks', payload)
+      : await http.post('/tasks', payload, { skipGlobalLoading: true })
     emit('saved', data)
   } finally {
     submitting.value = false

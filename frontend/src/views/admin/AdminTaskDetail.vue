@@ -235,9 +235,9 @@ async function remindParticipant(item) {
   if (!window.confirm(`确认提醒“${item.name}”处理${focusText}吗？`)) return
   actionLoading.value = true
   try {
-    await http.post(`/tasks/${currentTaskId.value}/members/${item.user_id}/task-remind`)
+    await http.post(`/tasks/${currentTaskId.value}/members/${item.user_id}/task-remind`, {}, { skipGlobalLoading: true })
     await loadTask()
-    showFeedback('发送成功', '提醒已发送，将在 3 秒后自动隐藏。')
+    showFeedback('发送成功', '提醒已发送。')
   } finally {
     actionLoading.value = false
   }
@@ -250,9 +250,10 @@ async function remindMemberChannel(item, channel) {
   try {
     await http.post(`/tasks/${currentTaskId.value}/members/${item.user_id}/remind`, {}, {
       params: { channel },
+      skipGlobalLoading: true,
     })
     await loadTask()
-    showFeedback('发送成功', `${channelName}提醒已发送，将在 3 秒后自动隐藏。`)
+    showFeedback('发送成功', `${channelName}提醒已发送。`)
   } finally {
     actionLoading.value = false
   }

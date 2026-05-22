@@ -143,8 +143,14 @@
             <td><span :class="resolvePriorityMeta(task.priority).tone">{{ resolvePriorityMeta(task.priority).label }}</span></td>
             <td>
               <div class="task-channel-stack">
-                <span>邮件：{{ task.latest_notifications?.email?.summary || '暂无' }}</span>
-                <span>即时消息：{{ task.latest_notifications?.qax?.summary || '暂无' }}</span>
+                <span class="task-channel-line">
+                  <span>邮件：{{ notificationSummaryText(task, 'email') }}</span>
+                  <span v-if="isNotificationSending(task, 'email')" class="inline-spinner task-channel-spinner" aria-label="正在发送"></span>
+                </span>
+                <span class="task-channel-line">
+                  <span>即时消息：{{ notificationSummaryText(task, 'qax') }}</span>
+                  <span v-if="isNotificationSending(task, 'qax')" class="inline-spinner task-channel-spinner" aria-label="正在发送"></span>
+                </span>
               </div>
             </td>
             <td>{{ task.subtask_count || 0 }}</td>
@@ -228,6 +234,10 @@ const createOpen = ref(false)
 const importOpen = ref(false)
 const editTaskId = ref(null)
 const detailTaskId = ref(null)
+const sendingNotificationTasks = ref({})
+const NOTIFICATION_POLL_INTERVAL_MS = 2000
+const NOTIFICATION_SENDING_TIMEOUT_MS = 120000
+let notificationPollTimerId = null
 
 const isAllStatusesSelected = computed(() => status.value.length === statusOptions.length)
 const isAllDelaySelected = computed(() => delayFilter.value.length === delayOptions.length)
@@ -409,9 +419,102 @@ function delayStatus(task) {
   return { state: '', text: '', className: '' }
 }
 
-async function loadTasks() {
-  const { data } = await http.get('/tasks')
+function channelNotificationStatus(task, channel) {
+  return task?.latest_notifications?.[channel] || {}
+}
+
+function notificationId(task, channel) {
+  const status = channelNotificationStatus(task, channel)
+  return Number(status.notification_id || 0)
+}
+
+function taskNotificationSendingEntry(taskId) {
+  return sendingNotificationTasks.value[String(taskId)] || null
+}
+
+function hasNewNotificationResult(task, channel, entry) {
+  const baseline = Number(entry?.[`${channel}NotificationId`] || 0)
+  return notificationId(task, channel) > baseline
+}
+
+function isNotificationSending(task, channel) {
+  const entry = taskNotificationSendingEntry(task.id)
+  return Boolean(entry) && !hasNewNotificationResult(task, channel, entry)
+}
+
+function notificationSummaryText(task, channel) {
+  if (isNotificationSending(task, channel)) return '正在发送'
+  return channelNotificationStatus(task, channel).summary || '未发送'
+}
+
+function isTaskNotificationSendFinished(task) {
+  const entry = taskNotificationSendingEntry(task.id)
+  return Boolean(entry) && hasNewNotificationResult(task, 'email', entry) && hasNewNotificationResult(task, 'qax', entry)
+}
+
+function pruneSendingNotificationTasks() {
+  const now = Date.now()
+  const next = {}
+  Object.entries(sendingNotificationTasks.value).forEach(([taskId, entry]) => {
+    const task = tasks.value.find((item) => String(item.id) === taskId)
+    const startedAt = Number(entry?.startedAt || 0)
+    if (!task) {
+      if (now - startedAt < NOTIFICATION_SENDING_TIMEOUT_MS) next[taskId] = entry
+      return
+    }
+    if (!isTaskNotificationSendFinished(task) && now - startedAt < NOTIFICATION_SENDING_TIMEOUT_MS) {
+      next[taskId] = entry
+    }
+  })
+  sendingNotificationTasks.value = next
+  if (Object.keys(next).length === 0) {
+    stopNotificationStatusPolling()
+  }
+}
+
+function startNotificationStatusPolling() {
+  if (notificationPollTimerId || Object.keys(sendingNotificationTasks.value).length === 0) return
+  notificationPollTimerId = window.setTimeout(pollSendingNotificationTasks, NOTIFICATION_POLL_INTERVAL_MS)
+}
+
+function stopNotificationStatusPolling() {
+  if (!notificationPollTimerId) return
+  window.clearTimeout(notificationPollTimerId)
+  notificationPollTimerId = null
+}
+
+function markTaskNotificationsSending(taskOrId) {
+  const taskId = typeof taskOrId === 'object' ? taskOrId?.id : taskOrId
+  if (!taskId) return
+  const task = typeof taskOrId === 'object'
+    ? taskOrId
+    : tasks.value.find((item) => Number(item.id) === Number(taskId))
+  sendingNotificationTasks.value = {
+    ...sendingNotificationTasks.value,
+    [String(taskId)]: {
+      startedAt: Date.now(),
+      emailNotificationId: notificationId(task, 'email'),
+      qaxNotificationId: notificationId(task, 'qax'),
+    },
+  }
+  startNotificationStatusPolling()
+}
+
+async function pollSendingNotificationTasks() {
+  notificationPollTimerId = null
+  if (Object.keys(sendingNotificationTasks.value).length === 0) return
+  try {
+    await loadTasks({ skipGlobalLoading: true })
+  } finally {
+    pruneSendingNotificationTasks()
+    startNotificationStatusPolling()
+  }
+}
+
+async function loadTasks(config = {}) {
+  const { data } = await http.get('/tasks', config)
   tasks.value = data
+  pruneSendingNotificationTasks()
 }
 
 function closeCreate() {
@@ -438,9 +541,10 @@ function closeDetail() {
   detailTaskId.value = null
 }
 
-async function handleCreated() {
+async function handleCreated(task) {
   closeCreate()
-  await loadTasks()
+  markTaskNotificationsSending(task)
+  await loadTasks({ skipGlobalLoading: true })
 }
 
 async function handleEdited() {
@@ -505,9 +609,10 @@ function joinNamesForExport(names) {
 
 async function remind(taskId) {
   if (!window.confirm('确认向该任务负责人发送提醒？')) return
-  await http.post(`/tasks/${taskId}/remind`)
-  await loadTasks()
-  showFeedback('发送成功', '提醒已发送，将在 3 秒后自动隐藏。')
+  markTaskNotificationsSending(taskId)
+  await http.post(`/tasks/${taskId}/remind`, {}, { skipGlobalLoading: true })
+  await loadTasks({ skipGlobalLoading: true })
+  showFeedback('发送成功', '提醒已发送。')
 }
 
 let feedbackTimerId = null
@@ -535,6 +640,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', closeFloatingFilters)
+  stopNotificationStatusPolling()
   if (feedbackTimerId) {
     window.clearTimeout(feedbackTimerId)
   }

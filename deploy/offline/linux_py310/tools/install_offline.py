@@ -159,6 +159,7 @@ def main(argv: list[str]) -> int:
         __import__("fastapi")
         __import__("uvicorn")
         __import__("sqlalchemy")
+        __import__("psycopg")
         __import__("openpyxl")
         __import__("playwright")
     except Exception as exc:  # noqa: BLE001

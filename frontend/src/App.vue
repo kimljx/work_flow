@@ -77,6 +77,7 @@ import AdminAuditLogs from './views/admin/AdminAuditLogs.vue'
 import AdminImportExport from './views/admin/AdminImportExport.vue'
 import AdminMailEvents from './views/admin/AdminMailEvents.vue'
 import AdminNotifications from './views/admin/AdminNotifications.vue'
+import AdminSystemSettings from './views/admin/AdminSystemSettings.vue'
 import AdminTemplates from './views/admin/AdminTemplates.vue'
 import AdminUsers from './views/admin/AdminUsers.vue'
 
@@ -127,6 +128,7 @@ const settingsLinks = computed(() => {
     { key: 'templates', label: labels.templates, icon: fileTextIcon, component: AdminTemplates },
     { key: 'notifications', label: labels.notifications, icon: bellIcon, component: AdminNotifications },
     { key: 'mail-events', label: labels.mailEvents, icon: calendarClockIcon, component: AdminMailEvents },
+    { key: 'system-settings', label: '系统设置', icon: settingsIcon, component: AdminSystemSettings },
     { key: 'users', label: labels.users, icon: usersIcon, component: AdminUsers },
     { key: 'import-export', label: labels.importExport, icon: uploadIcon, component: AdminImportExport },
     { key: 'audit-logs', label: labels.auditLogs, icon: scrollTextIcon, component: AdminAuditLogs },

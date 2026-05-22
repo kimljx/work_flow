@@ -307,6 +307,15 @@ class MailPollStateOut(BaseModel):
     qax_browser_visible: bool = False
 
 
+class HostIpMappingPayload(BaseModel):
+    id: int | None = None
+    host: str
+    ip: str = ""
+    enabled: bool = True
+    source: str = "manual"
+    note: str = ""
+
+
 class RuntimeSettingsUpdate(BaseModel):
     mail_auto_poll_enabled: bool
     mail_auto_poll_interval_seconds: int = 300
@@ -345,6 +354,8 @@ class RuntimeSettingsUpdate(BaseModel):
     pop3_password: str = ""
     pop3_use_tls: bool = False
     pop3_use_ssl: bool = False
+    dns_auto_resolve_enabled: bool = True
+    mail_host_mappings: list[HostIpMappingPayload] = []
 
 
 class MailBaselineRequest(BaseModel):

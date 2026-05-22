@@ -1,0 +1,11 @@
+FROM mcr.microsoft.com/playwright/python:v1.52.0-jammy
+
+COPY container/start-work-flow-container.sh /usr/local/bin/start-work-flow-container
+
+ENV APP_PORT=18849 \
+    PYTHONUTF8=1 \
+    PLAYWRIGHT_SKIP_BROWSER_GC=1
+
+EXPOSE 18849
+WORKDIR /opt/work_flow
+CMD ["bash", "/usr/local/bin/start-work-flow-container"]

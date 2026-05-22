@@ -13,7 +13,6 @@ import html as html_lib
 import imaplib
 import json
 import logging
-import os
 import poplib
 import re
 import ssl
@@ -34,11 +33,11 @@ from zmail.mime import Mail as ZmailMime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import PROJECT_ROOT, settings
+from app.config import settings
 from app.constants import ADMIN_ROLES
 from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
-from app.services.runtime_settings import load_runtime_settings
+from app.services.runtime_settings import load_host_ip_mappings, load_runtime_settings
 from app.services.templates import _split_rule, sort_templates, strip_reply_guides
 from app.timeutils import shanghai_now_naive, to_shanghai_naive
 
@@ -50,51 +49,12 @@ _MAIL_POLL_EXECUTION_LOCK = threading.Lock()
 _MAIL_HEADER_FETCH = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)]"
 _MAIL_BODY_FETCH_BYTES = 64 * 1024
 _POP3_BODY_PREVIEW_LINES = 400
-_MAIL_HOSTS_PATH = PROJECT_ROOT / "config" / "mail-hosts.json"
 logger = logging.getLogger(__name__)
 PreparedMailTemplate = tuple[Template, tuple[str, ...], tuple[str, ...]]
 
 
-def _parse_mail_host_ip_map(value: str) -> dict[str, str]:
-    text = (value or "").strip()
-    if not text:
-        return {}
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
-        raw = None
-
-    if isinstance(raw, dict):
-        source = raw.get("hosts", raw)
-        if isinstance(source, dict):
-            return {str(host).strip().lower(): str(ip).strip() for host, ip in source.items() if str(host).strip() and str(ip).strip()}
-
-    result: dict[str, str] = {}
-    for item in re.split(r"[;,]\s*", text):
-        if not item.strip():
-            continue
-        if "=" in item:
-            host, ip = item.split("=", 1)
-        elif ":" in item:
-            host, ip = item.split(":", 1)
-        else:
-            continue
-        host = host.strip().lower()
-        ip = ip.strip()
-        if host and ip:
-            result[host] = ip
-    return result
-
-
 def _mail_host_ip_overrides() -> dict[str, str]:
-    overrides = _parse_mail_host_ip_map(os.getenv("MAIL_HOST_IP_MAP", ""))
-    if _MAIL_HOSTS_PATH.exists():
-        try:
-            file_overrides = _parse_mail_host_ip_map(_MAIL_HOSTS_PATH.read_text(encoding="utf-8"))
-        except OSError:
-            file_overrides = {}
-        overrides.update(file_overrides)
-    return overrides
+    return load_host_ip_mappings()
 
 
 @contextmanager

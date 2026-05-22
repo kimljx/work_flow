@@ -11,6 +11,8 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -53,7 +55,7 @@ RELEASE_ROOT = DIST_ROOT / RELEASE_NAME
 PACKAGE_CACHE_META = CACHE_ROOT / "packages-meta.json"
 RUNTIME_CACHE_META = CACHE_ROOT / "runtime-meta.json"
 BROWSER_CACHE_META = CACHE_ROOT / "browser-meta.json"
-RUNTIME_IMPORT_PROBE = "import fastapi, playwright, zmail, sqlalchemy, anyio, exceptiongroup"
+RUNTIME_IMPORT_PROBE = "import fastapi, playwright, zmail, sqlalchemy, anyio, exceptiongroup, psycopg"
 PACKAGE_FILE_SUFFIXES = (".whl", ".gz", ".zip")
 BROWSER_EXECUTABLE_GLOBS = ("chromium-*/chrome-linux/chrome",)
 
@@ -70,7 +72,14 @@ def run_command_capture(command: list[str], cwd: Path | None = None, env: dict[s
 
 def ensure_clean_directory(path: Path) -> None:
     if path.exists():
-        shutil.rmtree(path)
+        for attempt in range(5):
+            try:
+                shutil.rmtree(path)
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5)
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -80,13 +89,15 @@ def ensure_parent(path: Path) -> None:
 
 def copy_directory(source: Path, destination: Path) -> None:
     if destination.exists():
-        shutil.rmtree(destination)
+        ensure_clean_directory(destination)
+        destination.rmdir()
     shutil.copytree(source, destination)
 
 
 def copy_directory_contents(source: Path, destination: Path) -> None:
     if destination.exists():
-        shutil.rmtree(destination)
+        ensure_clean_directory(destination)
+        destination.rmdir()
     shutil.copytree(source, destination)
 
 
@@ -357,11 +368,21 @@ def prepare_linux_runtime(release_root: Path) -> Path:
     download_linux_runtime(archive_path)
     ensure_clean_directory(extract_root)
 
-    with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(extract_root)
+    # Windows 挂载盘对 Python standalone 包里的 terminfo 符号链接处理不稳定，先在 WSL 原生临时目录解压，
+    # 再移除运行项目不需要的 terminfo 链接树，最后复制到离线包目录，避免 Errno 40 符号链接循环。
+    with tempfile.TemporaryDirectory(prefix="work_flow_runtime_extract_") as temp_dir:
+        native_extract_root = Path(temp_dir)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            tar.extractall(native_extract_root)
 
-    python_binary = resolve_linux_python(extract_root)
-    extracted_install_root = python_binary.parent.parent
+        python_binary = resolve_linux_python(native_extract_root)
+        extracted_install_root = python_binary.parent.parent
+        terminfo_root = extracted_install_root / "share" / "terminfo"
+        if terminfo_root.exists():
+            shutil.rmtree(terminfo_root)
+
+        copy_directory(extracted_install_root, extract_root / "python")
+        extracted_install_root = extract_root / "python"
 
     if runtime_python_root.exists():
         shutil.rmtree(runtime_python_root)

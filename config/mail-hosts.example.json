@@ -1,0 +1,7 @@
+{
+  "hosts": {
+    "smtp.example.internal": "10.0.0.10",
+    "pop3.example.internal": "10.0.0.11",
+    "imap.example.internal": "10.0.0.12"
+  }
+}

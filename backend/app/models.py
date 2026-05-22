@@ -16,6 +16,33 @@ class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now_naive, nullable=False)
 
 
+class AppSetting(Base):
+    """Database-backed runtime settings previously stored in .env/JSON files."""
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=shanghai_now_naive,
+        onupdate=shanghai_now_naive,
+        nullable=False,
+    )
+
+
+class HostIpMapping(Base, TimestampMixin):
+    """Application-level hostname to IP mapping for offline/intranet DNS cases."""
+    __tablename__ = "host_ip_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    host: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class User(Base, TimestampMixin):
     """系统用户表，兼顾管理员与普通成员。"""
     __tablename__ = "users"

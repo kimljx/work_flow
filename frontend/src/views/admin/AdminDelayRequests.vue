@@ -46,7 +46,7 @@
       </div>
 
       <article
-        v-for="item in pendingRequests"
+        v-for="item in pagedPendingRequests"
         :key="item.id"
         class="approval-card"
       >
@@ -109,6 +109,7 @@
           </div>
         </div>
       </article>
+      <AppPagination v-model="pendingPage" v-model:page-size="pendingPageSize" :total="pendingRequests.length" />
     </div>
 
     <div class="panel section-block">
@@ -133,7 +134,7 @@
           <tr v-if="processedRequests.length === 0">
             <td colspan="5">当前没有已处理记录。</td>
           </tr>
-          <tr v-for="item in processedRequests" :key="`done-${item.id}`">
+          <tr v-for="item in pagedProcessedRequests" :key="`done-${item.id}`">
             <td>{{ item.task_title }}</td>
             <td>{{ item.applicant_name }}</td>
             <td>{{ formatDateTime(item.original_deadline) }}</td>
@@ -142,14 +143,16 @@
           </tr>
         </tbody>
       </table>
+      <AppPagination v-model="processedPage" v-model:page-size="processedPageSize" :total="processedRequests.length" />
     </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../../api/http'
+import AppPagination from '../../components/AppPagination.vue'
 import { resolvePriorityMeta } from '../../constants/taskUi'
 import { formatDateTime, toBackendDateTime, toDateTimeLocal } from '../../utils/format'
 
@@ -157,6 +160,10 @@ const route = useRoute()
 const backPath = computed(() => route.query.from || '/admin/tasks')
 const requests = ref([])
 const reviewForms = reactive({})
+const pendingPage = ref(1)
+const pendingPageSize = ref(20)
+const processedPage = ref(1)
+const processedPageSize = ref(20)
 
 const pendingRequests = computed(() =>
   requests.value.filter((item) => item.approval_status === 'PENDING')
@@ -165,6 +172,16 @@ const pendingRequests = computed(() =>
 const processedRequests = computed(() =>
   requests.value.filter((item) => item.approval_status !== 'PENDING')
 )
+
+const pagedPendingRequests = computed(() => {
+  const start = (pendingPage.value - 1) * pendingPageSize.value
+  return pendingRequests.value.slice(start, start + pendingPageSize.value)
+})
+
+const pagedProcessedRequests = computed(() => {
+  const start = (processedPage.value - 1) * processedPageSize.value
+  return processedRequests.value.slice(start, start + processedPageSize.value)
+})
 
 const urgentPendingCount = computed(() =>
   pendingRequests.value.filter((item) => {
@@ -181,6 +198,20 @@ const averageWaitHours = computed(() => {
   }, 0)
   return `${(total / pendingRequests.value.length).toFixed(1)}h`
 })
+
+watch(
+  () => pendingRequests.value.length,
+  () => {
+    pendingPage.value = 1
+  }
+)
+
+watch(
+  () => processedRequests.value.length,
+  () => {
+    processedPage.value = 1
+  }
+)
 
 function applicantInitial(name) {
   return (name || '成员').slice(0, 2)

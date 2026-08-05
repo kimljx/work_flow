@@ -11,6 +11,10 @@ POSTGRES_PORT="${POSTGRES_PORT:-15432}"
 POSTGRES_DB="${POSTGRES_DB:-work_flow}"
 POSTGRES_USER="${POSTGRES_USER:-work_flow}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-work_flow_change_me}"
+DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-ChangeMe123}"
+SECRET_KEY="${SECRET_KEY:-change-me-in-production}"
+ACCESS_TOKEN_EXPIRE_MINUTES="${ACCESS_TOKEN_EXPIRE_MINUTES:-60}"
+REFRESH_TOKEN_EXPIRE_MINUTES="${REFRESH_TOKEN_EXPIRE_MINUTES:-10080}"
 RUNTIME_IMAGE="${RUNTIME_IMAGE:-localhost/work-flow-runtime:playwright-1.52}"
 START_SCRIPT="$ROOT/container/start-work-flow-container.sh"
 POSTGRES_DATA_DIR="${POSTGRES_DATA_DIR:-/data/sql/postgre}"
@@ -22,11 +26,6 @@ fi
 
 if [[ ! -d "$RELEASE_DIR" ]]; then
   echo "Release directory not found: $RELEASE_DIR" >&2
-  exit 1
-fi
-
-if [[ ! -x "$RELEASE_DIR/runtime/python/bin/python3.10" ]]; then
-  echo "Bundled Python runtime is not executable: $RELEASE_DIR/runtime/python/bin/python3.10" >&2
   exit 1
 fi
 
@@ -81,6 +80,10 @@ podman run -d \
   --security-opt label=disable \
   -e APP_PORT="$APP_PORT" \
   -e DATABASE_URL="$DATABASE_URL" \
+  -e DEFAULT_PASSWORD="$DEFAULT_PASSWORD" \
+  -e SECRET_KEY="$SECRET_KEY" \
+  -e ACCESS_TOKEN_EXPIRE_MINUTES="$ACCESS_TOKEN_EXPIRE_MINUTES" \
+  -e REFRESH_TOKEN_EXPIRE_MINUTES="$REFRESH_TOKEN_EXPIRE_MINUTES" \
   -v "$RELEASE_DIR:/opt/work_flow:Z" \
   -v "$START_SCRIPT:/usr/local/bin/start-work-flow-container:ro,Z" \
   "$RUNTIME_IMAGE" \

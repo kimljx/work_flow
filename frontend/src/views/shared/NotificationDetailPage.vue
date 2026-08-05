@@ -106,7 +106,7 @@
           <tr v-if="filteredRecipients.length === 0">
             <td colspan="7">当前没有成员回执记录。</td>
           </tr>
-          <tr v-for="recipient in filteredRecipients" :key="`${detail.id}-${recipient.user_id}`">
+          <tr v-for="recipient in pagedRecipients" :key="`${detail.id}-${recipient.user_id}`">
             <td>
               <div>{{ recipient.name || '-' }}</div>
               <div class="subtle-text">{{ recipient.email || '未配置邮箱' }}</div>
@@ -122,6 +122,7 @@
           </tr>
         </tbody>
       </table>
+      <AppPagination v-model="recipientPage" v-model:page-size="recipientPageSize" :total="filteredRecipients.length" />
     </div>
   </section>
 </template>
@@ -130,6 +131,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../../api/http'
+import AppPagination from '../../components/AppPagination.vue'
 import { useAuthStore } from '../../stores/auth'
 import { notifyTypeText } from '../../constants/notifyTypes'
 import { formatDateTime } from '../../utils/format'
@@ -149,6 +151,8 @@ const props = defineProps({
 const emit = defineEmits(['cancel', 'open-task'])
 const detail = ref(null)
 const recipientFilter = ref('all')
+const recipientPage = ref(1)
+const recipientPageSize = ref(20)
 
 const defaultBackPath = computed(() => (auth.isAdmin ? '/admin/notifications' : '/member/notifications'))
 const backPath = computed(() => route.query.from || defaultBackPath.value)
@@ -176,6 +180,11 @@ const filteredRecipients = computed(() => {
   return recipients
 })
 
+const pagedRecipients = computed(() => {
+  const start = (recipientPage.value - 1) * recipientPageSize.value
+  return filteredRecipients.value.slice(start, start + recipientPageSize.value)
+})
+
 async function loadDetail() {
   if (!currentNotificationId.value) return
   const { data } = await http.get(`/notifications/${currentNotificationId.value}`, {
@@ -183,10 +192,14 @@ async function loadDetail() {
   })
   detail.value = data
   recipientFilter.value = 'all'
+  recipientPage.value = 1
 }
 
 onMounted(loadDetail)
 watch(currentNotificationId, loadDetail)
+watch(recipientFilter, () => {
+  recipientPage.value = 1
+})
 
 function openTask() {
   if (props.embedded) {

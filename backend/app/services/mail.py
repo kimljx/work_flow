@@ -21,13 +21,13 @@ import socket
 import threading
 import zmail
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from email import message_from_string
 from typing import Iterator
 from zmail.server import MailServer as ZmailMailServer, SMTPServer as ZmailSMTPServer
 from email.header import decode_header
 from email.message import EmailMessage, Message
-from email.utils import parseaddr, parsedate_to_datetime
+from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from zmail.mime import Mail as ZmailMime
 
 from fastapi import HTTPException
@@ -38,23 +38,118 @@ from app.constants import ADMIN_ROLES
 from app.models import DelayRequest, MailAction, MailEvent, MailScanState, Notification, NotificationRecipient, Task, TaskMember, TaskStatusEvent, TaskSubtask, Template, User
 from app.services.delay import apply_delay_decision
 from app.services.runtime_settings import load_host_ip_mappings, load_runtime_settings
-from app.services.templates import _split_rule, sort_templates, strip_reply_guides
+from app.services.templates import _split_rule, select_reply_template, sort_templates, strip_reply_guides
 from app.timeutils import shanghai_now_naive, to_shanghai_naive
 
 
 DATE_PATTERN = re.compile(r"(20\d{2})(?:-|/|年)(\d{1,2})(?:-|/|月)(\d{1,2})(?:日)?")
-TASK_ID_PATTERN = re.compile(r"(?:任务通知\s*#\s*|任务\s*(?:ID|编号)\s*[#:：]?\s*|任务\s*#\s*)(\d+)", re.IGNORECASE)
+TASK_ID_PATTERN = re.compile(
+    r"(?:【\s*任务通知\s*[#＃]\s*(\d+)\s*】|任务通知\s*[#＃]\s*(\d+)|任务\s*(?:ID|编号)\s*[#:：]?\s*(\d+)|任务\s*[#＃]\s*(\d+))",
+    re.IGNORECASE,
+)
 DELAY_REQUEST_ID_PATTERN = re.compile(r"(?:延期申请\s*(?:ID|编号)\s*[#:：]?\s*|延期申请\s*#\s*)(\d+)", re.IGNORECASE)
 _MAIL_POLL_EXECUTION_LOCK = threading.Lock()
-_MAIL_HEADER_FETCH = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)]"
+_MAIL_HEADER_FETCH = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE MIME-VERSION CONTENT-TYPE CONTENT-TRANSFER-ENCODING)]"
 _MAIL_BODY_FETCH_BYTES = 64 * 1024
 _POP3_BODY_PREVIEW_LINES = 400
 logger = logging.getLogger(__name__)
 PreparedMailTemplate = tuple[Template, tuple[str, ...], tuple[str, ...]]
+TASK_REPLYABLE_NOTIFY_TYPES = ("task_created", "task_updated", "manual_remind", "due_remind")
+
+
+def _mail_inbox_folder_names() -> list[str]:
+    raw = str(getattr(settings, "mail_inbox_folders", "") or "").strip()
+    names = [item.strip().strip('"') for item in re.split(r"[,;\n\r|\u3001\uff0c\uff1b]+", raw) if item.strip()]
+    return names or ["INBOX"]
+
+
+def _is_default_inbox_folder(folder: str) -> bool:
+    return (folder or "").strip().strip('"').upper() == "INBOX"
+
+
+def _encode_imap_utf7(value: str) -> str:
+    result: list[str] = []
+    buffer: list[str] = []
+
+    def flush_buffer() -> None:
+        if not buffer:
+            return
+        import base64
+
+        raw = "".join(buffer).encode("utf-16-be")
+        result.append("&" + base64.b64encode(raw).decode("ascii").rstrip("=").replace("/", ",") + "-")
+        buffer.clear()
+
+    for char in value:
+        codepoint = ord(char)
+        if 0x20 <= codepoint <= 0x7E:
+            flush_buffer()
+            result.append("&-" if char == "&" else char)
+        else:
+            buffer.append(char)
+    flush_buffer()
+    return "".join(result)
+
+
+def _imap_mailbox_arg(folder: str) -> str:
+    encoded = _encode_imap_utf7((folder or "INBOX").strip() or "INBOX")
+    escaped = encoded.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _mailbox_fallback_prefix(protocol: str, folder: str, message_number: object) -> str:
+    folder_key = re.sub(r"[^A-Za-z0-9_.-]+", "-", (folder or "INBOX").strip()).strip("-") or "INBOX"
+    return f"{protocol}-{folder_key}-{message_number}"
+
+
+def _try_select_pop3_folder(pop: object, folder: str) -> bool:
+    if _is_default_inbox_folder(folder):
+        return True
+    targets: list[object] = [pop]
+    raw_server = getattr(pop, "server", None)
+    if raw_server is not None and raw_server is not pop:
+        targets.append(raw_server)
+    for target in targets:
+        for method_name in ("select_folder", "select", "mailbox", "folder", "cwd"):
+            method = getattr(target, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                response = method(folder)
+            except (AttributeError, NotImplementedError, poplib.error_proto):
+                continue
+            except TypeError:
+                continue
+            if isinstance(response, tuple) and response and isinstance(response[0], (bytes, str)):
+                status = response[0].decode("utf-8", "ignore") if isinstance(response[0], bytes) else response[0]
+                if status.strip().startswith("-"):
+                    continue
+            return True
+    return False
 
 
 def _mail_host_ip_overrides() -> dict[str, str]:
     return load_host_ip_mappings()
+
+
+def _normalize_mail_address(value: str) -> str:
+    return (parseaddr(value or "")[1] or value or "").strip().lower()
+
+
+def _decoded_address_header(value: object) -> str:
+    text = _decode_header_value(value)
+    addresses = [addr.strip().lower() for _, addr in getaddresses([text]) if addr.strip()]
+    return ",".join(addresses) if addresses else text.strip()
+
+
+def _address_list_contains(value: str, target: str) -> bool:
+    normalized_target = _normalize_mail_address(target)
+    if not normalized_target:
+        return False
+    addresses = [addr.strip().lower() for _, addr in getaddresses([value or ""]) if addr.strip()]
+    if not addresses:
+        addresses = [item.strip().lower() for item in re.split(r"[,;\s]+", value or "") if item.strip()]
+    return normalized_target in addresses
 
 
 @contextmanager
@@ -128,6 +223,23 @@ def _leading_nonempty_lines(text: str, limit: int = 8) -> list[str]:
     return lines
 
 
+def _reply_line_starts_with_keyword(line: str, keyword: str) -> bool:
+    """Only treat a leading status keyword as a reply command."""
+    normalized = (line or "").strip()
+    normalized = re.sub(r"^(?:(?:re|fw|fwd|回复|答复)\s*[:：]\s*)+", "", normalized, flags=re.IGNORECASE)
+    normalized = normalized.lstrip(" \t\"'“‘【[（(")
+    return normalized.lower().startswith((keyword or "").strip().lower())
+
+
+def _first_explicit_reply_line(subject: str, body: str, keywords: tuple[str, ...]) -> str:
+    """Return the first leading line whose status keyword is explicit."""
+    candidates = [(subject or "").strip(), *_leading_nonempty_lines(body)]
+    for line in candidates:
+        if line and any(_reply_line_starts_with_keyword(line, keyword) for keyword in keywords):
+            return line
+    return ""
+
+
 def _find_explicit_reply_line(subject: str, body: str, keywords: tuple[str, ...]) -> str:
     """仅在主题或正文前几行中查找明确回复指令，避免把系统通知正文误判成回信。"""
     normalized_subject = (subject or "").strip()
@@ -192,7 +304,7 @@ def _smtp_ssl_error_hint(exc: ssl.SSLError) -> str:
 
     说明:
     - `_ssl.c:1007` 常见于 `WRONG_VERSION_NUMBER`，本质上多数是端口与加密方式不匹配；
-    - 这里统一转成“当前配置 + 推荐配置”的形式，便于运维直接修改 `.env`。
+    - 这里统一转成“当前配置 + 推荐配置”的形式，便于运维在系统设置中调整。
     """
     message = str(exc).lower()
     if "wrong version number" in message:
@@ -531,7 +643,15 @@ def _is_message_before_baseline(message: Message, state: MailScanState) -> bool:
 
 
 def _mail_reply_templates(db: Session) -> list[PreparedMailTemplate]:
-    templates = sort_templates(db.query(Template).filter(Template.template_kind == "MAIL_REPLY", Template.enabled.is_(True)).all())
+    templates = sort_templates(
+        db.query(Template)
+        .filter(
+            Template.template_kind == "MAIL_REPLY",
+            Template.enabled.is_(True),
+            Template.notify_type.in_(("task_done", "task_in_progress")),
+        )
+        .all()
+    )
     return [
         (
             template,
@@ -543,14 +663,7 @@ def _mail_reply_templates(db: Session) -> list[PreparedMailTemplate]:
 
 
 def _match_mail_template(templates: list[PreparedMailTemplate], subject: str, body: str) -> Template | None:
-    subject_text = (subject or "").lower()
-    body_text = strip_reply_guides(body).lower()
-    for template, subject_rules, body_rules in templates:
-        if subject_rules and any(rule in subject_text for rule in subject_rules):
-            return template
-        if body_rules and any(rule in body_text for rule in body_rules):
-            return template
-    return None
+    return select_reply_template([template for template, _, _ in templates], subject, body)
 
 
 def _existing_mail_message_ids(db: Session, message_ids: list[str]) -> set[str]:
@@ -663,6 +776,9 @@ def _build_mail_event_from_message(
     state: MailScanState,
     raw_message: bytes,
     fallback_prefix: str,
+    inbox_protocol: str = "",
+    inbox_folder: str = "",
+    server_message_ref: str = "",
     templates: list[PreparedMailTemplate] | None = None,
     known_message_id: str | None = None,
     skip_existing_check: bool = False,
@@ -688,6 +804,7 @@ def _build_mail_event_from_message(
 
     subject = _decode_header_value(message.get("Subject"))
     from_addr = _decode_header_value(message.get("From"))
+    to_addr = _decoded_address_header(message.get("To"))
     body = _extract_text_body(message)
 
     matched_template = _match_mail_template(templates if templates is not None else _mail_reply_templates(db), subject, body)
@@ -695,9 +812,13 @@ def _build_mail_event_from_message(
     if existing and existing.process_status == "UNMATCHED":
         mail_event = existing
         mail_event.from_addr = from_addr
+        mail_event.to_addr = to_addr
         mail_event.subject = subject
         mail_event.body_digest = body[:1000]
         mail_event.original_body = body
+        mail_event.inbox_protocol = inbox_protocol
+        mail_event.inbox_folder = inbox_folder
+        mail_event.server_message_ref = server_message_ref
         mail_event.resolved_template_id = matched_template.id if matched_template else None
         mail_event.resolved_version = matched_template.version if matched_template else None
         mail_event.process_status = "MATCHED" if matched_template else "UNMATCHED"
@@ -705,9 +826,13 @@ def _build_mail_event_from_message(
         mail_event = MailEvent(
             message_id=message_id,
             from_addr=from_addr,
+            to_addr=to_addr,
             subject=subject,
             body_digest=body[:1000],
             original_body=body,
+            inbox_protocol=inbox_protocol,
+            inbox_folder=inbox_folder,
+            server_message_ref=server_message_ref,
             resolved_template_id=matched_template.id if matched_template else None,
             resolved_version=matched_template.version if matched_template else None,
             process_status="MATCHED" if matched_template else "UNMATCHED",
@@ -788,7 +913,9 @@ def _find_task_id(subject: str, body: str) -> int | None:
     for source in (subject, body):
         match = TASK_ID_PATTERN.search(source or "")
         if match:
-            return int(match.group(1))
+            for group in match.groups():
+                if group:
+                    return int(group)
     return None
 
 
@@ -821,6 +948,226 @@ def _append_mail_action(db: Session, mail_event_id: int, action_type: str, statu
             action_result_json=json.dumps(payload, ensure_ascii=False),
         )
     )
+
+
+def _delete_imap_message(folder: str, server_message_ref: str) -> None:
+    with _open_imap_connection() as mailbox:
+        mailbox.login(settings.imap_user, settings.imap_password)
+        status, _ = mailbox.select(_imap_mailbox_arg(folder or "INBOX"))
+        if status != "OK":
+            raise RuntimeError(f"IMAP folder unavailable: {folder or 'INBOX'}")
+        message_ref = str(server_message_ref or "").strip()
+        if not message_ref:
+            raise RuntimeError("IMAP server message ref is empty")
+        store_status, _ = mailbox.store(message_ref, "+FLAGS", r"(\Deleted)")
+        if store_status != "OK":
+            raise RuntimeError(f"IMAP delete failed: {message_ref}")
+        mailbox.expunge()
+
+
+def _delete_pop3_message(folder: str, server_message_ref: str) -> None:
+    mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
+    with _patched_mail_dns_resolution(), mail_server.pop_server as pop:
+        target_folder = (folder or "INBOX").strip() or "INBOX"
+        if not _try_select_pop3_folder(pop, target_folder) and not _is_default_inbox_folder(target_folder):
+            raise RuntimeError(f"POP3 folder unavailable: {target_folder}")
+        message_number = int(str(server_message_ref or "").strip())
+        server = getattr(pop, "server", pop)
+        stat_method = getattr(server, "stat", None) or getattr(pop, "stat", None)
+        if callable(stat_method):
+            stat_method()
+        server.dele(message_number)
+
+
+def _delete_mail_event_message(event: MailEvent) -> None:
+    if event.inbox_protocol == "imap":
+        _delete_imap_message(event.inbox_folder, event.server_message_ref)
+    elif event.inbox_protocol == "pop3":
+        _delete_pop3_message(event.inbox_folder, event.server_message_ref)
+    else:
+        raise RuntimeError(f"Unsupported inbox protocol: {event.inbox_protocol or '-'}")
+
+
+def _is_original_notification_mail_for_reply(event: MailEvent, *, task_id: int, reply_sender: str) -> bool:
+    if not event.server_message_ref or event.inbox_protocol not in {"imap", "pop3"}:
+        return False
+    if _find_task_id(event.subject, event.original_body or event.body_digest) != task_id:
+        return False
+    system_from = _normalize_mail_address(settings.smtp_from_address or settings.smtp_user)
+    event_from = _normalize_mail_address(event.from_addr)
+    if system_from and event_from != system_from:
+        return False
+    return _address_list_contains(event.to_addr, reply_sender)
+
+
+def cleanup_applied_task_reply_mails(db: Session) -> dict[str, object]:
+    """删除已成功应用的回复邮件，以及同一成员对应的原始任务通知邮件。"""
+
+    rows = (
+        db.query(MailAction, MailEvent)
+        .join(MailEvent, MailEvent.id == MailAction.mail_event_id)
+        .filter(
+            MailAction.action_type.in_(("task_in_progress", "task_done")),
+            MailAction.action_status.in_(("APPLIED", "SUCCESS")),
+            MailAction.target_task_id.isnot(None),
+            MailEvent.server_message_ref != "",
+            MailEvent.inbox_protocol.in_(("imap", "pop3")),
+        )
+        .order_by(MailAction.id.asc())
+        .all()
+    )
+    deleted_ids: list[int] = []
+    failed: list[dict[str, object]] = []
+    seen_event_ids: set[int] = set()
+
+    def delete_event(event: MailEvent, reason: str) -> None:
+        if event.id in seen_event_ids or not event.server_message_ref:
+            return
+        seen_event_ids.add(event.id)
+        try:
+            _delete_mail_event_message(event)
+            event.server_message_ref = ""
+            deleted_ids.append(event.id)
+        except Exception as exc:  # pragma: no cover - depends on real mailbox server behavior
+            failed.append({"mail_event_id": event.id, "reason": reason, "error": str(exc)})
+
+    for action, reply_event in rows:
+        task_id = int(action.target_task_id or 0)
+        reply_sender = _normalize_mail_address(reply_event.from_addr)
+        original_events = (
+            db.query(MailEvent)
+            .filter(
+                MailEvent.id != reply_event.id,
+                MailEvent.server_message_ref != "",
+                MailEvent.inbox_protocol == reply_event.inbox_protocol,
+            )
+            .order_by(MailEvent.id.desc())
+            .all()
+        )
+        for original_event in original_events:
+            if _is_original_notification_mail_for_reply(original_event, task_id=task_id, reply_sender=reply_sender):
+                delete_event(original_event, "original_notification")
+        delete_event(reply_event, "matched_reply")
+
+    return {
+        "status": "success" if not failed else "partial_failed",
+        "deleted_count": len(deleted_ids),
+        "deleted_mail_event_ids": deleted_ids,
+        "failed_count": len(failed),
+        "failures": failed,
+    }
+
+
+def delete_task_related_mail_from_inbox(db: Session, task_id: int) -> dict[str, object]:
+    action_event_ids = {
+        event_id
+        for (event_id,) in (
+            db.query(MailAction.mail_event_id)
+            .filter(MailAction.target_task_id == task_id)
+            .distinct()
+            .all()
+        )
+    }
+    candidates = (
+        db.query(MailEvent)
+        .filter(
+            MailEvent.server_message_ref != "",
+            MailEvent.inbox_protocol.in_(("imap", "pop3")),
+        )
+        .order_by(MailEvent.id.asc())
+        .all()
+    )
+    events = [
+        event
+        for event in candidates
+        if event.id in action_event_ids
+        or _find_task_id(event.subject, event.original_body or event.body_digest) == task_id
+    ]
+    deleted_ids: list[int] = []
+    skipped_ids: list[int] = []
+    failed: list[dict[str, object]] = []
+    seen_message_ids: set[str] = set()
+
+    for event in events:
+        if event.message_id in seen_message_ids:
+            continue
+        seen_message_ids.add(event.message_id)
+        try:
+            if event.inbox_protocol == "imap":
+                _delete_imap_message(event.inbox_folder, event.server_message_ref)
+            elif event.inbox_protocol == "pop3":
+                _delete_pop3_message(event.inbox_folder, event.server_message_ref)
+            else:
+                skipped_ids.append(event.id)
+                continue
+            deleted_ids.append(event.id)
+        except Exception as exc:  # pragma: no cover
+            failed.append({"mail_event_id": event.id, "message_id": event.message_id, "reason": str(exc)})
+
+    deleted_record_count = 0
+    deleted_action_count = 0
+    if deleted_ids:
+        deleted_action_count = db.query(MailAction).filter(MailAction.mail_event_id.in_(deleted_ids)).delete(synchronize_session=False)
+        deleted_record_count = db.query(MailEvent).filter(MailEvent.id.in_(deleted_ids)).delete(synchronize_session=False)
+
+    result: dict[str, object] = {
+        "task_id": task_id,
+        "matched_count": len(events),
+        "deleted_count": len(deleted_ids),
+        "deleted_mail_event_ids": deleted_ids,
+        "deleted_record_count": deleted_record_count,
+        "deleted_action_count": deleted_action_count,
+        "skipped_count": len(skipped_ids),
+        "skipped_mail_event_ids": skipped_ids,
+        "failed_count": len(failed),
+        "failures": failed,
+    }
+    if deleted_ids:
+        logger.info("Deleted inbox mails for task %s: %s", task_id, result)
+    elif failed:
+        logger.warning("Delete inbox mails for task %s failed: %s", task_id, result)
+    return result
+
+
+def cleanup_completed_task_mails(db: Session, retention_days: int) -> dict[str, object]:
+    """按保留天数批量清理已完成任务对应的成员回执邮件。"""
+
+    safe_days = max(int(retention_days or 30), 1)
+    cutoff = shanghai_now_naive() - timedelta(days=safe_days)
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.deleted_at.is_(None),
+            Task.main_status == "done",
+            Task.completed_at.isnot(None),
+            Task.completed_at <= cutoff,
+        )
+        .order_by(Task.completed_at.asc(), Task.id.asc())
+        .all()
+    )
+    task_results: list[dict[str, object]] = []
+    deleted_count = 0
+    deleted_record_count = 0
+    deleted_action_count = 0
+    failed_count = 0
+    for task in tasks:
+        result = delete_task_related_mail_from_inbox(db, task.id)
+        task_results.append(result)
+        deleted_count += int(result.get("deleted_count") or 0)
+        deleted_record_count += int(result.get("deleted_record_count") or 0)
+        deleted_action_count += int(result.get("deleted_action_count") or 0)
+        failed_count += int(result.get("failed_count") or 0)
+    return {
+        "status": "success" if failed_count == 0 else "partial_failed",
+        "retention_days": safe_days,
+        "cutoff": cutoff.isoformat(sep=" ", timespec="seconds"),
+        "task_count": len(tasks),
+        "deleted_count": deleted_count,
+        "deleted_record_count": deleted_record_count,
+        "deleted_action_count": deleted_action_count,
+        "failed_count": failed_count,
+        "task_results": task_results,
+    }
 
 
 def _member_has_done_reply(db: Session, task_id: int, user: User | None) -> bool:
@@ -936,7 +1283,8 @@ def diagnose_mail_settings() -> dict[str, str]:
 
 
 def diagnose_inbox_settings() -> dict[str, str]:
-    """测试当前收件协议的登录与访问能力。"""
+    """Test login and folder access for the currently enabled inbox protocol."""
+    folders = _mail_inbox_folder_names()
     if _inbox_protocol() == "pop3":
         if not settings.pop3_host or not settings.pop3_user:
             return {"status": "failed", "message": "请先配置 POP3_HOST 与 POP3_USER 后再测试。"}
@@ -944,10 +1292,19 @@ def diagnose_inbox_settings() -> dict[str, str]:
             return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请保留一种加密方式后重试。"}
         try:
             mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
+            unsupported_folder = ""
             with _patched_mail_dns_resolution():
-                with mail_server.pop_server:
-                    pass
-            return {"status": "success", "message": "POP3 连接与登录成功，可以正常读取收件箱。"}
+                with mail_server.pop_server as pop:
+                    for folder in folders:
+                        if not _try_select_pop3_folder(pop, folder):
+                            unsupported_folder = folder
+                            break
+            if unsupported_folder:
+                return {
+                    "status": "success",
+                    "message": f"POP3 连接与登录成功；当前 POP3 服务未暴露文件夹选择能力（{unsupported_folder}），实际收件将兼容扫描默认邮箱列表。",
+                }
+            return {"status": "success", "message": f"POP3 连接与登录成功，可读取配置的收件文件夹：{', '.join(folders)}。"}
         except ssl.SSLError as exc:
             return {"status": "failed", "message": _pop3_ssl_error_hint(exc)}
         except socket.gaierror as exc:
@@ -966,8 +1323,11 @@ def diagnose_inbox_settings() -> dict[str, str]:
     try:
         with _open_imap_connection() as mailbox:
             mailbox.login(settings.imap_user, settings.imap_password)
-            mailbox.select("INBOX")
-        return {"status": "success", "message": "IMAP 连接与登录成功，可以正常读取收件箱。"}
+            for folder in folders:
+                status, _ = mailbox.select(_imap_mailbox_arg(folder))
+                if status != "OK":
+                    return {"status": "failed", "message": f"IMAP 文件夹无法访问：{folder}。请检查计划任务-收件配置中的文件夹名称。"}
+        return {"status": "success", "message": f"IMAP 连接与登录成功，可读取配置的收件文件夹：{', '.join(folders)}。"}
     except ssl.SSLError as exc:
         return {"status": "failed", "message": _imap_ssl_error_hint(exc)}
     except socket.gaierror as exc:
@@ -979,7 +1339,6 @@ def diagnose_inbox_settings() -> dict[str, str]:
     except Exception as exc:  # pragma: no cover
         return {"status": "failed", "message": f"IMAP 测试失败：{exc}"}
 
-
 def diagnose_imap_settings() -> dict[str, str]:
     """兼容旧调用名，内部统一转到当前收件协议诊断。"""
     return diagnose_inbox_settings()
@@ -988,7 +1347,7 @@ def diagnose_imap_settings() -> dict[str, str]:
 def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type: str, sender: User, subject: str, body: str) -> None:
     """根据邮件内容更新任务状态。"""
     keywords = ("已完成", "完成") if notify_type == "task_done" else ("进行中", "处理中")
-    reply_line = _find_explicit_reply_line(subject, body, keywords)
+    reply_line = _find_explicit_reply_line(subject, strip_reply_guides(body), keywords)
     if not reply_line:
         mail_event.process_status = "FAILED"
         _append_mail_action(db, mail_event.id, notify_type, "FAILED", None, {"reason": "邮件开头未识别到明确状态回复指令"})
@@ -1017,7 +1376,7 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
         task.id,
         sender.id,
         mail_event,
-        ("task_created", "manual_remind", "due_remind"),
+        TASK_REPLYABLE_NOTIFY_TYPES,
     )
     if task.state_locked:
         mail_event.process_status = "SKIPPED"
@@ -1038,8 +1397,12 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
             if item.status == "canceled":
                 # 已取消的子任务不再受邮件回执影响。
                 continue
-            item.status = next_status
-            updated_subtask_ids.append(item.id)
+            if next_status == "done":
+                item.status = "done"
+                updated_subtask_ids.append(item.id)
+            elif item.status != "done":
+                item.status = "in_progress"
+                updated_subtask_ids.append(item.id)
         task.main_status = _derive_task_status_from_subtasks(
             db,
             task,
@@ -1089,7 +1452,7 @@ def _apply_task_status_from_mail(db: Session, mail_event: MailEvent, notify_type
 
 def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: User, subject: str, body: str) -> None:
     """根据成员邮件创建延期申请，并通知管理员审批。"""
-    reply_line = _find_explicit_reply_line(subject, body, ("延期",))
+    reply_line = _find_explicit_reply_line(subject, strip_reply_guides(body), ("延期",))
     if not reply_line:
         mail_event.process_status = "FAILED"
         _append_mail_action(db, mail_event.id, "delay_request", "FAILED", None, {"reason": "邮件开头未识别到明确延期回复指令"})
@@ -1126,7 +1489,7 @@ def _apply_delay_request_from_mail(db: Session, mail_event: MailEvent, sender: U
         task.id,
         sender.id,
         mail_event,
-        ("task_created", "manual_remind", "due_remind"),
+        TASK_REPLYABLE_NOTIFY_TYPES,
     )
     db.add(request_obj)
     db.flush()
@@ -1264,80 +1627,118 @@ def _apply_business_action(db: Session, mail_event: MailEvent, template: Templat
 
 
 def _poll_mailbox_via_imap(db: Session, state: MailScanState) -> dict[str, str | int]:
-    """使用 IMAP 扫描未读邮件。"""
+    """Scan unread messages from the configured IMAP folders."""
     if settings.imap_use_ssl and settings.imap_use_tls:
         return {"status": "failed", "message": "IMAP_USE_SSL 与 IMAP_USE_TLS 不能同时开启，请修正配置后重试。", "count": 0}
 
+    folders = _mail_inbox_folder_names()
     with _open_imap_connection() as mailbox:
         mailbox.login(settings.imap_user, settings.imap_password)
-        mailbox.select("INBOX")
         since_date = _imap_since_date(state.baseline_started_at)
-        if since_date:
-            status, data = mailbox.search(None, "UNSEEN", "SINCE", since_date)
-        else:
-            status, data = mailbox.search(None, "UNSEEN")
-        if status != "OK":
-            return {"status": "failed", "message": "IMAP 未能查询未读邮件。", "count": 0}
-
-        message_numbers = [item for item in data[0].split() if item]
-        unread_total = len(message_numbers)
         max_scan = load_runtime_settings().mail_inbox_max_scan
-        if max_scan > 0:
-            message_numbers = message_numbers[-max_scan :]
-
         templates = _mail_reply_templates(db)
-        candidates: list[tuple[bytes, str, bytes, str]] = []
+        candidates: list[tuple[str, bytes, str, bytes, str]] = []
         candidate_message_ids: list[str] = []
-        for imap_id in message_numbers:
-            header_status, header_data = mailbox.fetch(imap_id, f"({_MAIL_HEADER_FETCH})")
-            if header_status != "OK":
+        unread_total = 0
+        scanned_total = 0
+        failed_folders: list[str] = []
+
+        for folder in folders:
+            status, _ = mailbox.select(_imap_mailbox_arg(folder))
+            if status != "OK":
+                failed_folders.append(folder)
                 continue
-            header_message = _extract_imap_fetch_bytes(header_data)
-            if not header_message:
+            if since_date:
+                search_status, data = mailbox.search(None, "UNSEEN", "SINCE", since_date)
+            else:
+                search_status, data = mailbox.search(None, "UNSEEN")
+            if search_status != "OK":
+                failed_folders.append(folder)
                 continue
-            fallback_prefix = f"imap-{_decode_imap_id(imap_id)}"
-            header = email.message_from_bytes(header_message)
-            if _is_message_before_baseline(header, state):
-                continue
-            message_id = _resolve_message_id(header, header_message, fallback_prefix)
-            candidates.append((imap_id, fallback_prefix, header_message, message_id))
-            candidate_message_ids.append(message_id)
+
+            message_numbers = [item for item in data[0].split() if item]
+            unread_total += len(message_numbers)
+            if max_scan > 0:
+                message_numbers = message_numbers[-max_scan:]
+            scanned_total += len(message_numbers)
+
+            for imap_id in message_numbers:
+                header_status, header_data = mailbox.fetch(imap_id, f"({_MAIL_HEADER_FETCH})")
+                if header_status != "OK":
+                    continue
+                header_message = _extract_imap_fetch_bytes(header_data)
+                if not header_message:
+                    continue
+                fallback_prefix = _mailbox_fallback_prefix("imap", folder, _decode_imap_id(imap_id))
+                header = email.message_from_bytes(header_message)
+                if _is_message_before_baseline(header, state):
+                    continue
+                message_id = _resolve_message_id(header, header_message, fallback_prefix)
+                candidates.append((folder, imap_id, fallback_prefix, header_message, message_id))
+                candidate_message_ids.append(message_id)
+
+        if failed_folders and len(failed_folders) == len(folders):
+            return {"status": "failed", "message": f"IMAP 未能访问配置的收件文件夹：{', '.join(failed_folders)}。", "count": 0}
 
         existing_message_ids = _processed_mail_message_ids(db, candidate_message_ids)
-
         saved_count = 0
-        for imap_id, fallback_prefix, header_message, message_id in candidates:
+        for folder, imap_id, fallback_prefix, header_message, message_id in candidates:
             if message_id in existing_message_ids:
                 continue
+            mailbox.select(_imap_mailbox_arg(folder))
             body_status, body_data = mailbox.fetch(imap_id, f"(BODY.PEEK[TEXT]<0.{_MAIL_BODY_FETCH_BYTES}>)")
             if body_status != "OK":
                 continue
             body_preview = _extract_imap_fetch_bytes(body_data)
             raw_message = _join_header_and_body_preview(header_message, body_preview)
-            if _build_mail_event_from_message(db, state, raw_message, fallback_prefix, templates, message_id, skip_existing_check=True):
+            if _build_mail_event_from_message(
+                db,
+                state,
+                raw_message,
+                fallback_prefix,
+                inbox_protocol="imap",
+                inbox_folder=folder,
+                server_message_ref=_decode_imap_id(imap_id),
+                templates=templates,
+                known_message_id=message_id,
+                skip_existing_check=True,
+                replace_unmatched_existing=True,
+            ):
                 saved_count += 1
 
+        skipped_text = f"；跳过不可访问文件夹：{', '.join(failed_folders)}" if failed_folders else ""
         return {
             "status": "success",
-            "message": f"本次通过 IMAP 扫描未读邮件 {len(message_numbers)} 封（总未读 {unread_total} 封），已落库 {saved_count} 封。",
+            "message": f"本次通过 IMAP 扫描文件夹 {', '.join(folders)}，未读邮件 {scanned_total} 封（总未读 {unread_total} 封），已落库 {saved_count} 封{skipped_text}。",
             "count": saved_count,
         }
 
 
 def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str | int]:
-    """使用 POP3（zmail）拉取最近邮件。"""
+    """Scan recent messages via POP3, with optional folder selection when supported."""
     if settings.pop3_use_ssl and settings.pop3_use_tls:
         return {"status": "failed", "message": "POP3_USE_SSL 与 POP3_USE_TLS 不能同时开启，请修正配置后重试。", "count": 0}
 
     mail_server = _make_zmail_mail_server(settings.pop3_user, settings.pop3_password)
+    folders = _mail_inbox_folder_names()
+    selected_folder = folders[0]
+    folder_fallback = False
 
     with _patched_mail_dns_resolution(), mail_server.pop_server as pop:
+        for folder in folders:
+            if _try_select_pop3_folder(pop, folder):
+                selected_folder = folder
+                break
+        else:
+            selected_folder = "INBOX"
+            folder_fallback = True
+
         _, listings, _ = pop.server.list()
         message_numbers = [int(line.split()[0]) for line in listings if line]
         total_count = len(message_numbers)
         max_scan = load_runtime_settings().mail_inbox_max_scan
         if max_scan > 0:
-            message_numbers = message_numbers[-max_scan :]
+            message_numbers = message_numbers[-max_scan:]
 
         templates = _mail_reply_templates(db)
         candidates: list[tuple[int, bytes, str, str]] = []
@@ -1345,7 +1746,7 @@ def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str |
         for message_number in message_numbers:
             header_lines = _pop3_top(pop, message_number, 0)
             header_message = b"\r\n".join(header_lines)
-            fallback_prefix = f"pop3-{message_number}"
+            fallback_prefix = _mailbox_fallback_prefix("pop3", selected_folder, message_number)
             header = email.message_from_bytes(header_message)
             if _is_message_before_baseline(header, state):
                 continue
@@ -1356,7 +1757,6 @@ def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str |
             candidate_message_ids.append(message_id)
 
         existing_message_ids = _processed_mail_message_ids(db, candidate_message_ids)
-
         saved_count = 0
         for message_number, header_message, fallback_prefix, message_id in candidates:
             if message_id in existing_message_ids:
@@ -1368,16 +1768,20 @@ def _poll_mailbox_via_pop3(db: Session, state: MailScanState) -> dict[str, str |
                 state,
                 raw_message,
                 fallback_prefix,
-                templates,
-                message_id,
+                inbox_protocol="pop3",
+                inbox_folder=selected_folder,
+                server_message_ref=str(message_number),
+                templates=templates,
+                known_message_id=message_id,
                 skip_existing_check=True,
                 replace_unmatched_existing=True,
             ):
                 saved_count += 1
 
+        fallback_text = "；POP3 服务未暴露文件夹选择能力，已兼容扫描默认邮箱列表" if folder_fallback else ""
         return {
             "status": "success",
-            "message": f"本次通过 POP3 扫描最近邮件 {len(message_numbers)} 封（总邮件 {total_count} 封），已落库 {saved_count} 封。",
+            "message": f"本次通过 POP3 扫描文件夹 {selected_folder} 最近邮件 {len(message_numbers)} 封（总邮件 {total_count} 封），已落库 {saved_count} 封{fallback_text}。",
             "count": saved_count,
         }
 
@@ -1390,12 +1794,6 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
     - 仅扫描未读邮件，并限制单次最大扫描数量；
     - 邮件成功匹配回复模板后会尝试触发对应业务动作。
     """
-    if _inbox_protocol() == "pop3":
-        if not settings.pop3_host or not settings.pop3_user:
-            return {"status": "skipped", "message": "未配置 POP3，已跳过邮件收取。", "count": 0}
-    elif not settings.imap_host or not settings.imap_user:
-        return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
-
     with _mail_poll_guard() as acquired:
         if not acquired:
             return {
@@ -1403,6 +1801,12 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
                 "message": "另一项邮件收取任务正在执行，请稍后重试。",
                 "count": 0,
             }
+
+        if _inbox_protocol() == "pop3":
+            if not settings.pop3_host or not settings.pop3_user:
+                return {"status": "skipped", "message": "未配置 POP3，已跳过邮件收取。", "count": 0}
+        elif not settings.imap_host or not settings.imap_user:
+            return {"status": "skipped", "message": "未配置 IMAP，已跳过邮件收取。", "count": 0}
 
         try:
             state = _mail_scan_state(db)
@@ -1419,7 +1823,19 @@ def poll_mailbox(db: Session) -> dict[str, str | int]:
 
             result = _poll_mailbox_via_pop3(db, state) if _inbox_protocol() == "pop3" else _poll_mailbox_via_imap(db, state)
             if result.get("status") == "success":
+                cleanup_result = cleanup_applied_task_reply_mails(db)
                 state.last_scan_at = shanghai_now_naive()
+                if cleanup_result.get("deleted_count") or cleanup_result.get("failed_count"):
+                    result = {
+                        **result,
+                        "deleted_mail_count": int(cleanup_result.get("deleted_count") or 0),
+                        "delete_failed_count": int(cleanup_result.get("failed_count") or 0),
+                        "delete_result": cleanup_result,
+                        "message": (
+                            f"{result.get('message', '')} 已清理匹配邮件 {cleanup_result.get('deleted_count', 0)} 封"
+                            f"；删除失败 {cleanup_result.get('failed_count', 0)} 封。"
+                        ),
+                    }
                 db.commit()
             return result
         except socket.gaierror as exc:

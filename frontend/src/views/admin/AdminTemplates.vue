@@ -76,9 +76,12 @@
         </div>
       </div>
       <div class="toolbar">
-        <button @click="submitTemplate">{{ editingId ? '保存模板' : '新增模板' }}</button>
-        <button class="button secondary" v-if="editingId" @click="resetForm">取消编辑</button>
+        <button type="button" :disabled="submitting" @click="submitTemplate">{{ editingId ? '保存模板' : '新增模板' }}</button>
+        <button type="button" class="button secondary" v-if="editingId" @click="resetForm">取消编辑</button>
       </div>
+      <p v-if="templateMessage" :class="templateMessageType === 'success' ? 'success-text' : 'error-text'">
+        {{ templateMessage }}
+      </p>
     </div>
 
     <div class="panel">
@@ -114,7 +117,7 @@
         <div class="task-split-column">
           <h3>模板预览</h3>
           <div v-if="form.template_kind === 'MAIL_REPLY'" class="muted-block">
-            邮件回复模板只参与主题和正文匹配，不直接发送通知正文。匹配时系统会自动忽略系统下发邮件中的回复指引和引用原文，避免误匹配。
+            邮件回复模板只参与主题和正文匹配，不直接发送通知正文。匹配时系统会自动忽略系统下发邮件中的回复指引和引用原文；若同一封回复中包含多个状态词，以最先出现的状态词为准，逗号、换行、句号、分号、顿号、冒号、问号和感叹号后的状态词不会覆盖此前判断。
           </div>
           <pre v-else class="detail-pre">{{ renderedTemplatePreview }}</pre>
         </div>
@@ -149,14 +152,15 @@
             <td>{{ item.is_default ? '是' : '否' }}</td>
             <td>
               <div class="toolbar">
-                <button class="button secondary" @click="editTemplate(item)">编辑</button>
-                <button class="button secondary" @click="setDefault(item.id)">设为默认</button>
+                <button type="button" class="button secondary" @click="editTemplate(item)">编辑</button>
+                <button type="button" class="button secondary" @click="setDefault(item.id)">设为默认</button>
+                <button type="button" class="button danger" @click="deleteTemplate(item)">删除</button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="templates.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="templates.length" />
     </div>
   </section>
 </template>
@@ -169,6 +173,9 @@ import { notifyTypeText } from '../../constants/notifyTypes'
 
 const templates = ref([])
 const editingId = ref(null)
+const submitting = ref(false)
+const templateMessage = ref('')
+const templateMessageType = ref('success')
 const templateKindOptions = ref([
   { value: 'MAIL_SEND', label: '邮件发送模板' },
   { value: 'QAX_SEND', label: '即时消息发送模板' },
@@ -177,25 +184,23 @@ const templateKindOptions = ref([
 const notifyTypeOptions = ref({
   MAIL_SEND: [
     { value: 'task_created', label: '任务创建通知' },
+    { value: 'task_updated', label: '任务更新通知' },
     { value: 'manual_remind', label: '手动提醒' },
     { value: 'due_remind', label: '到期提醒' },
-    { value: 'delay_approval', label: '延期审批通知' },
   ],
   QAX_SEND: [
     { value: 'task_created', label: '任务创建通知' },
+    { value: 'task_updated', label: '任务更新通知' },
     { value: 'manual_remind', label: '手动提醒' },
     { value: 'due_remind', label: '到期提醒' },
-    { value: 'delay_approval', label: '延期审批通知' },
   ],
   MAIL_REPLY: [
     { value: 'task_done', label: '邮件回执-已完成' },
     { value: 'task_in_progress', label: '邮件回执-进行中' },
-    { value: 'delay_request', label: '邮件回执-延期申请' },
-    { value: 'delay_approve', label: '邮件回执-延期审批' },
   ],
 })
 const page = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
 let insertFeedbackTimer = null
 const placeholderTips = {
   common: [
@@ -219,7 +224,7 @@ const placeholderTips = {
   ],
   mailReply: [
     { key: '主题匹配规则', label: '主题规则', example: '用于识别“已完成 / 进行中 / 延期申请 / 同意拒绝”等关键词' },
-    { key: '正文匹配规则', label: '正文规则', example: '用于补充匹配上下文，系统会忽略回复指引与引用原文后再匹配' },
+    { key: '正文匹配规则', label: '正文规则', example: '用于补充匹配上下文；多个状态词时，以最先出现的状态词为准。逗号、换行、句号、分号、顿号、冒号、问号和感叹号后的状态词不会覆盖此前判断' },
   ],
 }
 const templateRules = [
@@ -236,7 +241,7 @@ const templateRules = [
   {
     title: '邮件回复模板',
     keyword: 'MAIL_REPLY',
-    description: '用于解析成员和管理员的邮件回复。系统按“先主题后正文，再按优先级、版本、模板编号”选择命中的模板，并自动忽略回复指引和引用原文。',
+    description: '用于解析成员和管理员的邮件回复。系统先检查主题、再检查正文，并以其中最先出现的状态词决定结果；相同位置才按优先级、版本、模板编号选择。会自动忽略回复指引和引用原文。',
   },
 ]
 const contentTextareaRef = ref(null)
@@ -296,8 +301,8 @@ const renderedTemplatePreview = computed(() => {
 })
 
 const pagedTemplates = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return templates.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return templates.value.slice(start, start + pageSize.value)
 })
 
 watch(
@@ -440,6 +445,7 @@ function resetForm() {
   editingId.value = null
   insertFeedback.visible = false
   insertFeedback.token = ''
+  templateMessage.value = ''
   const initialNotifyType = notifyTypeOptions.value.MAIL_SEND?.[0]?.value || 'task_created'
   Object.assign(form, {
     name: '',
@@ -488,7 +494,23 @@ async function loadTemplateOptions() {
  */
 function editTemplate(item) {
   editingId.value = item.id
-  Object.assign(form, item)
+  templateMessage.value = ''
+  Object.assign(form, templatePayloadFrom(item))
+}
+
+function templatePayloadFrom(source) {
+  return {
+    name: source.name || '',
+    template_kind: source.template_kind || 'MAIL_SEND',
+    notify_type: source.notify_type || '',
+    priority: Number(source.priority ?? 100),
+    version: Number(source.version ?? 1),
+    enabled: Boolean(source.enabled),
+    is_default: Boolean(source.is_default),
+    subject_rule: source.subject_rule || '',
+    body_rule: source.body_rule || '',
+    content: source.content || '',
+  }
 }
 
 /**
@@ -496,13 +518,28 @@ function editTemplate(item) {
  * @returns {Promise<void>}
  */
 async function submitTemplate() {
-  if (editingId.value) {
-    await http.put(`/templates/${editingId.value}`, form)
-  } else {
-    await http.post('/templates', form)
+  if (submitting.value) return
+  submitting.value = true
+  templateMessage.value = ''
+  try {
+    const payload = templatePayloadFrom(form)
+    const successMessage = editingId.value ? '模板已保存' : '模板已新增'
+    if (editingId.value) {
+      await http.put(`/templates/${editingId.value}`, payload)
+    } else {
+      await http.post('/templates', payload)
+    }
+    templateMessageType.value = 'success'
+    resetForm()
+    await loadTemplates()
+    templateMessage.value = successMessage
+    templateMessageType.value = 'success'
+  } catch (error) {
+    templateMessageType.value = 'error'
+    templateMessage.value = error.response?.data?.detail || '模板保存失败，请检查填写内容后重试'
+  } finally {
+    submitting.value = false
   }
-  resetForm()
-  await loadTemplates()
 }
 
 /**
@@ -512,6 +549,15 @@ async function submitTemplate() {
  */
 async function setDefault(id) {
   await http.post(`/templates/${id}/set-default`)
+  await loadTemplates()
+}
+
+async function deleteTemplate(item) {
+  if (!window.confirm(`确认删除模板《${item.name}》吗？历史邮件记录会保留，但不再关联该模板。`)) return
+  await http.delete(`/templates/${item.id}`)
+  if (editingId.value === item.id) {
+    resetForm()
+  }
   await loadTemplates()
 }
 

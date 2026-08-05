@@ -79,6 +79,8 @@ cd /data/podman/podman_rhel7_offline
 REAL_DIR=$(readlink -f /data/work_flow/current)
 sudo APP_PORT=18849 \
   POSTGRES_PASSWORD='请替换为强密码' \
+  DEFAULT_PASSWORD='请替换为初始登录密码' \
+  SECRET_KEY='请替换为随机长密钥' \
   bash run_project.sh "$REAL_DIR"
 ```
 
@@ -123,7 +125,9 @@ sudo tar -czf /data/sql/work_flow_postgre_backup_$(date +%Y%m%d_%H%M%S).tar.gz -
 
 ## 8. 配置方式
 
-`.env` 只保留启动必需配置，例如 `DATABASE_URL`、令牌配置等。
+项目不再使用 `.env` 文件。
+
+`run_project.sh` 会根据 `POSTGRES_*` 生成 `DATABASE_URL` 并注入应用容器，同时透传 `APP_PORT`、`DEFAULT_PASSWORD`、`SECRET_KEY`、令牌过期时间等启动必需参数。
 
 以下业务配置保存在 PostgreSQL 中：
 
@@ -134,7 +138,13 @@ sudo tar -czf /data/sql/work_flow_postgre_backup_$(date +%Y%m%d_%H%M%S).tar.gz -
 
 这些配置请在系统右上角“系统设置”弹窗中维护。
 
-## 9. 常用排查命令
+SQLite 仅作为本地开发和自动化测试默认值保留，生产部署不得使用 SQLite。
+
+## 9. 系统级证书
+
+QAX 等 HTTPS 服务证书必须导入系统信任链。应用默认不忽略 HTTPS 证书错误，不再通过项目目录中的 `.cer`、`.crt`、`.pem`、`.p12` 或 `.pfx` 文件单独指定证书。
+
+## 10. 常用排查命令
 
 ```bash
 podman ps -a

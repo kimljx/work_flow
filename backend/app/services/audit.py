@@ -18,7 +18,7 @@ def _to_json_text(payload: dict | list | str | int | float | bool | None, defaul
         return default
     if isinstance(payload, str):
         return payload
-    return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def write_system_log(

@@ -147,6 +147,19 @@ class NotificationChainTestCase(unittest.TestCase):
             self.assertEqual(preview["context"]["task_remark"], "主任务备注说明")
             self.assertEqual(preview["context"]["remind_focus"], "主任务整体进度跟进")
 
+    def test_task_update_notification_subject_uses_task_notice_prefix(self) -> None:
+        """任务更新通知也使用任务通知主题前缀，便于回信匹配同一套任务 ID 规则。"""
+        with SessionLocal() as db:
+            task = db.query(Task).filter(Task.title == "链路测试任务").first()
+            preview = preview_notification_content(
+                db=db,
+                task=task,
+                channel="email",
+                notify_type="task_updated",
+                extra_context={"remind_focus": "标题变更"},
+            )
+            self.assertEqual(preview["subject"], f"【任务通知#{task.id}】（更新）链路测试任务")
+
     def test_preview_uses_database_rows_instead_of_task_relationship_cache(self) -> None:
         """创建任务瞬间即使关系缓存还没挂到 task 对象上，也要能渲染出负责人和子任务。"""
         with SessionLocal() as db:

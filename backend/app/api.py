@@ -11,8 +11,10 @@ import hashlib
 import io
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timedelta
+from email.utils import parseaddr
 from pathlib import Path
 
 import jwt
@@ -45,19 +47,23 @@ from app.models import AuditLog, DelayRequest, MailAction, MailEvent, MailScanSt
 from app.schemas import (
     ApiMessage,
     AuditOut,
+    ChangePasswordRequest,
     DashboardSummary,
     DelayDecisionRequest,
     DelayRequestCreate,
     LoginRequest,
     MailEventDetailOut,
+    MailEventBulkDeleteRequest,
     MailEventOut,
     MailPollStateOut,
     MailBaselineRequest,
+    NotificationBulkDeleteRequest,
     NotificationDetailOut,
     NotificationPreviewOut,
     NotificationRecipientOut,
     NotificationOut,
     RefreshRequest,
+    ResetPasswordRequest,
     TaskCreate,
     TaskDetailOut,
     TaskImportHistoryOut,
@@ -72,14 +78,15 @@ from app.schemas import (
     UserUpdate,
     RuntimeSettingsUpdate,
 )
-from app.security import create_token, decode_token, get_current_user, require_admin, verify_password
+from app.security import create_token, decode_token, get_current_user, hash_password, require_admin, verify_password
 from app.services.audit import cleanup_system_logs, write_audit
 from app.services.collection import collect_state, start_collect
 from app.services.delay import apply_delay_decision
-from app.services.mail import diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline
+from app.services.mail import delete_task_related_mail_from_inbox, diagnose_inbox_settings, diagnose_mail_settings, initialize_mail_scan_baseline
+from app.services.qax import delete_qax_task_notifications
 from app.services.notifications import create_due_reminders, create_notification_with_recipients, preview_notification_content
 from app.services.runtime_settings import load_runtime_settings, runtime_settings_dict, save_runtime_settings
-from app.services.templates import sort_templates, template_matches, validate_template_content
+from app.services.templates import select_reply_template, sort_templates, strip_reply_guides, template_matches, validate_template_content
 from app.timeutils import shanghai_now_naive
 from app.services.users import build_default_password_hash, ensure_last_admin_not_removed
 
@@ -153,6 +160,42 @@ def _enqueue_task_created_notifications(task_id: int) -> None:
     thread.start()
 
 
+def _run_task_update_notifications(task_id: int, recipient_updates: list[dict[str, object]]) -> None:
+    """在后台会话中按变更范围发送任务更新通知。"""
+    with SessionLocal() as task_db:
+        try:
+            task = task_db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
+            if task is None:
+                return
+            for item in recipient_updates:
+                user_id = int(item["user_id"])
+                summary = str(item.get("summary") or "任务内容已更新，请查看最新安排。")
+                _send_task_reminders(
+                    task_db,
+                    task,
+                    "task_updated",
+                    extra_context={"remind_focus": summary, "update_summary": summary},
+                    recipient_user_ids=[user_id],
+                )
+            task_db.commit()
+        except Exception:
+            task_db.rollback()
+            logger.exception("后台发送任务更新通知失败，任务ID：%s", task_id)
+
+
+def _enqueue_task_update_notifications(task_id: int, recipient_updates: list[dict[str, object]]) -> None:
+    """启动后台线程发送任务更新通知。"""
+    if not recipient_updates:
+        return
+    thread = threading.Thread(
+        target=_run_task_update_notifications,
+        args=(task_id, recipient_updates),
+        name=f"task-updated-notify-{task_id}",
+        daemon=True,
+    )
+    thread.start()
+
+
 def is_admin_role(role: str) -> bool:
     """判断角色是否属于管理角色。"""
     return role in ADMIN_ROLES
@@ -166,6 +209,37 @@ def validate_user_role(role: str) -> None:
 
 def _trim_text(value: str | None) -> str:
     return (value or "").strip()
+
+
+def _model_to_dict(model: object) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()  # type: ignore[attr-defined]
+    if hasattr(model, "dict"):
+        return model.dict()  # type: ignore[attr-defined]
+    return dict(model) if isinstance(model, dict) else {}
+
+
+def _normalize_md5_password(value: str) -> str:
+    text = _trim_text(value).lower()
+    if len(text) != 32 or any(char not in "0123456789abcdef" for char in text):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="密码必须先进行 MD5 加密后再提交")
+    return text
+
+
+def _normalize_optional_sha256_password(value: str | None) -> str:
+    text = _trim_text(value).lower()
+    if not text:
+        return ""
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="旧密码兼容摘要格式错误")
+    return text
+
+
+def _matches_password_digest(stored_hash: str, md5_password: str, legacy_sha256_password: str = "") -> bool:
+    stored = _trim_text(stored_hash).lower()
+    if stored == md5_password:
+        return True
+    return bool(legacy_sha256_password and stored == legacy_sha256_password)
 
 
 def _trim_import_match_text(value: object) -> str:
@@ -273,8 +347,31 @@ def _empty_latest_notification(channel: str) -> dict[str, object]:
         "pending_recipient_names": [],
         "pending_recipient_ids": [],
         "sent_at": None,
+        "read_at": None,
         "summary": "未发送",
     }
+
+
+def _mail_reply_time_for_recipient(db: Session, recipient_id: int) -> datetime | None:
+    """返回实际回复了指定邮件通知的最新邮件接收时间。"""
+    actions = (
+        db.query(MailAction, MailEvent)
+        .join(MailEvent, MailEvent.id == MailAction.mail_event_id)
+        .filter(
+            MailAction.action_type.in_(("task_in_progress", "task_done")),
+            MailAction.action_status.in_(("APPLIED", "SUCCESS")),
+        )
+        .order_by(MailAction.created_at.desc(), MailAction.id.desc())
+        .all()
+    )
+    for action, event in actions:
+        try:
+            result = json.loads(action.action_result_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        if int(result.get("replied_notification_recipient_id") or 0) == recipient_id:
+            return event.created_at
+    return None
 
 
 def _latest_notification_summary(
@@ -355,12 +452,16 @@ def _latest_notification_summary(
     recipient = next((item for item in recipients if item.user_id == user_id), None)
     if not recipient:
         return summary
+    read_at: object = recipient.read_at or None
+    if channel == "email" and recipient.read_status == "read":
+        read_at = _mail_reply_time_for_recipient(db, recipient.id)
     summary.update(
         {
             "delivery_status": recipient.delivery_status,
             "delivery_status_text": notification_status_text(recipient.delivery_status),
             "read_status": recipient.read_status,
             "read_status_text": read_status_text(recipient.read_status, channel),
+            "read_at": read_at,
             "summary": (
                 read_status_text(recipient.read_status, channel)
                 if recipient.delivery_status == "delivered"
@@ -376,6 +477,64 @@ def _task_latest_notifications(db: Session, task_id: int, *, user_id: int | None
         "email": _latest_notification_summary(db, task_id, "email", user_id=user_id),
         "qax": _latest_notification_summary(db, task_id, "qax", user_id=user_id),
     }
+
+
+MAIL_REPLY_QUOTE_MARKER = re.compile(
+    r"^(?:-{3,}\s*(?:original message|forwarded message|\u539f\u90ae\u4ef6\u4fe1\u606f|\u539f\u59cb\u90ae\u4ef6|\u8f6c\u53d1\u90ae\u4ef6)\s*-{3,}|"
+    r"(?:from|发件人|寄件者)\s*[:：]|(?:on .+ wrote|在.+写道)\s*[:：]?)$",
+    re.IGNORECASE,
+)
+
+
+def _reply_content_without_original_mail(content: str) -> str:
+    """保留回复正文，移除客户端附带的原始邮件引用部分。"""
+    return strip_reply_guides((content or "").replace("\r\n", "\n").replace("\r", "\n"))[:1000]
+
+
+def _latest_task_member_replies(db: Session, task_id: int) -> dict[str, dict[str, object]]:
+    """按发件人邮箱返回任务成员最近一次已应用的邮件回复。"""
+    rows = (
+        db.query(MailAction, MailEvent)
+        .join(MailEvent, MailEvent.id == MailAction.mail_event_id)
+        .filter(
+            MailAction.target_task_id == task_id,
+            MailAction.action_type.in_(("task_in_progress", "task_done")),
+            MailAction.action_status.in_(("APPLIED", "SUCCESS")),
+        )
+        .order_by(MailAction.created_at.desc(), MailAction.id.desc())
+        .all()
+    )
+    replies: dict[str, dict[str, object]] = {}
+    notification_names: dict[int, str] = {}
+    for action, event in rows:
+        sender_email = parseaddr(event.from_addr or "")[1].strip().lower()
+        if not sender_email or sender_email in replies:
+            continue
+        content = _reply_content_without_original_mail(event.original_body or event.body_digest)
+        if content:
+            try:
+                action_result = json.loads(action.action_result_json or "{}")
+            except json.JSONDecodeError:
+                action_result = {}
+            recipient_id = int(action_result.get("replied_notification_recipient_id") or 0)
+            notification_name = notification_names.get(recipient_id, "")
+            if recipient_id and not notification_name:
+                recipient_row = (
+                    db.query(NotificationRecipient, Notification)
+                    .join(Notification, Notification.id == NotificationRecipient.notification_id)
+                    .filter(NotificationRecipient.id == recipient_id)
+                    .first()
+                )
+                if recipient_row:
+                    _, notification = recipient_row
+                    notification_name = NOTIFICATION_TYPE_LABELS.get(notification.notify_type, notification.notify_type)
+                notification_names[recipient_id] = notification_name
+            replies[sender_email] = {
+                "content": content,
+                "notification_name": notification_name or "任务通知",
+                "replied_at": event.created_at,
+            }
+    return replies
 
 
 def serialize_task(task: Task, db: Session) -> TaskOut:
@@ -504,6 +663,7 @@ def serialize_notification_recipient(recipient: NotificationRecipient, db: Sessi
         delivery_status_text=notification_status_text(recipient.delivery_status),
         read_status=recipient.read_status,
         read_status_text=read_status_text(recipient.read_status, channel),
+        read_at=recipient.read_at,
         feedback_label=feedback_label_text(channel),
         retry_count=recipient.retry_count,
         content_snapshot=recipient.content_snapshot,
@@ -516,7 +676,7 @@ def serialize_notification_detail(notification: Notification, db: Session) -> No
     base = serialize_notification(notification, db)
     recipients = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).all()
     return NotificationDetailOut(
-        **base.model_dump(),
+        **_model_to_dict(base),
         content_snapshot=notification.content_snapshot,
         recipients=[serialize_notification_recipient(item, db) for item in recipients],
     )
@@ -576,7 +736,7 @@ def serialize_mail_event_detail(mail_event: MailEvent, db: Session) -> MailEvent
     base = serialize_mail_event(mail_event, db)
     template = db.query(Template).filter(Template.id == mail_event.resolved_template_id).first() if mail_event.resolved_template_id else None
     return MailEventDetailOut(
-        **base.model_dump(),
+        **_model_to_dict(base),
         template_id=template.id if template else None,
         template_kind=template.template_kind if template else "",
         content=template.content if template else "",
@@ -611,6 +771,12 @@ def serialize_mail_poll_state(db: Session) -> MailPollStateOut:
 def ensure_notification_access(notification: Notification, current_user: User, db: Session) -> None:
     """校验当前用户是否允许查看某条通知详情。"""
     if is_admin_role(current_user.role):
+        return
+    recipient = db.query(NotificationRecipient).filter(
+        NotificationRecipient.notification_id == notification.id,
+        NotificationRecipient.user_id == current_user.id,
+    ).first()
+    if recipient:
         return
     if notification.task_id is None:
         raise HTTPException(status_code=403, detail="无权访问该通知")
@@ -1106,9 +1272,14 @@ def _record_task_import_history(
 @router.post("/auth/login", response_model=TokenPair)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenPair:
     """用户名密码登录，并返回访问令牌与刷新令牌。"""
+    md5_password = _normalize_md5_password(payload.password)
+    legacy_sha256_password = _normalize_optional_sha256_password(payload.password_legacy_sha256)
     user = db.query(User).filter(User.username == payload.username, User.is_active.is_(True)).first()
-    if not user or not verify_password(payload.password, user.password_hash):
+    if not user or not _matches_password_digest(user.password_hash, md5_password, legacy_sha256_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+    if user.password_hash != md5_password:
+        user.password_hash = md5_password
+        db.commit()
     return TokenPair(
         access_token=create_token(str(user.id), "access", settings.access_token_expire_minutes),
         refresh_token=create_token(str(user.id), "refresh", settings.refresh_token_expire_minutes),
@@ -1138,6 +1309,31 @@ def logout(_: User = Depends(get_current_user)) -> ApiMessage:
 @router.get("/auth/me", response_model=UserOut)
 def me(current_user: User = Depends(get_current_user)) -> UserOut:
     return serialize_user(current_user)
+
+
+@router.post("/auth/change-password", response_model=ApiMessage)
+def change_password(payload: ChangePasswordRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiMessage:
+    current_password = _normalize_md5_password(payload.current_password)
+    new_password = _normalize_md5_password(payload.new_password)
+    legacy_sha256_password = _normalize_optional_sha256_password(payload.current_password_legacy_sha256)
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if not user or not _matches_password_digest(user.password_hash, current_password, legacy_sha256_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前密码错误")
+    user.password_hash = hash_password(new_password)
+    write_audit(
+        db,
+        current_user.id,
+        "CHANGE_PASSWORD",
+        "User",
+        user.id,
+        {},
+        {"password_changed": True},
+        module_name="api.auth",
+        message=f"用户「{user.name}」修改密码",
+        detail={"username": user.username},
+    )
+    db.commit()
+    return ApiMessage(message="密码已修改")
 
 
 @router.get("/admin/users", response_model=list[UserOut])
@@ -1581,11 +1777,11 @@ def enable_user(user_id: int, current_user: User = Depends(require_admin), db: S
 
 
 @router.post("/admin/users/{user_id}/reset-password", response_model=ApiMessage)
-def reset_password(user_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+def reset_password(user_id: int, payload: ResetPasswordRequest, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
-    user.password_hash = build_default_password_hash(settings.default_password)
+        raise HTTPException(status_code=404, detail="?????")
+    user.password_hash = hash_password(_normalize_md5_password(payload.new_password))
     write_audit(
         db,
         current_user.id,
@@ -1593,13 +1789,13 @@ def reset_password(user_id: int, current_user: User = Depends(require_admin), db
         "User",
         user.id,
         {},
-        {"default_password_applied": True},
+        {"password_reset": True},
         module_name="api.user",
-        message=f"重置用户「{user.name}」密码",
+        message=f"?????{user.name}???",
         detail={"username": user.username},
     )
     db.commit()
-    return ApiMessage(message="密码已重置")
+    return ApiMessage(message="?????")
 
 
 @router.get("/tasks", response_model=list[TaskOut])
@@ -1622,8 +1818,114 @@ def create_task(payload: TaskCreate, current_user: User = Depends(require_admin)
     db.commit()
     db.refresh(task)
     task_out = serialize_task(task, db)
+    task_out.notification_sending = True
     _enqueue_task_created_notifications(task.id)
     return task_out
+
+
+def _task_main_snapshot(task: Task) -> dict[str, object]:
+    """截取会影响全员任务认知的主任务字段。"""
+    milestones = sorted(
+        (
+            item.name,
+            item.planned_at.isoformat() if item.planned_at else "",
+            item.remind_offsets or "",
+            int(item.sort_order or 0),
+        )
+        for item in task.milestones
+    )
+    return {
+        "title": task.title or "",
+        "content": task.content or "",
+        "priority": task.priority or "",
+        "remark": task.remark or "",
+        "start_at": task.start_at.isoformat() if task.start_at else "",
+        "end_at": task.end_at.isoformat() if task.end_at else "",
+        "due_remind_days": int(task.due_remind_days or 0),
+        "milestones": milestones,
+    }
+
+
+def _payload_main_snapshot(payload: TaskCreate) -> dict[str, object]:
+    milestones = sorted(
+        (
+            item.name,
+            item.planned_at.isoformat() if item.planned_at else "",
+            ",".join(str(offset) for offset in item.remind_offsets),
+            int(item.sort_order or 0),
+        )
+        for item in payload.milestones
+    )
+    return {
+        "title": payload.title or "",
+        "content": payload.content or "",
+        "priority": payload.priority or "",
+        "remark": payload.remark or "",
+        "start_at": payload.start_at.isoformat() if payload.start_at else "",
+        "end_at": payload.end_at.isoformat() if payload.end_at else "",
+        "due_remind_days": max(payload.due_remind_days, 0),
+        "milestones": milestones,
+    }
+
+
+def _subtasks_by_assignee(subtasks: list[TaskSubtask]) -> dict[int, tuple[tuple[str, str, int, str], ...]]:
+    grouped: dict[int, list[tuple[str, str, int, str]]] = {}
+    for item in subtasks:
+        grouped.setdefault(item.assignee_id, []).append(
+            (item.title or "", item.content or "", int(item.sort_order or 0), item.status or "pending")
+        )
+    return {user_id: tuple(sorted(items)) for user_id, items in grouped.items()}
+
+
+def _payload_subtasks_by_assignee(payload: TaskCreate) -> dict[int, tuple[tuple[str, str, int, str], ...]]:
+    grouped: dict[int, list[tuple[str, str, int, str]]] = {}
+    for item in payload.subtasks:
+        grouped.setdefault(item.assignee_id, []).append(
+            (item.title or "", item.content or "", int(item.sort_order or 0), item.status or "pending")
+        )
+    return {user_id: tuple(sorted(items)) for user_id, items in grouped.items()}
+
+
+def _task_update_recipient_updates(
+    task: Task,
+    payload: TaskCreate,
+) -> list[dict[str, object]]:
+    """根据编辑前后的差异决定任务更新通知接收人。"""
+    old_member_ids = {item.user_id for item in task.members}
+    new_member_ids = {payload.owner_id, *payload.participant_ids}
+    old_owner_id = next((item.user_id for item in task.members if item.member_role == "owner"), None)
+    old_subtasks = _subtasks_by_assignee(list(task.subtasks))
+    new_subtasks = _payload_subtasks_by_assignee(payload)
+    main_changed = _task_main_snapshot(task) != _payload_main_snapshot(payload)
+
+    summaries: dict[int, set[str]] = {}
+
+    def add_summary(user_id: int | None, message: str) -> None:
+        if user_id is None:
+            return
+        summaries.setdefault(user_id, set()).add(message)
+
+    if main_changed:
+        for user_id in new_member_ids:
+            add_summary(user_id, "主任务内容已调整，请查看最新任务信息。")
+    else:
+        for user_id in sorted(new_member_ids - old_member_ids):
+            add_summary(user_id, "您已被加入该任务，请查看任务安排。")
+        for user_id in sorted(old_member_ids - new_member_ids):
+            add_summary(user_id, "您已从该任务移除，此通知用于同步变更。")
+        if old_owner_id != payload.owner_id:
+            add_summary(old_owner_id, "您的任务角色已调整，请查看最新任务安排。")
+            add_summary(payload.owner_id, "您的任务角色已调整，请查看最新任务安排。")
+
+        for user_id in sorted(set(old_subtasks) | set(new_subtasks)):
+            if old_subtasks.get(user_id, tuple()) != new_subtasks.get(user_id, tuple()):
+                add_summary(user_id, "您的子任务安排已调整，请查看最新子任务。")
+
+    recipient_updates: list[dict[str, object]] = []
+    for user_id in sorted(summaries):
+        detail = "；".join(sorted(summaries[user_id]))
+        recipient_updates.append({"user_id": user_id, "summary": detail})
+    return recipient_updates
 
 
 @router.get("/tasks/import-template")
@@ -1849,8 +2151,9 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
     delay_requests = db.query(DelayRequest).filter(DelayRequest.task_id == task.id).order_by(DelayRequest.id.desc()).all()
     events = db.query(TaskStatusEvent).filter(TaskStatusEvent.task_id == task.id).order_by(TaskStatusEvent.id.desc()).all()
     base = serialize_task(task, db)
+    latest_member_replies = _latest_task_member_replies(db, task.id)
     return TaskDetailOut(
-        **base.model_dump(),
+        **_model_to_dict(base),
         members=[
             {
                 "id": item.id,
@@ -1860,6 +2163,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
                 "member_role": item.member_role,
                 "member_role_text": MEMBER_ROLE_LABELS.get(item.member_role, item.member_role),
                 "latest_notifications": _task_latest_notifications(db, task.id, user_id=item.user_id),
+                "latest_mail_reply": latest_member_replies.get((item.user.email if item.user else "").strip().lower(), {}),
                 "display_role_text": "负责人",
             }
             for item in members
@@ -1889,7 +2193,7 @@ def get_task(task_id: int, current_user: User = Depends(get_current_user), db: S
             }
             for item in subtasks
         ],
-        notifications=[serialize_notification(item, db).model_dump() for item in notifications],
+        notifications=[_model_to_dict(serialize_notification(item, db)) for item in notifications],
         delay_requests=[
             {
                 "id": item.id,
@@ -1939,6 +2243,7 @@ def update_task(task_id: int, payload: TaskCreate, current_user: User = Depends(
         if subtask.assignee_id not in member_ids:
             raise HTTPException(status_code=400, detail="子任务执行人必须从主任务参与成员中选择")
 
+    update_recipient_updates = _task_update_recipient_updates(task, payload)
     before = {"title": task.title, "end_at": task.end_at.isoformat(), "priority": task.priority}
     task.title = payload.title
     task.content = payload.content
@@ -1999,7 +2304,11 @@ def update_task(task_id: int, payload: TaskCreate, current_user: User = Depends(
     )
     db.commit()
     db.refresh(task)
-    return serialize_task(task, db)
+    task_out = serialize_task(task, db)
+    if update_recipient_updates:
+        task_out.notification_sending = True
+        _enqueue_task_update_notifications(task.id, update_recipient_updates)
+    return task_out
 
 
 @router.delete("/tasks/{task_id}", response_model=ApiMessage)
@@ -2007,6 +2316,8 @@ def delete_task(task_id: int, current_user: User = Depends(require_admin), db: S
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    mail_cleanup = delete_task_related_mail_from_inbox(db, task.id)
+    qax_cleanup = delete_qax_task_notifications(db, task)
     cleaned_reminders = cleanup_task_scheduled_notifications(db, task.id)
     task.due_remind_days = 0
     task.deleted_at = shanghai_now_naive()
@@ -2017,10 +2328,20 @@ def delete_task(task_id: int, current_user: User = Depends(require_admin), db: S
         "Task",
         task.id,
         {"deleted_at": None},
-        {"deleted_at": task.deleted_at.isoformat(), "cleaned_due_reminders": cleaned_reminders},
+        {
+            "deleted_at": task.deleted_at.isoformat(),
+            "cleaned_due_reminders": cleaned_reminders,
+            "mail_cleanup": mail_cleanup,
+            "qax_cleanup": qax_cleanup,
+        },
         module_name="api.task",
         message=f"删除任务《{task.title}》",
-        detail={"cleaned_due_reminders": cleaned_reminders, "due_remind_days": task.due_remind_days},
+        detail={
+            "cleaned_due_reminders": cleaned_reminders,
+            "due_remind_days": task.due_remind_days,
+            "mail_cleanup": mail_cleanup,
+            "qax_cleanup": qax_cleanup,
+        },
     )
     db.commit()
     return ApiMessage(message="任务已删除")
@@ -2150,7 +2471,7 @@ def _validate_template_notify_type(template_kind: str, notify_type: str) -> None
 def create_template(payload: TemplateCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     _validate_template_notify_type(payload.template_kind, payload.notify_type)
     validate_template_content(payload.template_kind, payload.notify_type, payload.content)
-    template = Template(**payload.model_dump())
+    template = Template(**_model_to_dict(payload))
     db.add(template)
     db.flush()
     write_audit(
@@ -2177,7 +2498,7 @@ def update_template(template_id: int, payload: TemplateCreate, current_user: Use
     _validate_template_notify_type(payload.template_kind, payload.notify_type)
     validate_template_content(payload.template_kind, payload.notify_type, payload.content)
     before = {"name": template.name, "version": template.version}
-    for key, value in payload.model_dump().items():
+    for key, value in _model_to_dict(payload).items():
         setattr(template, key, value)
     write_audit(
         db,
@@ -2193,6 +2514,37 @@ def update_template(template_id: int, payload: TemplateCreate, current_user: Use
     )
     db.commit()
     return {"id": template.id}
+
+
+@router.delete("/templates/{template_id}", response_model=ApiMessage)
+def delete_template(template_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    before = {
+        "id": template.id,
+        "name": template.name,
+        "template_kind": template.template_kind,
+        "notify_type": template.notify_type,
+        "is_default": template.is_default,
+    }
+    affected_mail_events = db.query(MailEvent).filter(MailEvent.resolved_template_id == template.id).count()
+    db.query(MailEvent).filter(MailEvent.resolved_template_id == template.id).update({"resolved_template_id": None}, synchronize_session=False)
+    db.delete(template)
+    write_audit(
+        db,
+        current_user.id,
+        "DELETE_TEMPLATE",
+        "Template",
+        template_id,
+        before,
+        {"affected_mail_events": affected_mail_events},
+        module_name="api.template",
+        message=f"删除模板《{before['name']}》",
+        detail={"template_kind": before["template_kind"], "notify_type": before["notify_type"], "affected_mail_events": affected_mail_events},
+    )
+    db.commit()
+    return ApiMessage(message="模板已删除")
 
 
 @router.post("/templates/{template_id}/set-default", response_model=ApiMessage)
@@ -2224,10 +2576,15 @@ def set_default_template(template_id: int, current_user: User = Depends(require_
 
 @router.post("/templates/preview-match", response_model=dict)
 def preview_match(payload: TemplatePreviewRequest, _: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    candidates = [
-        item for item in sort_templates(db.query(Template).filter(Template.template_kind == payload.template_kind, Template.enabled.is_(True)).all())
-        if template_matches(item, payload.subject, payload.body)
-    ]
+    query = db.query(Template).filter(Template.template_kind == payload.template_kind, Template.enabled.is_(True))
+    if payload.template_kind == "MAIL_REPLY":
+        query = query.filter(Template.notify_type.in_(("task_done", "task_in_progress")))
+    templates = sort_templates(query.all())
+    if payload.template_kind == "MAIL_REPLY":
+        selected_template = select_reply_template(templates, payload.subject, payload.body)
+        candidates = [selected_template] if selected_template else []
+    else:
+        candidates = [item for item in templates if template_matches(item, payload.subject, payload.body)]
     return {
         "matches": [{"id": item.id, "name": item.name, "version": item.version, "priority": item.priority} for item in candidates],
         "selected": candidates[0].id if candidates else None,
@@ -2243,6 +2600,42 @@ def list_notifications(current_user: User = Depends(get_current_user), db: Sessi
     return [serialize_notification(item, db) for item in query.order_by(Notification.id.desc()).all()]
 
 
+def _delete_notification_record(db: Session, notification: Notification) -> dict[str, object]:
+    before = serialize_notification(notification, db).dict()
+    recipient_count = db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification.id).count()
+    notification_id = notification.id
+    db.query(NotificationRecipient).filter(NotificationRecipient.notification_id == notification_id).delete(synchronize_session=False)
+    db.delete(notification)
+    return {"notification_id": notification_id, "before": before, "deleted_recipient_count": recipient_count}
+
+
+@router.post("/notifications/bulk-delete", response_model=ApiMessage)
+def bulk_delete_notifications(payload: NotificationBulkDeleteRequest, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    """批量删除通知中心记录及对应成员送达明细。"""
+    ids = sorted({int(item) for item in payload.ids if int(item) > 0})
+    if not ids:
+        raise HTTPException(status_code=400, detail="请选择需要删除的通知记录")
+    notifications = db.query(Notification).filter(Notification.id.in_(ids)).all()
+    if not notifications:
+        raise HTTPException(status_code=404, detail="通知记录不存在")
+    deleted = [_delete_notification_record(db, item) for item in notifications]
+    deleted_ids = [int(item["notification_id"]) for item in deleted]
+    write_audit(
+        db,
+        current_user.id,
+        "BULK_DELETE_NOTIFICATION",
+        "Notification",
+        None,
+        {"requested_ids": ids},
+        {"deleted_ids": deleted_ids, "deleted_count": len(deleted_ids)},
+        module_name="api.notification",
+        message=f"批量删除通知记录 {len(deleted_ids)} 条",
+        detail={"requested_ids": ids, "deleted": deleted},
+    )
+    db.commit()
+    return ApiMessage(message=f"已删除 {len(deleted_ids)} 条通知记录")
+
+
 @router.get("/notifications/{notification_id}", response_model=NotificationDetailOut)
 def get_notification_detail(notification_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> NotificationDetailOut:
     """获取通知详情，包括正文和按成员拆分的送达情况。"""
@@ -2253,16 +2646,95 @@ def get_notification_detail(notification_id: int, current_user: User = Depends(g
     return serialize_notification_detail(notification, db)
 
 
+@router.delete("/notifications/{notification_id}", response_model=ApiMessage)
+def delete_notification(notification_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    """删除通知中心中的一条通知及其成员送达明细。"""
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="通知不存在")
+    deleted = _delete_notification_record(db, notification)
+    write_audit(
+        db,
+        current_user.id,
+        "DELETE_NOTIFICATION",
+        "Notification",
+        notification_id,
+        deleted["before"],
+        {"deleted_recipient_count": deleted["deleted_recipient_count"]},
+        module_name="api.notification",
+        message=f"删除通知记录 #{notification_id}",
+        detail={"notification_id": notification_id, "deleted_recipient_count": deleted["deleted_recipient_count"]},
+    )
+    db.commit()
+    return ApiMessage(message="通知记录已删除")
+
+
 @router.get("/admin/mail/events", response_model=list[MailEventOut])
 def list_mail_events(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[MailEventOut]:
-    """获取已匹配模板的邮件列表。"""
+    """获取所有已匹配模板的邮件列表。"""
     query = (
         db.query(MailEvent)
         .filter(MailEvent.resolved_template_id.isnot(None))
         .order_by(MailEvent.id.desc())
-        .limit(100)
     )
     return [serialize_mail_event(item, db) for item in query.all()]
+
+
+def _delete_mail_event_record(db: Session, event: MailEvent) -> dict[str, object]:
+    before = serialize_mail_event(event, db).dict()
+    event_id = event.id
+    action_count = db.query(MailAction).filter(MailAction.mail_event_id == event_id).count()
+    db.query(MailAction).filter(MailAction.mail_event_id == event_id).delete(synchronize_session=False)
+    db.delete(event)
+    return {"mail_event_id": event_id, "before": before, "deleted_action_count": action_count}
+
+
+@router.post("/admin/mail/events/bulk-delete", response_model=ApiMessage)
+def bulk_delete_mail_events(payload: MailEventBulkDeleteRequest, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    ids = sorted({int(item) for item in payload.ids if int(item) > 0})
+    if not ids:
+        raise HTTPException(status_code=400, detail="请选择需要删除的邮件记录")
+    events = db.query(MailEvent).filter(MailEvent.id.in_(ids)).all()
+    if not events:
+        raise HTTPException(status_code=404, detail="邮件记录不存在")
+    deleted = [_delete_mail_event_record(db, item) for item in events]
+    deleted_ids = [int(item["mail_event_id"]) for item in deleted]
+    write_audit(
+        db,
+        current_user.id,
+        "BULK_DELETE_MAIL_EVENT",
+        "MailEvent",
+        None,
+        {"requested_ids": ids},
+        {"deleted_ids": deleted_ids, "deleted_count": len(deleted_ids)},
+        module_name="api.mail",
+        message=f"批量删除邮件落库记录 {len(deleted_ids)} 条",
+        detail={"requested_ids": ids, "deleted": deleted},
+    )
+    db.commit()
+    return ApiMessage(message=f"已删除 {len(deleted_ids)} 条邮件记录")
+
+
+@router.delete("/admin/mail/events/{event_id}", response_model=ApiMessage)
+def delete_mail_event(event_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
+    event = db.query(MailEvent).filter(MailEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="邮件记录不存在")
+    deleted = _delete_mail_event_record(db, event)
+    write_audit(
+        db,
+        current_user.id,
+        "DELETE_MAIL_EVENT",
+        "MailEvent",
+        event_id,
+        deleted["before"],
+        {"deleted_action_count": deleted["deleted_action_count"]},
+        module_name="api.mail",
+        message=f"删除邮件落库记录 #{event_id}",
+        detail={"mail_event_id": event_id, "deleted_action_count": deleted["deleted_action_count"]},
+    )
+    db.commit()
+    return ApiMessage(message="邮件记录已删除")
 
 
 @router.get("/admin/mail/events/{event_id}", response_model=MailEventDetailOut)
@@ -2295,6 +2767,11 @@ def update_scheduler_settings(payload: RuntimeSettingsUpdate, current_user: User
         "due_remind_run_at": payload.due_remind_run_at,
         "overdue_remind_enabled": payload.overdue_remind_enabled,
         "overdue_remind_run_at": payload.overdue_remind_run_at,
+        "completed_mail_cleanup_enabled": payload.completed_mail_cleanup_enabled,
+        "completed_mail_cleanup_retention_days": payload.completed_mail_cleanup_retention_days,
+        "system_log_cleanup_enabled": payload.system_log_cleanup_enabled,
+        "system_log_retention_days": payload.system_log_retention_days,
+        "system_log_cleanup_interval_seconds": payload.system_log_cleanup_interval_seconds,
         "qax_auto_collect_enabled": payload.qax_auto_collect_enabled,
         "qax_auto_collect_interval_seconds": payload.qax_auto_collect_interval_seconds,
         "mail_scan_baseline_at": payload.mail_scan_baseline_at.isoformat() if payload.mail_scan_baseline_at else "",
@@ -2325,10 +2802,11 @@ def update_scheduler_settings(payload: RuntimeSettingsUpdate, current_user: User
         "pop3_password": payload.pop3_password,
         "pop3_use_tls": payload.pop3_use_tls,
         "pop3_use_ssl": payload.pop3_use_ssl,
+        "mail_inbox_folders": payload.mail_inbox_folders,
         "dns_auto_resolve_enabled": payload.dns_auto_resolve_enabled,
     }
     if "mail_host_mappings" in payload.model_fields_set:
-        values["mail_host_mappings"] = [item.model_dump() for item in payload.mail_host_mappings]
+        values["mail_host_mappings"] = [_model_to_dict(item) for item in payload.mail_host_mappings]
     saved = save_runtime_settings(values, db)
     data = runtime_settings_dict(db)
     write_audit(
@@ -2360,7 +2838,7 @@ def test_mail_inbox(_: User = Depends(require_admin)) -> dict:
 
 @router.post("/admin/mail/poll", response_model=dict)
 def poll_mail_inbox(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    result = start_collect("mail")
+    result = start_collect("mail", operator_id=current_user.id)
     write_audit(
         db,
         current_user.id,
@@ -2401,7 +2879,7 @@ def reset_mail_baseline(payload: MailBaselineRequest | None = None, current_user
 @router.post("/admin/qax/collect", response_model=dict)
 def run_qax_collect(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """手动触发一次 QAX 状态采集。"""
-    result = start_collect("qax")
+    result = start_collect("qax", operator_id=current_user.id)
     write_audit(
         db,
         current_user.id,
@@ -2433,7 +2911,7 @@ def sync_collect_task(task_id: int, current_user: User = Depends(require_admin),
     task = db.query(Task).filter(Task.id == task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    result = start_collect("sync", task_id)
+    result = start_collect("sync", task_id, operator_id=current_user.id)
     write_audit(
         db,
         current_user.id,
@@ -2682,6 +3160,7 @@ def run_due_remind(_: User = Depends(require_admin), db: Session = Depends(get_d
 @router.post("/delay-requests", response_model=dict)
 def create_delay_request(payload: DelayRequestCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """成员提交延期申请，并同步通知管理员审批。"""
+    raise HTTPException(status_code=410, detail="延期申请功能已停用")
     task = db.query(Task).filter(Task.id == payload.task_id, Task.deleted_at.is_(None)).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -2745,6 +3224,7 @@ def list_pending_delay_requests(_: User = Depends(require_admin), db: Session = 
 @router.post("/delay-requests/{delay_id}/approve", response_model=dict)
 def decide_delay_request(delay_id: int, payload: DelayDecisionRequest, current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """管理员审批延期申请，并复用服务层保证幂等与版本控制。"""
+    raise HTTPException(status_code=410, detail="延期审批功能已停用")
     request_obj = db.query(DelayRequest).filter(DelayRequest.id == delay_id).first()
     if not request_obj:
         raise HTTPException(status_code=404, detail="延期申请不存在")
@@ -2910,7 +3390,8 @@ def list_system_logs(_: User = Depends(require_admin), db: Session = Depends(get
 @router.post("/system-logs/cleanup", response_model=ApiMessage)
 def cleanup_expired_system_logs(current_user: User = Depends(require_admin), db: Session = Depends(get_db)) -> ApiMessage:
     """手动清理超过保留期的系统日志。"""
-    deleted_count = cleanup_system_logs(db, settings.system_log_retention_days)
+    runtime = load_runtime_settings(db)
+    deleted_count = cleanup_system_logs(db, runtime.system_log_retention_days)
     write_audit(
         db,
         current_user.id,
@@ -2918,10 +3399,10 @@ def cleanup_expired_system_logs(current_user: User = Depends(require_admin), db:
         "SystemLog",
         None,
         {},
-        {"deleted_count": deleted_count, "retention_days": settings.system_log_retention_days},
+        {"deleted_count": deleted_count, "retention_days": runtime.system_log_retention_days},
         module_name="api.system-log",
         message=f"手动清理系统日志，删除 {deleted_count} 条过期记录",
-        detail={"retention_days": settings.system_log_retention_days},
+        detail={"retention_days": runtime.system_log_retention_days},
     )
     db.commit()
-    return ApiMessage(message=f"已清理 {deleted_count} 条超过 {settings.system_log_retention_days} 天的系统日志")
+    return ApiMessage(message=f"已清理 {deleted_count} 条超过 {runtime.system_log_retention_days} 天的系统日志")

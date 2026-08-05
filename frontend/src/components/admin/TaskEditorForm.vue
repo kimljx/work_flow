@@ -146,7 +146,7 @@ const form = reactive({
   content: '',
   start_at: '',
   end_at: '',
-  due_remind_days: 2,
+  due_remind_days: 0,
   priority: 'medium',
   milestones: [],
   subtasks: [],
@@ -223,7 +223,7 @@ async function loadTask() {
   if (!isEdit.value) {
     form.start_at = toDateTimeLocal(new Date())
     form.end_at = buildDefaultEndDateTime()
-    form.due_remind_days = 2
+    form.due_remind_days = 0
     return
   }
   const { data } = await http.get(`/tasks/${props.taskId}`)

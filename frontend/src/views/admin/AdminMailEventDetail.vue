@@ -91,7 +91,7 @@
       <pre class="detail-pre dark">{{ prettyActionResult }}</pre>
     </div>
 
-    <div v-if="showOriginalMail" class="modal-mask" @click.self="showOriginalMail = false">
+    <div v-if="showOriginalMail" class="modal-mask">
       <div class="modal-card mail-original-modal">
         <div class="section-head">
           <div>

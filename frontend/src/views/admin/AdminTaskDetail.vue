@@ -1,6 +1,6 @@
 <template>
   <section v-if="task" class="task-detail-dialog">
-    <button v-if="props.taskId" type="button" class="task-detail-close" @click="$emit('cancel')">×</button>
+    <button v-if="props.taskId" type="button" class="button secondary small task-detail-close" @click="$emit('cancel')">关闭</button>
     <div v-if="feedback.message" class="task-detail-feedback">
       <strong>{{ feedback.title }}</strong>
       <span :class="feedback.type === 'success' ? 'success-text' : 'error-text'">{{ feedback.message }}</span>
@@ -66,35 +66,60 @@
             </div>
           </div>
 
-          <div class="task-participant-status-row">
-            <span>邮件:</span>
-            <strong>
-              <span>{{ channelStatusText(item, 'email') }}</span>
-              <i v-if="channelCollecting(item.user_id, 'email')" class="inline-spinner" />
-            </strong>
-            <button
-              v-if="shouldShowChannelReminder(item, 'email')"
-              class="button secondary small"
-              :disabled="actionLoading"
-              @click="remindMemberChannel(item, 'email')"
-            >
-              邮件提醒
-            </button>
+          <div v-if="item.latest_mail_reply?.content" class="task-participant-reply">
+            <span>最新邮件回复（{{ item.latest_mail_reply.notification_name || '任务通知' }}）- {{ formatDateTime(item.latest_mail_reply.replied_at) }}</span>
+            <div>{{ item.latest_mail_reply.content }}</div>
           </div>
-          <div class="task-participant-status-row">
-            <span>即时消息:</span>
-            <strong>
-              <span>{{ channelStatusText(item, 'qax') }}</span>
-              <i v-if="channelCollecting(item.user_id, 'qax')" class="inline-spinner" />
-            </strong>
-            <button
-              v-if="shouldShowChannelReminder(item, 'qax')"
-              class="button secondary small"
-              :disabled="actionLoading"
-              @click="remindMemberChannel(item, 'qax')"
-            >
-              即时消息提醒
-            </button>
+
+          <div class="task-participant-notification">
+            <div class="task-participant-notification-head">
+              <span class="task-participant-channel-name">邮件</span>
+              <div class="task-participant-notification-meta">
+                <strong>{{ notificationName(item, 'email') }}</strong>
+                <time>{{ notificationTime(item, 'email') }}</time>
+              </div>
+            </div>
+            <div class="task-participant-status-row">
+              <span>状态:</span>
+              <strong>
+                <span>{{ channelStatusText(item, 'email') }}</span>
+                <time v-if="channelFeedbackTime(item, 'email')" class="task-participant-feedback-time">（{{ channelFeedbackTime(item, 'email') }}）</time>
+                <i v-if="channelCollecting(item.user_id, 'email')" class="inline-spinner" />
+              </strong>
+              <button
+                v-if="shouldShowChannelReminder(item, 'email')"
+                class="button secondary small"
+                :disabled="actionLoading"
+                @click="remindMemberChannel(item, 'email')"
+              >
+                邮件提醒
+              </button>
+            </div>
+          </div>
+          <div class="task-participant-notification">
+            <div class="task-participant-notification-head">
+              <span class="task-participant-channel-name">即时消息</span>
+              <div class="task-participant-notification-meta">
+                <strong>{{ notificationName(item, 'qax') }}</strong>
+                <time>{{ notificationTime(item, 'qax') }}</time>
+              </div>
+            </div>
+            <div class="task-participant-status-row">
+              <span>状态:</span>
+              <strong>
+                <span>{{ channelStatusText(item, 'qax') }}</span>
+                <time v-if="channelFeedbackTime(item, 'qax')" class="task-participant-feedback-time">（{{ channelFeedbackTime(item, 'qax') }}）</time>
+                <i v-if="channelCollecting(item.user_id, 'qax')" class="inline-spinner" />
+              </strong>
+              <button
+                v-if="shouldShowChannelReminder(item, 'qax')"
+                class="button secondary small"
+                :disabled="actionLoading"
+                @click="remindMemberChannel(item, 'qax')"
+              >
+                即时消息提醒
+              </button>
+            </div>
           </div>
         </article>
       </div>
@@ -107,7 +132,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import http from '../../api/http'
 import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
-import { formatDate } from '../../utils/format'
+import { formatDate, formatDateTime } from '../../utils/format'
 import calendarIcon from '../../assets/icons/calendar-days.svg'
 import subtaskIcon from '../../assets/icons/list-checks.svg'
 
@@ -144,6 +169,7 @@ const participantRows = computed(() => {
     name: item.name || `成员 #${item.user_id}`,
     email: item.email || '',
     latest_notifications: item.latest_notifications || {},
+    latest_mail_reply: item.latest_mail_reply || {},
     subtasks: (task.value.subtasks || []).filter((subtask) => Number(subtask.assignee_id) === Number(item.user_id)),
   }))
 })
@@ -193,7 +219,25 @@ function channelStatusText(item, channel) {
   if (channelCollecting(item.user_id, channel)) {
     return collectingText || '收集中'
   }
-  return item.latest_notifications?.[channel]?.summary || '未发送'
+  const status = item.latest_notifications?.[channel] || {}
+  if (status.read_status === 'read') {
+    return channel === 'email' ? '已回复' : '已读'
+  }
+  return status.summary || '未发送'
+}
+
+function channelFeedbackTime(item, channel) {
+  const readAt = item.latest_notifications?.[channel]?.read_at
+  return readAt ? formatDateTime(readAt) : ''
+}
+
+function notificationName(item, channel) {
+  return item.latest_notifications?.[channel]?.notify_type_text || '暂无通知'
+}
+
+function notificationTime(item, channel) {
+  const sentAt = item.latest_notifications?.[channel]?.sent_at
+  return sentAt ? formatDateTime(sentAt) : '-'
 }
 
 function shouldShowChannelReminder(item, channel) {
@@ -208,7 +252,7 @@ function isParticipantDone(item) {
   if (activeSubtasks.length > 0) {
     return activeSubtasks.every((subtask) => subtask.status === 'done')
   }
-  return item.latest_notifications?.email?.read_status === 'read'
+  return task.value?.main_status === 'done'
 }
 
 async function loadTask() {

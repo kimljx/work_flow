@@ -122,6 +122,8 @@ def _default_subject(task: Task | None, notify_type: str, extra_context: dict[st
         title = task.title if task else "未知任务"
         return f"延期审批待处理通知#{delay_request_id}：{title}"
     if task:
+        if notify_type == "task_updated":
+            return f"【任务通知#{task.id}】（更新）{task.title}"
         return f"【任务通知#{task.id}】{task.title}"
     return f"系统通知：{notify_type}"
 
@@ -157,6 +159,21 @@ def _default_content(
             f"申请截止日期：{context.get('proposed_deadline', '')}\n"
             f"申请原因：{context.get('apply_reason', '')}\n"
             "请直接回复“延期申请ID + 同意 / 拒绝 + 日期”。"
+        )
+    if notify_type == "task_updated":
+        update_summary = context.get("update_summary") or context.get("remind_focus") or "任务内容已更新，请查看最新安排。"
+        return (
+            f"任务更新提示：{update_summary}\n"
+            f"任务ID：{context.get('task_id', '')}\n"
+            f"任务标题：{context.get('task_title', '')}\n"
+            f"负责人：{context.get('owner_name', '')}\n"
+            f"任务创建人：{context.get('creator_name', '')}\n"
+            f"开始时间：{context.get('start_at', '')}\n"
+            f"结束时间：{context.get('end_at', '')}\n"
+            f"主任务详情：{context.get('task_content', '') or '暂无'}\n"
+            f"主任务备注：{context.get('task_remark', '') or '暂无'}\n"
+            f"子任务安排：\n{context.get('subtask_summary', '暂无子任务')}\n"
+            f"{context.get('reply_guide', '')}"
         )
     return (
         f"任务ID：{context.get('task_id', '')}\n"

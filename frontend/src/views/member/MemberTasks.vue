@@ -33,7 +33,7 @@
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="tasks.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="tasks.length" />
     </div>
   </section>
 </template>
@@ -46,11 +46,11 @@ import { formatDateTime } from '../../utils/format'
 
 const tasks = ref([])
 const page = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
 
 const pagedTasks = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return tasks.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return tasks.value.slice(start, start + pageSize.value)
 })
 
 function delayStatus(task) {

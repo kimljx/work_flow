@@ -15,7 +15,7 @@ Podman 部署方案中，Work Flow 的所有业务数据都保存在 PostgreSQL 
 
   /data/podman/podman_rhel7_offline
 
-旧版 SQLite 文件 app/backend/data/app.db 不再用于 Podman 部署。
+SQLite 文件只用于本地开发或自动化测试，不用于 Podman 生产部署。
 
 以下数据都会保存在 PostgreSQL 中：
 

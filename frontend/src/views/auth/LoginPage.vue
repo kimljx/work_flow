@@ -1,29 +1,32 @@
 <template>
-  <section class="page">
-    <div class="panel login-panel">
-      <div class="hero">
-        <div>
-          <h1>系统登录</h1>
-          <p>请输入管理员分配的账号和密码。首次部署后可使用默认管理员账号进入系统。</p>
+  <section class="login-page">
+    <div class="login-page-overlay" />
+    <header class="login-brand" aria-label="平台标识">
+      <span class="login-brand-mark" :style="{ backgroundImage: `url(${stateGridMark})` }" aria-hidden="true" />
+      <span class="login-brand-name">{{ LOGIN_BRAND }}</span>
+      <span class="login-brand-divider" aria-hidden="true" />
+      <span class="login-brand-platform">{{ APP_NAME }}</span>
+    </header>
+    <main class="login-main">
+      <form class="login-card" @submit.prevent="submit">
+        <div class="login-card-heading">
+          <h1>欢迎登录</h1>
+          <p>{{ APP_NAME }}</p>
         </div>
-      </div>
-      <form class="page" @submit.prevent="submit">
-        <div>
-          <label>用户名</label>
-          <input v-model="form.username" />
-        </div>
-        <div>
-          <label>密码</label>
-          <input v-model="form.password" type="password" />
-        </div>
-        <button type="submit" :disabled="loading">{{ loading ? '登录中...' : '登录' }}</button>
-        <p class="error-text" v-if="error">{{ error }}</p>
-        <div class="muted-block">
-          <div>默认管理员账号：`admin`</div>
-          <div>默认密码：`ChangeMe123`</div>
-        </div>
+        <label class="login-field">
+          <span>用户名</span>
+          <input v-model.trim="form.username" autocomplete="username" placeholder="请输入用户名" />
+        </label>
+        <label class="login-field">
+          <span>密码</span>
+          <input v-model="form.password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+        </label>
+        <p v-if="error" class="error-text login-error">{{ error }}</p>
+        <button class="login-submit" type="submit" :disabled="loading">
+          {{ loading ? '正在登录...' : '登录' }}
+        </button>
       </form>
-    </div>
+    </main>
   </section>
 </template>
 
@@ -31,10 +34,12 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
+import { APP_NAME, LOGIN_BRAND } from '../../constants/app'
+import stateGridMark from '../../assets/images/state-grid-logo.svg'
 
 const router = useRouter()
 const auth = useAuthStore()
-const form = reactive({ username: 'admin', password: 'ChangeMe123' })
+const form = reactive({ username: '', password: '' })
 const error = ref('')
 const loading = ref(false)
 

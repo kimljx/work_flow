@@ -55,20 +55,27 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in result.failures" :key="`${item.row_number}-${item.title}`">
+          <tr v-for="item in pagedFailures" :key="`${item.row_number}-${item.title}`">
             <td>{{ item.row_number }}</td>
             <td>{{ item.title || '-' }}</td>
             <td>{{ item.reason }}</td>
           </tr>
         </tbody>
       </table>
+      <AppPagination
+        v-if="(result.failures || []).length > 0"
+        v-model="failurePage"
+        v-model:page-size="failurePageSize"
+        :total="(result.failures || []).length"
+      />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import http from '../../api/http'
+import AppPagination from '../AppPagination.vue'
 
 const emit = defineEmits(['cancel', 'imported'])
 
@@ -76,6 +83,14 @@ const selectedFile = ref(null)
 const submitting = ref(false)
 const result = ref(null)
 const duplicatePreview = ref(null)
+const failurePage = ref(1)
+const failurePageSize = ref(20)
+
+const pagedFailures = computed(() => {
+  const failures = result.value?.failures || []
+  const start = (failurePage.value - 1) * failurePageSize.value
+  return failures.slice(start, start + failurePageSize.value)
+})
 
 function handleFileChange(event) {
   const [file] = event.target.files || []
@@ -113,10 +128,15 @@ async function submitImport(confirmDuplicate) {
     }
     duplicatePreview.value = null
     result.value = data
+    failurePage.value = 1
     selectedFile.value = null
     emit('imported', data)
   } finally {
     submitting.value = false
   }
 }
+
+watch(result, () => {
+  failurePage.value = 1
+})
 </script>

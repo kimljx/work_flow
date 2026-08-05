@@ -38,6 +38,22 @@
           </div>
         </div>
         <div class="filter-field">
+          <span class="filter-label">优先级</span>
+          <div class="multi-filter">
+            <button class="button secondary small" @click="priorityFilterOpen = !priorityFilterOpen">{{ selectedPriorityText }}</button>
+            <div v-if="priorityFilterOpen" class="multi-filter-menu">
+              <label class="multi-filter-all">
+                <span>全选</span>
+                <input type="checkbox" :checked="isAllPrioritiesSelected" @change="toggleAllPriorities" />
+              </label>
+              <label v-for="item in priorityOptions" :key="item.value">
+                <span>{{ item.label }}</span>
+                <input v-model="priorityFilter" type="checkbox" :value="item.value" />
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="filter-field">
           <span class="filter-label">延期</span>
           <div class="multi-filter">
             <button class="button secondary small" @click="delayFilterOpen = !delayFilterOpen">{{ selectedDelayText }}</button>
@@ -167,27 +183,27 @@
       </table>
     </div>
 
-    <AppPagination v-model="page" :total="filteredTasks.length" :page-size="pageSize" />
+    <AppPagination v-model="page" v-model:page-size="pageSize" :total="filteredTasks.length" />
 
-    <div v-if="createOpen" class="modal-mask" @click.self="closeCreate">
+    <div v-if="createOpen" class="modal-mask">
       <div class="modal-card task-modal-card">
         <TaskEditorForm @cancel="closeCreate" @saved="handleCreated" />
       </div>
     </div>
 
-    <div v-if="editTaskId" class="modal-mask" @click.self="closeEdit">
+    <div v-if="editTaskId" class="modal-mask">
       <div class="modal-card task-modal-card">
         <TaskEditorForm :task-id="editTaskId" @cancel="closeEdit" @saved="handleEdited" />
       </div>
     </div>
 
-    <div v-if="detailTaskId" class="modal-mask" @click.self="closeDetail">
+    <div v-if="detailTaskId" class="modal-mask">
       <div class="modal-card task-modal-card task-detail-modal-card">
         <AdminTaskDetail :task-id="detailTaskId" @cancel="closeDetail" />
       </div>
     </div>
 
-    <div v-if="importOpen" class="modal-mask" @click.self="closeImport">
+    <div v-if="importOpen" class="modal-mask">
       <div class="modal-card task-modal-card">
         <TaskImportDialog @cancel="closeImport" @imported="handleImported" />
       </div>
@@ -203,7 +219,7 @@ import AppPagination from '../../components/AppPagination.vue'
 import TaskEditorForm from '../../components/admin/TaskEditorForm.vue'
 import TaskImportDialog from '../../components/admin/TaskImportDialog.vue'
 import calendarIcon from '../../assets/icons/calendar-days.svg'
-import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
+import { priorityMeta, resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
 import { downloadUtf16Table, formatExportTimestamp } from '../../utils/exportTable'
 import { formatDateTime } from '../../utils/format'
 
@@ -212,8 +228,10 @@ const feedback = ref({ title: '', message: '', type: 'success' })
 const keyword = ref('')
 const status = ref([])
 const delayFilter = ref([])
+const priorityFilter = ref([])
 const statusFilterOpen = ref(false)
 const delayFilterOpen = ref(false)
+const priorityFilterOpen = ref(false)
 const dateFilterOpen = ref(false)
 const statusOptions = [
   { value: 'not_started', label: '未开始' },
@@ -225,11 +243,12 @@ const delayOptions = [
   { value: 'due_soon', label: '即将延期' },
   { value: 'normal', label: '未延期' },
 ]
+const priorityOptions = Object.entries(priorityMeta).map(([value, item]) => ({ value, label: item.label }))
 const dateFrom = ref('')
 const dateTo = ref('')
 const dateRangeCursor = ref(startOfMonth(new Date()))
 const page = ref(1)
-const pageSize = 10
+const pageSize = ref(20)
 const createOpen = ref(false)
 const importOpen = ref(false)
 const editTaskId = ref(null)
@@ -241,6 +260,7 @@ let notificationPollTimerId = null
 
 const isAllStatusesSelected = computed(() => status.value.length === statusOptions.length)
 const isAllDelaySelected = computed(() => delayFilter.value.length === delayOptions.length)
+const isAllPrioritiesSelected = computed(() => priorityFilter.value.length === priorityOptions.length)
 
 const filteredTasks = computed(() => {
   const query = keyword.value.trim()
@@ -250,6 +270,7 @@ const filteredTasks = computed(() => {
       item.title.includes(query) ||
       joinNames(item.responsible_names).includes(query)
     const matchStatus = status.value.length === 0 || status.value.includes(item.main_status)
+    const matchPriority = priorityFilter.value.length === 0 || priorityFilter.value.includes(item.priority)
     const delayState = delayStatus(item).state
     const matchDelay =
       delayFilter.value.length === 0 ||
@@ -258,7 +279,7 @@ const filteredTasks = computed(() => {
     const endDate = toDateOnly(item.end_at)
     const matchDateFrom = !dateFrom.value || (endDate && endDate >= dateFrom.value)
     const matchDateTo = !dateTo.value || (endDate && endDate <= dateTo.value)
-    return matchKeyword && matchStatus && matchDelay && matchDateFrom && matchDateTo
+    return matchKeyword && matchStatus && matchPriority && matchDelay && matchDateFrom && matchDateTo
   })
 })
 
@@ -271,6 +292,10 @@ const selectedDelayText = computed(() => {
   if (!delayFilter.value.length) return '全部'
   return delayOptions.filter((item) => delayFilter.value.includes(item.value)).map((item) => item.label).join('、')
 })
+const selectedPriorityText = computed(() => {
+  if (!priorityFilter.value.length) return '全部优先级'
+  return priorityOptions.filter((item) => priorityFilter.value.includes(item.value)).map((item) => item.label).join('、')
+})
 const selectedDateRangeText = computed(() => {
   if (dateFrom.value && dateTo.value) return `${dateFrom.value} 至 ${dateTo.value}`
   if (dateFrom.value) return `${dateFrom.value} 起`
@@ -281,11 +306,11 @@ const weekLabels = ['一', '二', '三', '四', '五', '六', '日']
 const dateRangeMonths = computed(() => [buildCalendarMonth(0), buildCalendarMonth(1)])
 
 const pagedTasks = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filteredTasks.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return filteredTasks.value.slice(start, start + pageSize.value)
 })
 
-watch([keyword, status, delayFilter, dateFrom, dateTo], () => {
+watch([keyword, status, priorityFilter, delayFilter, dateFrom, dateTo], () => {
   page.value = 1
 }, { deep: true })
 
@@ -296,6 +321,7 @@ function applyFilters() {
 function resetFilters() {
   keyword.value = ''
   status.value = []
+  priorityFilter.value = []
   delayFilter.value = []
   clearDateRange()
   page.value = 1
@@ -374,9 +400,14 @@ function toggleAllDelay() {
   delayFilter.value = isAllDelaySelected.value ? [] : delayOptions.map((item) => item.value)
 }
 
+function toggleAllPriorities() {
+  priorityFilter.value = isAllPrioritiesSelected.value ? [] : priorityOptions.map((item) => item.value)
+}
+
 function closeFloatingFilters(event) {
   if (event.target?.closest?.('.multi-filter, .date-range-filter')) return
   statusFilterOpen.value = false
+  priorityFilterOpen.value = false
   delayFilterOpen.value = false
   dateFilterOpen.value = false
 }
@@ -483,7 +514,7 @@ function stopNotificationStatusPolling() {
   notificationPollTimerId = null
 }
 
-function markTaskNotificationsSending(taskOrId) {
+function markTaskNotificationsSending(taskOrId, baseline = {}) {
   const taskId = typeof taskOrId === 'object' ? taskOrId?.id : taskOrId
   if (!taskId) return
   const task = typeof taskOrId === 'object'
@@ -493,8 +524,12 @@ function markTaskNotificationsSending(taskOrId) {
     ...sendingNotificationTasks.value,
     [String(taskId)]: {
       startedAt: Date.now(),
-      emailNotificationId: notificationId(task, 'email'),
-      qaxNotificationId: notificationId(task, 'qax'),
+      emailNotificationId: Number.isFinite(Number(baseline.emailNotificationId))
+        ? Number(baseline.emailNotificationId)
+        : notificationId(task, 'email'),
+      qaxNotificationId: Number.isFinite(Number(baseline.qaxNotificationId))
+        ? Number(baseline.qaxNotificationId)
+        : notificationId(task, 'qax'),
     },
   }
   startNotificationStatusPolling()
@@ -517,11 +552,11 @@ async function loadTasks(config = {}) {
   pruneSendingNotificationTasks()
 }
 
-function closeCreate() {
+function hideCreate() {
   createOpen.value = false
 }
 
-function closeImport() {
+function hideImport() {
   importOpen.value = false
 }
 
@@ -533,28 +568,64 @@ function openDetail(taskId) {
   detailTaskId.value = taskId
 }
 
-function closeEdit() {
+function hideEdit() {
   editTaskId.value = null
 }
 
-function closeDetail() {
+function hideDetail() {
   detailTaskId.value = null
 }
 
-async function handleCreated(task) {
-  closeCreate()
-  markTaskNotificationsSending(task)
+async function refreshTaskList() {
   await loadTasks({ skipGlobalLoading: true })
 }
 
-async function handleEdited() {
-  closeEdit()
-  await loadTasks()
+async function closeCreate() {
+  hideCreate()
+  await refreshTaskList()
 }
 
-async function handleImported() {
-  closeImport()
-  await loadTasks()
+async function closeImport() {
+  hideImport()
+  await refreshTaskList()
+}
+
+async function closeEdit() {
+  hideEdit()
+  await refreshTaskList()
+}
+
+async function closeDetail() {
+  hideDetail()
+  await refreshTaskList()
+}
+
+async function handleCreated(task) {
+  hideCreate()
+  markTaskNotificationsSending(task)
+  await refreshTaskList()
+}
+
+async function handleEdited(task) {
+  hideEdit()
+  if (task?.notification_sending) {
+    markTaskNotificationsSending(task)
+    await refreshTaskList()
+    return
+  }
+  await refreshTaskList()
+}
+
+async function handleImported(result) {
+  hideImport()
+  const createdTaskIds = result?.created_task_ids || []
+  createdTaskIds.forEach((taskId) => {
+    markTaskNotificationsSending(taskId, {
+      emailNotificationId: 0,
+      qaxNotificationId: 0,
+    })
+  })
+  await refreshTaskList()
 }
 
 async function exportFilteredTasks() {

@@ -68,7 +68,7 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="item in duplicatePreview.overlap_samples" :key="`${item.current_row_number}-${item.title}`">
+              <tr v-for="item in pagedDuplicateOverlapSamples" :key="`${item.current_row_number}-${item.title}`">
                 <td>{{ item.current_row_number || '-' }}</td>
                 <td>{{ item.title || '-' }}</td>
                 <td>{{ item.owner_name || '-' }}</td>
@@ -77,6 +77,7 @@
               </tr>
             </tbody>
           </table>
+          <AppPagination v-model="duplicateOverlapPage" v-model:page-size="duplicateOverlapPageSize" :total="(duplicatePreview.overlap_samples || []).length" />
         </div>
         <div class="toolbar">
           <button :disabled="!selectedFile || submitting" @click="submitImport(true)">确认继续导入</button>
@@ -112,7 +113,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in result.overlap_samples" :key="`result-${item.current_row_number}-${item.title}`">
+            <tr v-for="item in pagedResultOverlapSamples" :key="`result-${item.current_row_number}-${item.title}`">
               <td>{{ item.title || '-' }}（第 {{ item.current_row_number || '-' }} 行）</td>
               <td>{{ item.owner_name || '-' }}</td>
               <td>{{ item.end_at || '-' }}</td>
@@ -120,6 +121,12 @@
             </tr>
           </tbody>
         </table>
+        <AppPagination
+          v-if="(result.overlap_samples || []).length > 0"
+          v-model="resultOverlapPage"
+          v-model:page-size="resultOverlapPageSize"
+          :total="(result.overlap_samples || []).length"
+        />
 
         <table class="table" v-if="(result.failures || []).length > 0">
           <thead>
@@ -130,13 +137,19 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in result.failures" :key="`${item.row_number}-${item.title}`">
+            <tr v-for="item in pagedResultFailures" :key="`${item.row_number}-${item.title}`">
               <td>{{ item.row_number }}</td>
               <td>{{ item.title || '-' }}</td>
               <td>{{ item.reason }}</td>
             </tr>
           </tbody>
         </table>
+        <AppPagination
+          v-if="(result.failures || []).length > 0"
+          v-model="resultFailurePage"
+          v-model:page-size="resultFailurePageSize"
+          :total="(result.failures || []).length"
+        />
       </div>
     </div>
 
@@ -165,7 +178,7 @@
           <tr v-if="importHistories.length === 0">
             <td colspan="9">当前还没有导入历史。</td>
           </tr>
-          <tr v-for="item in importHistories" :key="item.id">
+          <tr v-for="item in pagedImportHistories" :key="item.id">
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>{{ item.filename }}</td>
             <td>{{ item.operator_name || '-' }}</td>
@@ -187,9 +200,10 @@
           </tr>
         </tbody>
       </table>
+      <AppPagination v-model="historyPage" v-model:page-size="historyPageSize" :total="importHistories.length" />
     </div>
 
-    <div v-if="selectedHistory" class="modal-mask" @click.self="closeHistoryDetail">
+    <div v-if="selectedHistory" class="modal-mask">
       <div class="modal-card">
         <div class="section-head">
           <div>
@@ -231,7 +245,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="sample in selectedHistory.overlap_samples" :key="`${selectedHistory.id}-${sample.current_row_number}-${sample.title}`">
+                <tr v-for="sample in pagedHistoryOverlapSamples" :key="`${selectedHistory.id}-${sample.current_row_number}-${sample.title}`">
                   <td>{{ sample.current_row_number || '-' }}</td>
                   <td>{{ sample.title || '-' }}</td>
                   <td>{{ sample.owner_name || '-' }}</td>
@@ -239,6 +253,12 @@
                 </tr>
               </tbody>
             </table>
+            <AppPagination
+              v-if="(selectedHistory.overlap_samples || []).length > 0"
+              v-model="historyOverlapPage"
+              v-model:page-size="historyOverlapPageSize"
+              :total="(selectedHistory.overlap_samples || []).length"
+            />
             <div v-else class="muted-block">该批次没有命中重叠样例。</div>
           </div>
 
@@ -253,13 +273,19 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="sample in selectedHistory.failure_samples" :key="`${selectedHistory.id}-${sample.row_number}-${sample.title}`">
+                <tr v-for="sample in pagedHistoryFailureSamples" :key="`${selectedHistory.id}-${sample.row_number}-${sample.title}`">
                   <td>{{ sample.row_number || '-' }}</td>
                   <td>{{ sample.title || '-' }}</td>
                   <td>{{ sample.reason || '-' }}</td>
                 </tr>
               </tbody>
             </table>
+            <AppPagination
+              v-if="(selectedHistory.failure_samples || []).length > 0"
+              v-model="historyFailurePage"
+              v-model:page-size="historyFailurePageSize"
+              :total="(selectedHistory.failure_samples || []).length"
+            />
             <div v-else class="muted-block">该批次没有失败记录。</div>
           </div>
         </div>
@@ -269,9 +295,10 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http from '../../api/http'
+import AppPagination from '../../components/AppPagination.vue'
 import { formatDateTime } from '../../utils/format'
 
 const route = useRoute()
@@ -283,6 +310,43 @@ const result = ref(null)
 const duplicatePreview = ref(null)
 const importHistories = ref([])
 const selectedHistory = ref(null)
+const duplicateOverlapPage = ref(1)
+const duplicateOverlapPageSize = ref(20)
+const resultOverlapPage = ref(1)
+const resultOverlapPageSize = ref(20)
+const resultFailurePage = ref(1)
+const resultFailurePageSize = ref(20)
+const historyPage = ref(1)
+const historyPageSize = ref(20)
+const historyOverlapPage = ref(1)
+const historyOverlapPageSize = ref(20)
+const historyFailurePage = ref(1)
+const historyFailurePageSize = ref(20)
+
+function paginate(items, page, pageSize) {
+  const source = items || []
+  const start = (page.value - 1) * pageSize.value
+  return source.slice(start, start + pageSize.value)
+}
+
+const pagedDuplicateOverlapSamples = computed(() =>
+  paginate(duplicatePreview.value?.overlap_samples, duplicateOverlapPage, duplicateOverlapPageSize)
+)
+const pagedResultOverlapSamples = computed(() =>
+  paginate(result.value?.overlap_samples, resultOverlapPage, resultOverlapPageSize)
+)
+const pagedResultFailures = computed(() =>
+  paginate(result.value?.failures, resultFailurePage, resultFailurePageSize)
+)
+const pagedImportHistories = computed(() =>
+  paginate(importHistories.value, historyPage, historyPageSize)
+)
+const pagedHistoryOverlapSamples = computed(() =>
+  paginate(selectedHistory.value?.overlap_samples, historyOverlapPage, historyOverlapPageSize)
+)
+const pagedHistoryFailureSamples = computed(() =>
+  paginate(selectedHistory.value?.failure_samples, historyFailurePage, historyFailurePageSize)
+)
 
 /**
  * 处理本地 Excel 文件选择，并清空旧的预检结果。
@@ -293,6 +357,7 @@ function handleFileChange(event) {
   const [file] = event.target.files || []
   selectedFile.value = file || null
   duplicatePreview.value = null
+  duplicateOverlapPage.value = 1
 }
 
 /**
@@ -377,6 +442,8 @@ async function downloadFile(url, filename) {
  */
 function openHistoryDetail(item) {
   selectedHistory.value = item
+  historyOverlapPage.value = 1
+  historyFailurePage.value = 1
 }
 
 /**
@@ -388,4 +455,17 @@ function closeHistoryDetail() {
 }
 
 onMounted(loadHistories)
+
+watch(importHistories, () => {
+  historyPage.value = 1
+})
+
+watch(result, () => {
+  resultOverlapPage.value = 1
+  resultFailurePage.value = 1
+})
+
+watch(duplicatePreview, () => {
+  duplicateOverlapPage.value = 1
+})
 </script>

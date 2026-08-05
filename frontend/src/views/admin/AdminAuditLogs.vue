@@ -80,10 +80,10 @@
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="filteredLogs.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="filteredLogs.length" />
     </div>
 
-    <div v-if="detailLog" class="modal-mask" @click.self="closeDetail">
+    <div v-if="detailLog" class="modal-mask">
       <div class="modal-card system-log-modal">
         <div class="section-head compact">
           <div>
@@ -155,7 +155,7 @@ import { formatDateTime } from '../../utils/format'
 
 const logs = ref([])
 const page = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
 const keyword = ref('')
 const levelFilter = ref([])
 const levelFilterOpen = ref(false)
@@ -189,8 +189,8 @@ const filteredLogs = computed(() => {
 })
 
 const pagedLogs = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filteredLogs.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return filteredLogs.value.slice(start, start + pageSize.value)
 })
 
 watch(

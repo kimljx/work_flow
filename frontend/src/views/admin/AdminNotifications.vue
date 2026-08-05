@@ -8,6 +8,9 @@
       </div>
       <div class="toolbar">
         <router-link class="button secondary" to="/admin/mail-events">查看邮件列表</router-link>
+        <button class="button danger" type="button" :disabled="selectedNotificationIds.length === 0" @click="bulkDeleteNotifications">
+          批量删除
+        </button>
       </div>
     </div>
 
@@ -50,9 +53,23 @@
     </div>
 
     <div class="panel">
+      <div class="section-head">
+        <div>
+          <h2>通知记录列表</h2>
+          <p>已选择 {{ selectedNotificationIds.length }} 条通知记录。</p>
+        </div>
+        <div class="toolbar">
+          <button class="button danger" type="button" :disabled="selectedNotificationIds.length === 0" @click="bulkDeleteNotifications">
+            删除选中
+          </button>
+        </div>
+      </div>
       <table class="table">
         <thead>
           <tr>
+            <th class="selection-cell">
+              <input type="checkbox" :checked="isCurrentPageSelected" :disabled="pagedNotifications.length === 0" @change="toggleCurrentPageSelection" />
+            </th>
             <th>任务</th>
             <th>渠道</th>
             <th>提醒场景</th>
@@ -65,9 +82,12 @@
         </thead>
         <tbody>
           <tr v-if="pagedNotifications.length === 0">
-            <td colspan="8">当前没有通知记录。</td>
+            <td colspan="9">当前没有通知记录。</td>
           </tr>
           <tr v-for="item in pagedNotifications" :key="item.id">
+            <td class="selection-cell">
+              <input v-model="selectedNotificationIds" type="checkbox" :value="item.id" />
+            </td>
             <td>{{ item.task_title || '-' }}</td>
             <td>{{ item.channel_text }}</td>
             <td>
@@ -80,14 +100,15 @@
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>
               <button class="button secondary small" type="button" @click="openNotificationDetail(item.id)">查看详情</button>
+              <button class="button danger small" type="button" @click="deleteNotification(item)">删除</button>
             </td>
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="filteredNotifications.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="filteredNotifications.length" />
     </div>
 
-    <div v-if="detailNotificationId" class="modal-mask" @click.self="closeNotificationDetail">
+    <div v-if="detailNotificationId" class="modal-mask">
       <div class="modal-card notification-detail-modal">
         <NotificationDetailPage
           :notification-id="detailNotificationId"
@@ -98,7 +119,7 @@
       </div>
     </div>
 
-    <div v-if="detailTaskId" class="modal-mask" @click.self="closeTaskDetail">
+    <div v-if="detailTaskId" class="modal-mask">
       <div class="modal-card task-modal-card task-detail-modal-card">
         <AdminTaskDetail :task-id="detailTaskId" @cancel="closeTaskDetail" />
       </div>
@@ -124,10 +145,14 @@ const channelOptions = [
   { value: 'qax', label: '即时消息' },
 ]
 const page = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
+const selectedNotificationIds = ref([])
 const detailNotificationId = ref(null)
 const detailTaskId = ref(null)
 const isAllChannelsSelected = computed(() => channel.value.length === channelOptions.length)
+const isCurrentPageSelected = computed(() =>
+  pagedNotifications.value.length > 0 && pagedNotifications.value.every((item) => selectedNotificationIds.value.includes(item.id))
+)
 const selectedChannelText = computed(() => {
   if (!channel.value.length) return '全部渠道'
   return channelOptions.filter((item) => channel.value.includes(item.value)).map((item) => item.label).join('、')
@@ -143,8 +168,8 @@ const filteredNotifications = computed(() =>
 )
 
 const pagedNotifications = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filteredNotifications.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return filteredNotifications.value.slice(start, start + pageSize.value)
 })
 
 const deliveredTotal = computed(() =>
@@ -159,10 +184,20 @@ const retryTotal = computed(() =>
 
 watch([keyword, channel], () => {
   page.value = 1
+  selectedNotificationIds.value = []
 }, { deep: true })
 
 function toggleAllChannels() {
   channel.value = isAllChannelsSelected.value ? [] : channelOptions.map((item) => item.value)
+}
+
+function toggleCurrentPageSelection() {
+  const pageIds = pagedNotifications.value.map((item) => item.id)
+  if (isCurrentPageSelected.value) {
+    selectedNotificationIds.value = selectedNotificationIds.value.filter((id) => !pageIds.includes(id))
+  } else {
+    selectedNotificationIds.value = Array.from(new Set([...selectedNotificationIds.value, ...pageIds]))
+  }
 }
 
 function openNotificationDetail(id) {
@@ -184,6 +219,28 @@ function closeTaskDetail() {
 async function loadNotifications() {
   const { data } = await http.get('/notifications')
   notifications.value = data
+  const existingIds = new Set(data.map((item) => item.id))
+  selectedNotificationIds.value = selectedNotificationIds.value.filter((id) => existingIds.has(id))
+}
+
+async function deleteNotification(item) {
+  if (!window.confirm(`确认删除该通知记录吗？任务：${item.task_title || '-'}`)) return
+  await http.delete(`/notifications/${item.id}`)
+  if (detailNotificationId.value === item.id) {
+    detailNotificationId.value = null
+  }
+  await loadNotifications()
+}
+
+async function bulkDeleteNotifications() {
+  if (selectedNotificationIds.value.length === 0) return
+  if (!window.confirm(`确认删除选中的 ${selectedNotificationIds.value.length} 条通知记录吗？`)) return
+  await http.post('/notifications/bulk-delete', { ids: selectedNotificationIds.value })
+  selectedNotificationIds.value = []
+  if (detailNotificationId.value) {
+    detailNotificationId.value = null
+  }
+  await loadNotifications()
 }
 
 function closeFloatingFilters(event) {

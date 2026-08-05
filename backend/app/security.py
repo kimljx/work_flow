@@ -6,6 +6,7 @@ from __future__ import annotations
 """
 
 import hashlib
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -24,13 +25,26 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def hash_password(raw_password: str) -> str:
-    """对明文密码做 SHA-256 摘要。"""
-    return hashlib.sha256(raw_password.encode("utf-8")).hexdigest()
+    """Return the MD5 digest used by the login and password management APIs."""
+    text = str(raw_password or "").strip()
+    if re.fullmatch(r"[a-fA-F0-9]{32}", text):
+        return text.lower()
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
 def verify_password(raw_password: str, password_hash: str) -> bool:
     """校验明文密码是否与数据库中的摘要一致。"""
-    return hash_password(raw_password) == password_hash
+    stored = str(password_hash or "").strip().lower()
+    if hash_password(raw_password) == stored:
+        return True
+    if re.fullmatch(r"[a-fA-F0-9]{64}", stored):
+        text = str(raw_password or "").strip()
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() == stored:
+            return True
+        default_md5 = hashlib.md5(settings.default_password.encode("utf-8")).hexdigest()
+        default_sha256 = hashlib.sha256(settings.default_password.encode("utf-8")).hexdigest()
+        return text.lower() == default_md5 and stored == default_sha256
+    return False
 
 
 def create_token(subject: str, token_type: str, expires_minutes: int) -> str:

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import TaskMember
+from app.services.audit import write_system_log
 from app.services.mail import poll_mailbox
 from app.services.qax import collect_qax_status
 from app.timeutils import shanghai_now_naive
@@ -32,6 +33,7 @@ _state: dict[str, Any] = {
     "qax": {},
     "started_at": None,
     "finished_at": None,
+    "operator_id": None,
 }
 
 
@@ -44,6 +46,7 @@ def _state_snapshot() -> dict[str, Any]:
             "participants": [dict(item) for item in _state.get("participants", [])],
             "mail": dict(_state.get("mail") or {}),
             "qax": dict(_state.get("qax") or {}),
+            "operator_id": _state.get("operator_id"),
         }
 
 
@@ -103,6 +106,9 @@ def _run_collect(mode: str, task_id: int | None) -> None:
     try:
         with SessionLocal() as db:
             try:
+                operator_id = _state_snapshot().get("operator_id")
+                mail_result: dict[str, Any] = {}
+                qax_result: dict[str, Any] = {}
                 if mode in {"mail", "sync"}:
                     _mark_all("collecting", "邮件收集中")
                     _update_state(message="正在后台收取邮件")
@@ -122,12 +128,27 @@ def _run_collect(mode: str, task_id: int | None) -> None:
                     _update_state(qax=qax_result)
 
                 _mark_all("done", "已更新")
+                final_message = _format_collect_result_message(mode, mail_result, qax_result)
                 _update_state(
                     running=False,
-                    status="success",
-                    message="后台采集已完成",
+                    status=_collect_state_status(mail_result, qax_result),
+                    message=final_message,
                     finished_at=shanghai_now_naive().isoformat(sep=" ", timespec="seconds"),
                 )
+                write_system_log(
+                    db,
+                    operator_id=int(operator_id) if operator_id else None,
+                    action_type=_collect_action_type(mode),
+                    target_type="Task" if task_id else "CollectJob",
+                    target_id=task_id,
+                    before={},
+                    after={"mode": mode, "mail": mail_result, "qax": qax_result},
+                    log_level=_collect_log_level(mail_result, qax_result),
+                    module_name="collector.manual",
+                    message=final_message,
+                    detail={"mode": mode, "task_id": task_id, "mail": mail_result, "qax": qax_result},
+                )
+                db.commit()
             except Exception as exc:  # pragma: no cover - 后台兜底，避免线程静默退出。
                 db.rollback()
                 _mark_all("failed", "收集失败", str(exc))
@@ -137,12 +158,28 @@ def _run_collect(mode: str, task_id: int | None) -> None:
                     message=f"后台采集失败：{exc}",
                     finished_at=shanghai_now_naive().isoformat(sep=" ", timespec="seconds"),
                 )
+                with SessionLocal() as log_db:
+                    operator_id = _state_snapshot().get("operator_id")
+                    write_system_log(
+                        log_db,
+                        operator_id=int(operator_id) if operator_id else None,
+                        action_type=_collect_action_type(mode),
+                        target_type="Task" if task_id else "CollectJob",
+                        target_id=task_id,
+                        before={},
+                        after={"mode": mode, "status": "failed"},
+                        log_level="ERROR",
+                        module_name="collector.manual",
+                        message=f"后台采集失败：{exc}",
+                        detail={"mode": mode, "task_id": task_id, "status": "failed", "message": str(exc)},
+                    )
+                    log_db.commit()
     finally:
         with _state_lock:
             _running = False
 
 
-def start_collect(mode: str, task_id: int | None = None) -> dict[str, Any]:
+def start_collect(mode: str, task_id: int | None = None, operator_id: int | None = None) -> dict[str, Any]:
     """启动一次后台采集；已有采集运行时直接返回当前状态。"""
 
     global _running
@@ -173,11 +210,55 @@ def start_collect(mode: str, task_id: int | None = None) -> dict[str, Any]:
         qax={},
         started_at=shanghai_now_naive().isoformat(sep=" ", timespec="seconds"),
         finished_at=None,
+        operator_id=operator_id,
     )
     _executor.submit(_run_collect, safe_mode, task_id)
     snapshot = _state_snapshot()
     snapshot["accepted"] = True
     return snapshot
+
+
+def _collect_action_type(mode: str) -> str:
+    return {
+        "mail": "MANUAL_MAIL_POLL_RESULT",
+        "qax": "MANUAL_COLLECT_QAX_STATUS_RESULT",
+        "sync": "SYNC_COLLECT_TASK_RESULT",
+    }.get(mode, "MANUAL_COLLECT_RESULT")
+
+
+def _collect_log_level(mail_result: dict[str, Any], qax_result: dict[str, Any]) -> str:
+    statuses = [item.get("status") for item in (mail_result, qax_result) if item]
+    if any(status == "failed" for status in statuses):
+        return "ERROR"
+    if any(status not in {"success", "initialized", "skipped"} for status in statuses):
+        return "WARNING"
+    return "INFO"
+
+
+def _collect_state_status(mail_result: dict[str, Any], qax_result: dict[str, Any]) -> str:
+    level = _collect_log_level(mail_result, qax_result)
+    if level == "ERROR":
+        return "failed"
+    if level == "WARNING":
+        return "warning"
+    return "success"
+
+
+def _format_collect_result_message(mode: str, mail_result: dict[str, Any], qax_result: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if mode in {"mail", "sync"}:
+        parts.append(f"邮件：{mail_result.get('status', '-')}, {mail_result.get('message', '')}")
+    if mode in {"qax", "sync"}:
+        qax_summary = (
+            f"QAX：{qax_result.get('status', '-')}, "
+            f"处理 {qax_result.get('processed_count', qax_result.get('processed', 0))}，"
+            f"更新 {qax_result.get('updated_count', qax_result.get('updated', 0))}，"
+            f"失败 {qax_result.get('failed_count', qax_result.get('failed', 0))}"
+        )
+        if qax_result.get("message"):
+            qax_summary = f"{qax_summary}，{qax_result.get('message')}"
+        parts.append(qax_summary)
+    return "后台采集已完成：" + "；".join(parts)
 
 
 def collect_state(task_id: int | None = None) -> dict[str, Any]:

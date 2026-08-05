@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import http from '../api/http'
+import { md5Hex, sha256Hex } from '../utils/md5'
 
 export const useAuthStore = defineStore('auth', {
   // 鉴权状态统一保存在 Pinia，并同步落盘到 localStorage。
@@ -33,7 +34,11 @@ export const useAuthStore = defineStore('auth', {
     },
     async login(payload) {
       // 登录后立即拉取当前用户资料，保证页面可以立刻按角色渲染。
-      const { data } = await http.post('/auth/login', payload)
+      const { data } = await http.post('/auth/login', {
+        username: payload.username,
+        password: md5Hex(payload.password),
+        password_legacy_sha256: await sha256Hex(payload.password),
+      })
       this.accessToken = data.access_token
       this.refreshToken = data.refresh_token
       await this.fetchMe()

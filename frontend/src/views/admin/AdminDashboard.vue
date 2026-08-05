@@ -83,6 +83,19 @@
               </div>
             </div>
             <div class="multi-filter">
+              <button class="button secondary small" @click="priorityFilterOpen = !priorityFilterOpen">优先级：{{ selectedPriorityText }}</button>
+              <div v-if="priorityFilterOpen" class="multi-filter-menu">
+                <label class="multi-filter-all">
+                  <span>全选</span>
+                  <input type="checkbox" :checked="isAllPrioritiesSelected" @change="toggleAllPriorities" />
+                </label>
+                <label v-for="item in priorityOptions" :key="item.value">
+                  <span>{{ item.label }}</span>
+                  <input v-model="ganttPrioritiesSelected" type="checkbox" :value="item.value" />
+                </label>
+              </div>
+            </div>
+            <div class="multi-filter">
               <button class="button secondary small" @click="delayFilterOpen = !delayFilterOpen">延期：{{ selectedDelayText }}</button>
               <div v-if="delayFilterOpen" class="multi-filter-menu">
                 <label class="multi-filter-all">
@@ -93,6 +106,45 @@
                   <span>{{ item.label }}</span>
                   <input v-model="ganttDelaySelected" type="checkbox" :value="item.value" />
                 </label>
+              </div>
+            </div>
+            <div class="date-range-filter">
+              <button class="button secondary small date-range-trigger" type="button" @click="dateFilterOpen = !dateFilterOpen">
+                <span :class="{ empty: !dateFrom }">{{ dateFrom || '开始日期' }}</span>
+                <b>至</b>
+                <span :class="{ empty: !dateTo }">{{ dateTo || '结束日期' }}</span>
+                <img :src="calendarIcon" alt="" aria-hidden="true" />
+              </button>
+              <div v-if="dateFilterOpen" class="date-range-menu">
+                <div class="date-range-nav">
+                  <button class="icon-button" type="button" @click="shiftRangeMonth(-12)">«</button>
+                  <button class="icon-button" type="button" @click="shiftRangeMonth(-1)">‹</button>
+                  <button class="icon-button" type="button" @click="shiftRangeMonth(1)">›</button>
+                  <button class="icon-button" type="button" @click="shiftRangeMonth(12)">»</button>
+                </div>
+                <div class="date-range-calendars">
+                  <section v-for="month in dateRangeMonths" :key="month.key" class="date-range-month">
+                    <h3>{{ month.title }}</h3>
+                    <div class="date-range-week">
+                      <span v-for="day in weekLabels" :key="day">{{ day }}</span>
+                    </div>
+                    <div class="date-range-days">
+                      <button
+                        v-for="day in month.days"
+                        :key="day.key"
+                        type="button"
+                        :class="{ muted: !day.inMonth, selected: day.selected, inRange: day.inRange, today: day.today }"
+                        @click="selectRangeDate(day.value)"
+                      >
+                        {{ day.label }}
+                      </button>
+                    </div>
+                  </section>
+                </div>
+                <div class="date-range-actions">
+                  <button class="button secondary small" type="button" @click="clearDateRange">清空</button>
+                  <button class="button small" type="button" @click="dateFilterOpen = false">确定</button>
+                </div>
               </div>
             </div>
             <div class="gantt-scale-switch" aria-label="时间维度">
@@ -154,13 +206,13 @@
         </div>
       </section>
 
-    <div v-if="createOpen" class="modal-mask" @click.self="closeCreate">
+    <div v-if="createOpen" class="modal-mask">
       <div class="modal-card task-modal-card">
         <TaskEditorForm @cancel="closeCreate" @saved="handleCreated" />
       </div>
     </div>
 
-    <div v-if="taskListModal" class="modal-mask" @click.self="closeTaskList">
+    <div v-if="taskListModal" class="modal-mask">
       <div class="modal-card gantt-list-modal">
         <div class="gantt-list-modal-head">
           <div>
@@ -186,7 +238,7 @@
             <tr v-if="taskListModalItems.length === 0">
               <td colspan="8">暂无相关任务</td>
             </tr>
-            <tr v-for="task in taskListModalItems" :key="task.id">
+            <tr v-for="task in pagedTaskListModalItems" :key="task.id">
               <td>
                 <div class="task-table-title">{{ task.title }}</div>
                 <div class="subtle-text clamp-2">{{ task.content }}</div>
@@ -238,7 +290,7 @@
             <tr v-if="taskListModalItems.length === 0">
               <td colspan="8">暂无相关通知</td>
             </tr>
-            <tr v-for="item in taskListModalItems" :key="`${taskListModal}-${item.pending_key || item.id}`">
+            <tr v-for="item in pagedTaskListModalItems" :key="`${taskListModal}-${item.pending_key || item.id}`">
               <td>{{ item.task_title || item.title || '-' }}</td>
               <td>
                 <div>{{ item.notify_scene_text || item.notify_type_text || item.latest_notifications?.[notificationChannel]?.notify_type_text || '-' }}</div>
@@ -263,10 +315,11 @@
             </tr>
           </tbody>
         </table>
+        <AppPagination v-model="taskListPage" v-model:page-size="taskListPageSize" :total="taskListModalItems.length" />
       </div>
     </div>
 
-    <div v-if="detailTaskId" class="modal-mask" @click.self="closeTaskDetail">
+    <div v-if="detailTaskId" class="modal-mask">
       <div class="modal-card task-modal-card task-detail-modal-card">
         <AdminTaskDetail :task-id="detailTaskId" @cancel="closeTaskDetail" />
       </div>
@@ -275,16 +328,18 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '../../api/http'
 import AdminTaskDetail from './AdminTaskDetail.vue'
+import AppPagination from '../../components/AppPagination.vue'
 import TaskEditorForm from '../../components/admin/TaskEditorForm.vue'
 import iconDue from '../../assets/icons/clock.svg'
 import iconDelayed from '../../assets/icons/triangle-alert.svg'
 import iconNotice from '../../assets/icons/mail.svg'
 import iconPending from '../../assets/icons/circle-play.svg'
 import iconRunning from '../../assets/icons/trending-up.svg'
-import { resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
+import calendarIcon from '../../assets/icons/calendar-days.svg'
+import { priorityMeta, resolvePriorityMeta, resolveTaskStatusTone } from '../../constants/taskUi'
 import { formatExportTimestamp } from '../../utils/exportTable'
 import { formatDateTime } from '../../utils/format'
 
@@ -295,12 +350,17 @@ const taskDetails = ref([])
 const createOpen = ref(false)
 const ganttOwnersSelected = ref([])
 const ganttStatusesSelected = ref([])
+const ganttPrioritiesSelected = ref([])
 const ganttDelaySelected = ref([])
 const ganttScale = ref('day')
 const ownerFilterOpen = ref(false)
 const statusFilterOpen = ref(false)
+const priorityFilterOpen = ref(false)
 const delayFilterOpen = ref(false)
+const dateFilterOpen = ref(false)
 const taskListModal = ref('')
+const taskListPage = ref(1)
+const taskListPageSize = ref(20)
 const detailTaskId = ref(null)
 const sendingNotificationTasks = ref({})
 const NOTIFICATION_POLL_INTERVAL_MS = 2000
@@ -316,6 +376,10 @@ const delayOptions = [
   { value: 'delayed', label: '已延期' },
   { value: 'due_soon', label: '即将延期' },
 ]
+const priorityOptions = Object.entries(priorityMeta).map(([value, item]) => ({ value, label: item.label }))
+const dateFrom = ref('')
+const dateTo = ref('')
+const dateRangeCursor = ref(startOfMonth(new Date()))
 const summary = ref({
   task_total: 0,
   in_progress_total: 0,
@@ -362,6 +426,7 @@ const warningTasks = computed(() => summary.value.warning_tasks || [])
 const ganttOwners = computed(() => Array.from(new Set(tasks.value.map((task) => task.owner_name || joinNames(task.responsible_names)).filter(Boolean))).sort())
 const isAllOwnersSelected = computed(() => ganttOwners.value.length > 0 && ganttOwnersSelected.value.length === ganttOwners.value.length)
 const isAllStatusesSelected = computed(() => ganttStatusesSelected.value.length === statusOptions.length)
+const isAllPrioritiesSelected = computed(() => ganttPrioritiesSelected.value.length === priorityOptions.length)
 const isAllDelaySelected = computed(() => ganttDelaySelected.value.length === delayOptions.length)
 const selectedOwnerText = computed(() => ganttOwnersSelected.value.length ? `${ganttOwnersSelected.value.length} 项` : '全部成员')
 const selectedStatusText = computed(() => {
@@ -372,6 +437,12 @@ const selectedDelayText = computed(() => {
   if (!ganttDelaySelected.value.length) return '全部'
   return delayOptions.filter((item) => ganttDelaySelected.value.includes(item.value)).map((item) => item.label).join('、')
 })
+const selectedPriorityText = computed(() => {
+  if (!ganttPrioritiesSelected.value.length) return '全部'
+  return priorityOptions.filter((item) => ganttPrioritiesSelected.value.includes(item.value)).map((item) => item.label).join('、')
+})
+const weekLabels = ['一', '二', '三', '四', '五', '六', '日']
+const dateRangeMonths = computed(() => [buildCalendarMonth(0), buildCalendarMonth(1)])
 const dueTodayTotal = computed(() => {
   const today = startOfDay(new Date()).getTime()
   return tasks.value.filter((task) => {
@@ -422,14 +493,22 @@ const taskListModalItems = computed(() => {
   }
   return groups[taskListModal.value] || []
 })
+const pagedTaskListModalItems = computed(() => {
+  const start = (taskListPage.value - 1) * taskListPageSize.value
+  return taskListModalItems.value.slice(start, start + taskListPageSize.value)
+})
 const filteredGanttTasks = computed(() =>
   tasks.value.filter((task) => {
     const owner = task.owner_name || joinNames(task.responsible_names)
     const matchOwner = ganttOwnersSelected.value.length === 0 || ganttOwnersSelected.value.includes(owner)
     const matchStatus = ganttStatusesSelected.value.length === 0 || ganttStatusesSelected.value.includes(task.main_status)
+    const matchPriority = ganttPrioritiesSelected.value.length === 0 || ganttPrioritiesSelected.value.includes(task.priority)
     const delayState = resolveGanttDelayState(task)
     const matchDelay = ganttDelaySelected.value.length === 0 || ganttDelaySelected.value.includes(delayState)
-    return matchOwner && matchStatus && matchDelay
+    const endDate = toDateOnly(task.end_at)
+    const matchDateFrom = !dateFrom.value || (endDate && endDate >= dateFrom.value)
+    const matchDateTo = !dateTo.value || (endDate && endDate <= dateTo.value)
+    return matchOwner && matchStatus && matchPriority && matchDelay && matchDateFrom && matchDateTo
   })
 )
 
@@ -438,7 +517,7 @@ const ganttRangeLabel = computed(() => {
   if (ganttTimeline.value.length === 0) return '暂无时间范围'
   const first = ganttTimeline.value[0].date
   const last = ganttTimeline.value[ganttTimeline.value.length - 1].date
-  if (ganttScale.value === 'month') return `${first.getFullYear()} 年`
+  if (ganttScale.value === 'month') return `${first.getFullYear()}年${first.getMonth() + 1}月 - ${last.getFullYear()}年${last.getMonth() + 1}月`
   return `${first.getFullYear()}年${first.getMonth() + 1}月 - ${last.getFullYear()}年${last.getMonth() + 1}月`
 })
 
@@ -450,7 +529,7 @@ const ganttRows = computed(() => {
   const total = Math.max(max - min, 1)
   return filteredGanttTasks.value
     .slice()
-    .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime())
+    .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
     .map((task) => {
       const start = clampDate(new Date(task.start_at), min, max)
       const end = clampDate(new Date(task.end_at), min, max)
@@ -474,6 +553,9 @@ const ganttRows = computed(() => {
       }
     })
 })
+watch(taskListModalItems, () => {
+  taskListPage.value = 1
+})
 
 function safePercent(value) {
   return Math.max(0, Math.min(100, Number(value || 0)))
@@ -495,23 +577,96 @@ function toggleAllStatuses() {
   ganttStatusesSelected.value = isAllStatusesSelected.value ? [] : statusOptions.map((item) => item.value)
 }
 
+function toggleAllPriorities() {
+  ganttPrioritiesSelected.value = isAllPrioritiesSelected.value ? [] : priorityOptions.map((item) => item.value)
+}
+
 function toggleAllDelay() {
   ganttDelaySelected.value = isAllDelaySelected.value ? [] : delayOptions.map((item) => item.value)
 }
 
+function clearDateRange() {
+  dateFrom.value = ''
+  dateTo.value = ''
+}
+
+function shiftRangeMonth(count) {
+  dateRangeCursor.value = addMonths(dateRangeCursor.value, count)
+}
+
+function selectRangeDate(value) {
+  if (!dateFrom.value || dateTo.value) {
+    dateFrom.value = value
+    dateTo.value = ''
+    return
+  }
+  if (value < dateFrom.value) {
+    dateTo.value = dateFrom.value
+    dateFrom.value = value
+    return
+  }
+  dateTo.value = value
+}
+
+function startOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
+function toDateValue(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+function toDateOnly(value) {
+  return value ? String(value).slice(0, 10) : ''
+}
+
+function buildCalendarMonth(offset) {
+  const monthDate = addMonths(dateRangeCursor.value, offset)
+  const monthStart = startOfMonth(monthDate)
+  const mondayOffset = (monthStart.getDay() + 6) % 7
+  const firstCell = new Date(monthStart)
+  firstCell.setDate(monthStart.getDate() - mondayOffset)
+  const today = toDateValue(new Date())
+  const days = Array.from({ length: 42 }, (_, index) => {
+    const current = new Date(firstCell)
+    current.setDate(firstCell.getDate() + index)
+    const value = toDateValue(current)
+    const hasRange = dateFrom.value && dateTo.value
+    return {
+      key: `${monthDate.getFullYear()}-${monthDate.getMonth()}-${index}`,
+      label: current.getDate(),
+      value,
+      inMonth: current.getMonth() === monthDate.getMonth(),
+      selected: value === dateFrom.value || value === dateTo.value,
+      inRange: Boolean(hasRange && value >= dateFrom.value && value <= dateTo.value),
+      today: value === today,
+    }
+  })
+  return {
+    key: `${monthDate.getFullYear()}-${monthDate.getMonth()}`,
+    title: `${monthDate.getFullYear()} 年 ${monthDate.getMonth() + 1} 月`,
+    days,
+  }
+}
+
 function closeFloatingFilters(event) {
-  if (event.target?.closest?.('.multi-filter')) return
+  if (event.target?.closest?.('.multi-filter, .date-range-filter')) return
   ownerFilterOpen.value = false
   statusFilterOpen.value = false
+  priorityFilterOpen.value = false
   delayFilterOpen.value = false
+  dateFilterOpen.value = false
 }
 
 function openTaskList(type) {
   taskListModal.value = type
+  taskListPage.value = 1
 }
 
 function closeTaskList() {
   taskListModal.value = ''
+  taskListPage.value = 1
 }
 
 function openTaskDetail(taskId) {
@@ -824,8 +979,7 @@ function buildTimeline(source, scale) {
 
   const ticks = []
   const today = startOfDay(new Date()).getTime()
-  const maxTicks = scale === 'day' ? 32 : scale === 'week' ? 18 : 12
-  while (cursor <= limit && ticks.length < maxTicks) {
+  while (cursor <= limit) {
     const date = new Date(cursor)
     ticks.push({
       key: date.toISOString(),

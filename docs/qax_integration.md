@@ -15,7 +15,8 @@
 - 当前提供 `POST /api/v1/admin/qax/collect` 手动触发一次状态采集，便于联调或排障时立即回写最新结果。
 - 同时支持后台按 `QAX_COLLECT_CRON` 定时执行状态采集；当配置为空字符串时视为关闭自动采集。
 - 手动采集与自动采集都会写入系统日志，模块名分别为 `api.qax` 和 `scheduler.qax`，便于系统管理员排查送达与已读回写情况。
-- 运行前需要安装 `playwright` 依赖，并执行一次浏览器安装，例如 `playwright install chromium`。
+- 生产环境运行在 `localhost/work-flow-runtime:playwright-1.52` 应用镜像中，Playwright 与浏览器由镜像提供，不再在服务器上单独安装。
+- QAX HTTPS 证书采用系统级导入方式，应用默认不忽略证书校验；如页面加载失败，应先检查系统信任链和容器内访问结果。
 - 当前启用的配置项包括：
   - `QAX_BASE_URL`
   - `QAX_USERNAME`
@@ -23,5 +24,5 @@
   - `QAX_GROUP_NAME`
   - `QAX_COLLECT_CRON`
   - `QAX_BROWSER_HEADLESS`
-  - `QAX_IGNORE_HTTPS_ERRORS`
+  - `QAX_IGNORE_HTTPS_ERRORS`（默认关闭，仅排障时临时使用）
 - 即使后续替换运行时驱动，只要保持接口契约一致，前后端逻辑无需变化。

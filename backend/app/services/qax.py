@@ -29,6 +29,7 @@ from app.config import PROJECT_ROOT, settings
 from app.models import Notification, NotificationRecipient, Task, TaskStatusEvent, User
 from app.services.runtime_settings import load_runtime_settings
 from app.services.templates import strip_reply_guides
+from app.timeutils import shanghai_now_naive
 
 
 QAX_ROW_PENDING_STATUSES = ("准备中", "执行中")
@@ -39,8 +40,6 @@ QAX_DETAIL_READ_STATUSES = ("执行成功",)
 QAX_DETAIL_FAILED_STATUSES = ("执行失败",)
 
 
-QAX_CERTIFICATE_SUFFIXES = (".cer", ".crt", ".pem", ".p12", ".pfx")
-QAX_CLIENT_CERTIFICATE_SUFFIXES = (".p12", ".pfx")
 QAX_BROWSER_EXECUTABLE_GLOBS = (
     "chromium-*/chrome-win/chrome.exe",
     "chromium-*/chrome-linux/chrome",
@@ -57,75 +56,27 @@ _qax_collect_lock = Lock()
 
 @dataclass(frozen=True)
 class QaxCertificateState:
-    files: tuple[Path, ...]
-    empty_files: tuple[Path, ...]
-    public_files: tuple[Path, ...]
-    client_files: tuple[Path, ...]
+    system_trust_required: bool = True
 
 
 def _has_bundled_chromium(root: Path) -> bool:
     return any(root.glob(pattern) for pattern in QAX_BROWSER_EXECUTABLE_GLOBS)
 
 
-def _relative_cert_paths(paths: tuple[Path, ...]) -> str:
-    if not paths:
-        return "无"
-    values = []
-    for path in paths:
-        try:
-            values.append(path.relative_to(PROJECT_ROOT).as_posix())
-        except ValueError:
-            values.append(path.as_posix())
-    return ", ".join(values)
-
-
 def _detect_qax_certificates() -> QaxCertificateState:
-    config_root = PROJECT_ROOT / "config"
-    if not config_root.exists():
-        return QaxCertificateState(files=(), empty_files=(), public_files=(), client_files=())
-
-    files = tuple(
-        sorted(
-            (
-                path
-                for path in config_root.iterdir()
-                if path.is_file() and path.suffix.lower() in QAX_CERTIFICATE_SUFFIXES
-            ),
-            key=lambda item: item.name.lower(),
-        )
-    )
-    empty_files = tuple(path for path in files if path.stat().st_size <= 0)
-    client_files = tuple(path for path in files if path.suffix.lower() in QAX_CLIENT_CERTIFICATE_SUFFIXES)
-    public_files = tuple(path for path in files if path.suffix.lower() not in QAX_CLIENT_CERTIFICATE_SUFFIXES)
-    return QaxCertificateState(
-        files=files,
-        empty_files=empty_files,
-        public_files=public_files,
-        client_files=client_files,
-    )
+    return QaxCertificateState()
 
 
 def _validate_qax_certificates() -> QaxCertificateState:
-    state = _detect_qax_certificates()
-    if state.empty_files:
-        raise QaxAutomationError(
-            "QAX 证书文件为空，无法用于浏览器登录，请替换为真实证书后重试："
-            f"{_relative_cert_paths(state.empty_files)}"
-        )
-    return state
+    return _detect_qax_certificates()
 
 
 def _build_qax_certificate_hint(state: QaxCertificateState) -> str:
-    if not state.files:
-        return "当前 config/ 下未发现证书文件。"
-
-    hints = [f"已发现证书文件：{_relative_cert_paths(state.files)}。"]
-    if state.public_files and not state.client_files:
-        hints.append("当前只有 .cer/.crt/.pem 公钥或信任链证书。若目标站点要求客户端证书登录，通常还需要带私钥的 .p12/.pfx。")
-    elif state.client_files:
-        hints.append("已发现 .p12/.pfx 客户端证书文件。")
-    hints.append("当前内置 Playwright 不支持在代码里直接挂载客户端证书，请优先将证书导入系统、容器或浏览器运行环境的信任链或证书存储后再登录。")
-    return "".join(hints)
+    return (
+        "QAX 证书采用系统级信任链导入方式，项目不会读取 config/ 下的证书文件。"
+        "请确认宿主机和应用容器运行环境都已信任目标站点证书链；"
+        "如目标站点要求客户端证书，也应导入系统或浏览器运行环境的证书存储。"
+    )
 
 
 def _is_qax_certificate_error(exc: BaseException) -> bool:
@@ -171,6 +122,31 @@ def _ensure_local_playwright_browser_path() -> None:
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(candidate)
             os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_GC", "1")
             return
+
+
+def _qax_debug_dir() -> Path:
+    return PROJECT_ROOT / "local" / "logs" / "qax_debug"
+
+
+def _ensure_qax_runtime_directories() -> None:
+    """Create writable local runtime directories before launching Playwright."""
+    local_root = PROJECT_ROOT / "local"
+    targets = {
+        "HOME": local_root / "home",
+        "TMPDIR": local_root / "temp",
+        "XDG_CACHE_HOME": local_root / "cache",
+        "PYTHONPYCACHEPREFIX": local_root / "cache" / "pycache",
+        "PIP_CACHE_DIR": local_root / "cache" / "pip",
+    }
+    for path in (
+        local_root / "logs",
+        local_root / "run",
+        _qax_debug_dir(),
+        *targets.values(),
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    for key, path in targets.items():
+        os.environ[key] = str(path)
 
 
 def _local_chromium_executable() -> str | None:
@@ -228,6 +204,7 @@ class QaxTaskStatus:
     row_text: str = ""
     delivery_status: str = "pending"
     read_status: str = "unread"
+    read_at: str = ""
     detail: str = ""
 
 
@@ -264,7 +241,7 @@ def build_qax_task_name(notification: Notification, recipient: NotificationRecip
 
 
 def _ensure_qax_settings() -> None:
-    """校验数据库中的 QAX 必填配置，避免旧 .env 配置误导发送和采集链路。"""
+    """校验数据库中的 QAX 必填配置，避免缺少运行时业务配置时继续发送或采集。"""
 
     runtime = load_runtime_settings()
     missing_items = []
@@ -306,6 +283,7 @@ class QaxAutomationClient:
         self._bad_responses: list[str] = []
 
     async def __aenter__(self) -> "QaxAutomationClient":
+        _ensure_qax_runtime_directories()
         _ensure_local_playwright_browser_path()
         async_playwright, timeout_error = _load_playwright()
         self._timeout_error = timeout_error
@@ -370,9 +348,10 @@ class QaxAutomationClient:
 
     async def _dump_qax_debug_artifacts(self, label: str) -> Path:
         assert self.page is not None
-        QAX_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        debug_dir = _qax_debug_dir()
+        debug_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        prefix = QAX_DEBUG_DIR / f"{timestamp}_{label}"
+        prefix = debug_dir / f"{timestamp}_{label}"
 
         try:
             await self.page.screenshot(path=str(prefix.with_suffix(".png")), full_page=True, timeout=10000)
@@ -482,14 +461,13 @@ class QaxAutomationClient:
         """按任务名查询 QAX 任务状态。"""
 
         assert self.page is not None
+        popup_text_time = ""
         try:
             row = self.page.get_by_role("row",name=task_name)
             await row.wait_for(state="visible",timeout=2000)
             row_text = await row.get_by_role("cell").nth(4).inner_text()
-            # print(f"row_text:{row_text}")
-            # detail_text = row_text
+            detail_text = row_text
         except Exception as e:
-            # print(e)
             return QaxTaskStatus(task_name=task_name, found=False, detail="QAX 中未找到对应任务")
         try:
             detail_button = row.get_by_role("button").nth(1)
@@ -501,6 +479,8 @@ class QaxAutomationClient:
                 await popup.get_by_role("button", name="确 认").click()
                 popup_text = await popup.locator(".q-table__body-wrapper tbody tr").filter(
                     has_text=ip_address).first.locator(".q-table_3_column_18.q-table__cell").inner_text()
+                popup_text_time = await popup.locator(".q-table__body-wrapper tbody tr").filter(
+                    has_text=ip_address).first.locator(".q-table_3_column_19.q-table__cell").inner_text()
 
                 print(f"popup_text:{popup_text}")
                 detail_text = f"{row_text}\n{(popup_text or '').strip()}"
@@ -508,11 +488,16 @@ class QaxAutomationClient:
             finally:
                 await self.page.wait_for_timeout(2000)
                 await popup.close()
-        except Exception as e:
+        except Exception:
             # 查询详情只是增强判断，失败时回退到列表文本即可。
             pass
 
-        return _map_qax_status(task_name, row_text=row_text, detail_text=detail_text)
+        return _map_qax_status(
+            task_name,
+            row_text=row_text,
+            detail_text=detail_text,
+            read_at=popup_text_time,
+        )
 
     async def delete_task_if_exists(self, task_name: str) -> bool:
         """在 QAX 中尽力删除已不再需要的即时消息任务。"""
@@ -565,7 +550,7 @@ def _run_async_blocking(coro: Any) -> Any:
     return result_holder.get("value")
 
 
-def _map_qax_status(task_name: str, *, row_text: str, detail_text: str) -> QaxTaskStatus:
+def _map_qax_status(task_name: str, *, row_text: str, detail_text: str, read_at: str = "") -> QaxTaskStatus:
     """将 QAX 页面文本映射为通知系统内部状态。"""
 
     combined_text = f"{row_text}\n{detail_text}".strip()
@@ -594,6 +579,7 @@ def _map_qax_status(task_name: str, *, row_text: str, detail_text: str) -> QaxTa
         row_text=row_text,
         delivery_status=delivery_status,
         read_status=read_status,
+        read_at=read_at.strip() if read_status == "read" else "",
         detail=combined_text,
     )
 
@@ -782,6 +768,9 @@ def collect_qax_status(
                 if progress_callback:
                     progress_callback(recipient.user_id, "正在查询 QAX 状态")
                 if recipient.read_status == "read":
+                    if not recipient.read_at:
+                        recipient.read_at = shanghai_now_naive().isoformat(sep=" ", timespec="seconds")
+                        updated += 1
                     await client.delete_task_if_exists(task_name)
                     _promote_task_started_by_qax_read(db, notification)
                     if progress_callback:
@@ -795,9 +784,16 @@ def collect_qax_status(
                     continue
 
                 recipient.last_error = result.detail[:1000] if result.delivery_status == "failed" else ""
-                if recipient.delivery_status != result.delivery_status or recipient.read_status != result.read_status:
+                read_at = result.read_at.strip()
+                if result.read_status == "read" and not read_at:
+                    read_at = shanghai_now_naive().isoformat(sep=" ", timespec="seconds")
+                status_changed = recipient.delivery_status != result.delivery_status or recipient.read_status != result.read_status
+                read_time_changed = result.read_status == "read" and recipient.read_at != read_at
+                if status_changed or read_time_changed:
                     recipient.delivery_status = result.delivery_status
                     recipient.read_status = result.read_status
+                    if read_time_changed:
+                        recipient.read_at = read_at
                     updated += 1
                 if result.delivery_status == "failed":
                     failed += 1
@@ -838,3 +834,56 @@ def collect_qax_status(
         }
     finally:
         _qax_collect_lock.release()
+
+
+def delete_qax_task_notifications(db: Session, task: Task) -> dict[str, object]:
+    """删除任务在 QAX 中尚存的全部即时消息通知。"""
+    rows = (
+        db.query(NotificationRecipient, Notification)
+        .join(Notification, Notification.id == NotificationRecipient.notification_id)
+        .filter(Notification.task_id == task.id, Notification.channel == "qax")
+        .order_by(NotificationRecipient.id.asc())
+        .all()
+    )
+    if not rows:
+        return {"status": "success", "attempted": 0, "deleted": 0, "failed": 0, "failures": []}
+
+    try:
+        _ensure_qax_settings()
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "attempted": len(rows),
+            "deleted": 0,
+            "failed": len(rows),
+            "failures": [{"reason": str(exc)}],
+        }
+
+    deleted = 0
+    failures: list[dict[str, str]] = []
+
+    async def _delete_async() -> None:
+        nonlocal deleted
+        async with QaxAutomationClient() as client:
+            for recipient, notification in rows:
+                task_name = build_qax_task_name(notification, recipient, task)
+                try:
+                    if await client.delete_task_if_exists(task_name):
+                        deleted += 1
+                    else:
+                        failures.append({"task_name": task_name, "reason": "QAX 中未找到任务或删除失败"})
+                except Exception as exc:  # pragma: no cover - depends on QAX runtime
+                    failures.append({"task_name": task_name, "reason": str(exc)})
+
+    try:
+        _run_async_blocking(_delete_async())
+    except Exception as exc:
+        failures.append({"reason": str(exc)})
+
+    return {
+        "status": "success" if not failures else "partial_failed",
+        "attempted": len(rows),
+        "deleted": deleted,
+        "failed": len(failures),
+        "failures": failures,
+    }

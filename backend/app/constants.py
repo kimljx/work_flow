@@ -38,19 +38,17 @@ NOTIFICATION_CHANNEL_LABELS = {
 
 NOTIFICATION_TYPE_LABELS = {
     "task_created": "任务创建通知",
+    "task_updated": "任务更新通知",
     "manual_remind": "手动提醒",
     "due_remind": "到期提醒",
-    "delay_approval": "延期审批通知",
     "task_done": "邮件回执-已完成",
     "task_in_progress": "邮件回执-进行中",
-    "delay_request": "邮件回执-延期申请",
-    "delay_approve": "邮件回执-延期审批",
 }
 
 TEMPLATE_NOTIFY_TYPE_OPTIONS = {
-    "MAIL_SEND": ["task_created", "manual_remind", "due_remind", "delay_approval"],
-    "QAX_SEND": ["task_created", "manual_remind", "due_remind", "delay_approval"],
-    "MAIL_REPLY": ["task_done", "task_in_progress", "delay_request", "delay_approve"],
+    "MAIL_SEND": ["task_created", "task_updated", "manual_remind", "due_remind"],
+    "QAX_SEND": ["task_created", "task_updated", "manual_remind", "due_remind"],
+    "MAIL_REPLY": ["task_done", "task_in_progress"],
 }
 
 NOTIFICATION_STATUS_LABELS = {

@@ -60,7 +60,7 @@
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="filteredNotifications.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="filteredNotifications.length" />
     </div>
   </section>
 </template>
@@ -83,7 +83,7 @@ const channelOptions = [
   { value: 'qax', label: '即时消息' },
 ]
 const page = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
 const isAllChannelsSelected = computed(() => channel.value.length === channelOptions.length)
 const selectedChannelText = computed(() => {
   if (!channel.value.length) return '全部渠道'
@@ -100,8 +100,8 @@ const filteredNotifications = computed(() =>
 )
 
 const pagedNotifications = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filteredNotifications.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return filteredNotifications.value.slice(start, start + pageSize.value)
 })
 
 watch([keyword, channel], () => {

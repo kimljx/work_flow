@@ -5,31 +5,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
+
+
+from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_OVERRIDE_PATH = PROJECT_ROOT / "config" / "runtime-settings.json"
-
-
-def _load_env_file(path: Path) -> None:
-    """从本地 .env 文件补充尚未设置的环境变量。"""
-    if not path.exists():
-        return
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key:
-            continue
-        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-            value = value[1:-1]
-        os.environ.setdefault(key, value)
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -49,9 +32,6 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-_load_env_file(PROJECT_ROOT / ".env")
 
 
 @dataclass
@@ -94,6 +74,7 @@ class Settings:
     pop3_password: str
     pop3_use_tls: bool
     pop3_use_ssl: bool
+    mail_inbox_folders: str
     mail_inbox_max_scan: int
     imap_max_unseen_scan: int
     mail_auto_poll_enabled: bool
@@ -114,7 +95,7 @@ base_settings = Settings(
     qax_password=os.getenv("QAX_PASSWORD", "").strip(),
     qax_group_name=os.getenv("QAX_GROUP_NAME", "普通分组").strip() or "普通分组",
     qax_browser_headless=_as_bool(os.getenv("QAX_BROWSER_HEADLESS", "true"), True),
-    qax_ignore_https_errors=_as_bool(os.getenv("QAX_IGNORE_HTTPS_ERRORS", "true"), True),
+    qax_ignore_https_errors=_as_bool(os.getenv("QAX_IGNORE_HTTPS_ERRORS", "false"), False),
     remind_daily_run_at=os.getenv("REMIND_DAILY_RUN_AT", "09:00").strip() or "09:00",
     system_log_retention_days=max(_as_int(os.getenv("SYSTEM_LOG_RETENTION_DAYS", "60"), 60), 1),
     system_log_cleanup_interval_seconds=max(_as_int(os.getenv("SYSTEM_LOG_CLEANUP_INTERVAL_SECONDS", "86400"), 86400), 300),
@@ -139,6 +120,7 @@ base_settings = Settings(
     pop3_password=os.getenv("POP3_PASSWORD", "").strip(),
     pop3_use_tls=_as_bool(os.getenv("POP3_USE_TLS", "false"), False),
     pop3_use_ssl=_as_bool(os.getenv("POP3_USE_SSL", "false"), False),
+    mail_inbox_folders=os.getenv("MAIL_INBOX_FOLDERS", "").strip(),
     mail_inbox_max_scan=_as_int(os.getenv("MAIL_INBOX_MAX_SCAN", os.getenv("IMAP_MAX_UNSEEN_SCAN", "20")), 20),
     imap_max_unseen_scan=_as_int(os.getenv("IMAP_MAX_UNSEEN_SCAN", "20"), 20),
     mail_auto_poll_enabled=_as_bool(os.getenv("MAIL_AUTO_POLL_ENABLED", "true"), True),
@@ -173,6 +155,7 @@ EDITABLE_SETTING_FIELDS = {
     "pop3_password",
     "pop3_use_tls",
     "pop3_use_ssl",
+    "mail_inbox_folders",
     "mail_inbox_max_scan",
     "mail_auto_poll_enabled",
     "mail_auto_poll_interval_seconds",

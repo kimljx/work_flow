@@ -2,10 +2,10 @@
   <section class="page">
     <div class="panel workspace-header">
       <div>
-        <div class="workspace-eyebrow">计划任务</div>
-        <h1 class="workspace-title">邮件与 QAX 调度中心</h1>
+        <div class="workspace-eyebrow">调度与运行配置</div>
+        <h1 class="workspace-title">{{ APP_NAME }}调度中心</h1>
         <p class="workspace-subtitle">
-          在这里统一维护自动收件、提醒任务、邮件收发配置和 QAX 采集配置，保存后测试和手动执行都会直接使用当前页面配置。
+          在这里统一维护自动收件、提醒任务、通知通道、QAX 采集和内网域名映射。保存后，后台调度、手动测试和即时执行都会直接使用当前配置。
         </p>
       </div>
     </div>
@@ -45,18 +45,49 @@
     <div v-if="collectState.running" class="panel task-collect-panel">
       <div class="section-head">
         <div>
-          <h2>后台收集中</h2>
+          <h2>后台任务执行中</h2>
           <p>{{ collectState.message }}</p>
         </div>
       </div>
-      <div class="subtle-text">页面可继续操作，列表会在采集结束后自动刷新。</div>
+      <div class="subtle-text">当前任务正在后台运行，页面可继续操作，完成后会自动刷新状态和结果。</div>
+    </div>
+
+    <div v-else-if="collectState.started_at" class="panel task-collect-panel">
+      <div class="section-head">
+        <div>
+          <h2>后台采集结果</h2>
+          <p>{{ collectState.message }}</p>
+        </div>
+        <span :class="collectState.status === 'success' ? 'success-text' : 'error-text'">
+          {{ collectState.status || '-' }}
+        </span>
+      </div>
+      <div class="detail-summary-list">
+        <div class="detail-summary-item">
+          <span>开始时间</span>
+          <strong>{{ formatDateTime(collectState.started_at) }}</strong>
+        </div>
+        <div class="detail-summary-item">
+          <span>结束时间</span>
+          <strong>{{ formatDateTime(collectState.finished_at) }}</strong>
+        </div>
+        <div v-if="collectState.mail?.status" class="detail-summary-item">
+          <span>邮件采集</span>
+          <strong>{{ collectState.mail.status }} / {{ collectState.mail.count || 0 }} 封</strong>
+        </div>
+        <div v-if="collectState.qax?.status" class="detail-summary-item">
+          <span>QAX 采集</span>
+          <strong>{{ collectQaxSummary }}</strong>
+        </div>
+      </div>
+      <pre v-if="collectResultDetail" class="detail-pre detail-pre-subtle">{{ collectResultDetail }}</pre>
     </div>
 
     <div class="panel">
       <div class="section-head">
         <div>
-          <h2>计划任务与运行配置</h2>
-          <p>原来需要改 `.env` 的邮件和 QAX 参数，现在可以直接在这里维护。</p>
+          <h2>调度策略与运行参数</h2>
+          <p>统一维护计划任务执行节奏，以及邮件、QAX 和内网环境所依赖的运行参数。</p>
         </div>
         <div class="toolbar scheduler-modal-actions">
           <button class="button secondary" @click="testMailSettings" :disabled="busy">测试 SMTP</button>
@@ -72,8 +103,8 @@
         <section class="scheduler-config-card">
           <div class="scheduler-config-header">
             <div>
-              <h3>自动任务</h3>
-              <p>控制自动收件、QAX 采集和提醒任务的执行节奏。</p>
+              <h3>自动调度策略</h3>
+              <p>定义自动收件、QAX 采集、到期提醒和超期提醒的启停状态与执行频率。</p>
             </div>
           </div>
           <div class="scheduler-setting-grid">
@@ -138,14 +169,42 @@
               </div>
               <div class="subtle-text scheduler-setting-note">每天扫描已延期或已超过截止时间且未完成的主任务，并自动发送提醒。</div>
             </div>
+
+            <label class="scheduler-toggle-row">
+              <span>已完成任务邮件清理</span>
+              <input v-model="schedulerForm.completed_mail_cleanup_enabled" type="checkbox" />
+            </label>
+            <div class="scheduler-setting-controls">
+              <div>
+                <label>完成后保留天数</label>
+                <input v-model.number="schedulerForm.completed_mail_cleanup_retention_days" type="number" min="1" />
+              </div>
+              <div class="subtle-text scheduler-setting-note">默认 30 天；后台每天 02:30 清理超过保留天数的已完成任务回执邮件。</div>
+            </div>
+
+            <label class="scheduler-toggle-row">
+              <span>系统日志自动清理</span>
+              <input v-model="schedulerForm.system_log_cleanup_enabled" type="checkbox" />
+            </label>
+            <div class="scheduler-setting-controls">
+              <div>
+                <label>日志保留天数</label>
+                <input v-model.number="schedulerForm.system_log_retention_days" type="number" min="1" />
+              </div>
+              <div>
+                <label>清理间隔（小时）</label>
+                <input v-model.number="schedulerForm.system_log_cleanup_interval_hours" type="number" min="1" />
+              </div>
+              <div class="subtle-text scheduler-setting-note">用于操作日志页面的自动删除任务；手动清理也按这里的保留天数执行。</div>
+            </div>
           </div>
         </section>
 
         <section class="scheduler-config-card">
           <div class="scheduler-config-header">
             <div>
-              <h3>SMTP 发件配置</h3>
-              <p>保存后，“测试 SMTP”和业务通知发送都会立即使用这里的参数。</p>
+              <h3>邮件发件通道</h3>
+              <p>用于任务通知、提醒邮件和审批邮件发送；保存后测试发送与业务通知会立即使用这里的配置。</p>
             </div>
           </div>
           <div class="form-grid">
@@ -189,8 +248,8 @@
         <section class="scheduler-config-card">
           <div class="scheduler-config-header">
             <div>
-              <h3>收件配置</h3>
-              <p>统一维护收件协议，以及 IMAP / POP3 两套参数。切换协议后，测试收件和手动收取会按当前选择执行。</p>
+              <h3>邮件收件通道</h3>
+              <p>统一维护收件协议以及 IMAP / POP3 两套参数。切换协议后，测试收件、手动收取和后台轮询都会按当前选择执行。</p>
             </div>
           </div>
           <div class="form-grid">
@@ -200,6 +259,10 @@
                 <option value="imap">IMAP</option>
                 <option value="pop3">POP3</option>
               </select>
+            </div>
+            <div>
+              <label>收件文件夹名称</label>
+              <input v-model.trim="schedulerForm.mail_inbox_folders" type="text" placeholder="默认 INBOX，多个用逗号分隔" />
             </div>
           </div>
 
@@ -273,8 +336,8 @@
         <section class="scheduler-config-card">
           <div class="scheduler-config-header">
             <div>
-              <h3>QAX 配置</h3>
-              <p>保存后，手动采集和自动采集都会直接读取这些参数。</p>
+              <h3>QAX 采集通道</h3>
+              <p>用于 QAX 状态采集与回写。保存后，手动采集和自动采集都会直接读取这里的参数。</p>
             </div>
           </div>
           <div class="form-grid">
@@ -296,25 +359,55 @@
             </div>
           </div>
         </section>
+        <section class="scheduler-config-card">
+          <div class="scheduler-config-header">
+            <div>
+              <h3>内网域名映射</h3>
+              <p>用于内网 DNS 不稳定或无法解析的场景。保存时可自动解析域名，也可以手工维护固定 IP 映射。</p>
+            </div>
+            <button class="button secondary small" type="button" @click="addMapping">添加映射</button>
+          </div>
+          <label class="scheduler-toggle-row scheduler-inline-toggle">
+            <span>保存时自动解析域名</span>
+            <input v-model="schedulerForm.dns_auto_resolve_enabled" type="checkbox" />
+          </label>
+          <div class="host-mapping-list">
+            <div v-for="(item, index) in schedulerForm.mail_host_mappings" :key="item.id || index" class="host-mapping-row">
+              <input v-model.trim="item.host" type="text" placeholder="域名" />
+              <input v-model.trim="item.ip" type="text" placeholder="IP，可留空自动解析" />
+              <label class="scheduler-toggle-row scheduler-inline-toggle host-mapping-toggle">
+                <span>启用</span>
+                <input v-model="item.enabled" type="checkbox" />
+              </label>
+              <input v-model.trim="item.note" type="text" placeholder="备注" />
+              <button class="button secondary small" type="button" @click="removeMapping(index)">删除</button>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
 
     <div class="panel">
       <div class="section-head">
         <div>
-          <h2>落库邮件列表</h2>
-          <p>包含匹配成功和未匹配的落库邮件，可进入详情页查看正文、模板和处理结果。</p>
+          <h2>收件落库记录</h2>
+          <p>展示已落库的收件记录，包括匹配成功和未匹配邮件，可进入详情查看正文、模板命中和处理结果。</p>
         </div>
         <div class="toolbar">
           <button class="button secondary small" :class="{ active: eventFilter === 'all' }" @click="setEventFilter('all')">全部</button>
           <button class="button secondary small" :class="{ active: eventFilter === 'unmatched' }" @click="setEventFilter('unmatched')">未匹配</button>
           <button class="button secondary small" @click="loadAll" :disabled="busy">刷新列表</button>
+          <button class="button danger small" :disabled="selectedEventIds.length === 0" @click="bulkDeleteEvents">删除选中</button>
         </div>
       </div>
+      <div class="subtle-text list-selection-summary">已选择 {{ selectedEventIds.length }} 条邮件记录。</div>
 
       <table class="table">
         <thead>
           <tr>
+            <th class="selection-cell">
+              <input type="checkbox" :checked="isCurrentEventPageSelected" :disabled="pagedEvents.length === 0" @change="toggleCurrentEventPageSelection" />
+            </th>
             <th>收取时间</th>
             <th>发件人</th>
             <th>主题</th>
@@ -326,9 +419,12 @@
         </thead>
         <tbody>
           <tr v-if="pagedEvents.length === 0">
-            <td colspan="7">当前没有符合条件的邮件。</td>
+            <td colspan="8">当前没有符合条件的邮件。</td>
           </tr>
           <tr v-for="item in pagedEvents" :key="item.id">
+            <td class="selection-cell">
+              <input v-model="selectedEventIds" type="checkbox" :value="item.id" />
+            </td>
             <td>{{ formatDateTime(item.created_at) }}</td>
             <td>{{ item.from_addr }}</td>
             <td>
@@ -348,14 +444,15 @@
             </td>
             <td>
               <button class="button secondary small" type="button" @click="openMailDetail(item.id)">查看详情</button>
+              <button class="button danger small" type="button" @click="deleteEvent(item)">删除</button>
             </td>
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="filteredEvents.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="filteredEvents.length" />
     </div>
 
-    <div v-if="detailMailEventId" class="modal-mask" @click.self="closeMailDetail">
+    <div v-if="detailMailEventId" class="modal-mask">
       <div class="modal-card mail-event-detail-modal">
         <AdminMailEventDetail
           :event-id="detailMailEventId"
@@ -366,7 +463,7 @@
       </div>
     </div>
 
-    <div v-if="detailTaskId" class="modal-mask" @click.self="closeTaskDetail">
+    <div v-if="detailTaskId" class="modal-mask">
       <div class="modal-card task-modal-card task-detail-modal-card">
         <AdminTaskDetail :task-id="detailTaskId" @cancel="closeTaskDetail" />
       </div>
@@ -381,14 +478,16 @@ import AdminMailEventDetail from './AdminMailEventDetail.vue'
 import AdminTaskDetail from './AdminTaskDetail.vue'
 import AppPagination from '../../components/AppPagination.vue'
 import { notifyTypeText } from '../../constants/notifyTypes'
+import { APP_NAME } from '../../constants/app'
 import { formatCountdown, formatDateTime } from '../../utils/format'
 
 const events = ref([])
 const pollState = ref(null)
 const page = ref(1)
-const pageSize = 10
+const pageSize = ref(20)
 const busy = ref(false)
 const eventFilter = ref('all')
+const selectedEventIds = ref([])
 const feedback = ref({
   title: '',
   message: '',
@@ -408,14 +507,30 @@ const filteredEvents = computed(() => {
 })
 
 const pagedEvents = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filteredEvents.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return filteredEvents.value.slice(start, start + pageSize.value)
 })
+
+const isCurrentEventPageSelected = computed(() =>
+  pagedEvents.value.length > 0 && pagedEvents.value.every((item) => selectedEventIds.value.includes(item.id))
+)
 
 const countdownText = computed(() => {
   void nowTick.value
   if (!pollState.value?.auto_poll_enabled) return '自动收取未开启'
   return formatCountdown(pollState.value?.next_poll_at)
+})
+
+const collectQaxSummary = computed(() => {
+  const qax = collectState.value?.qax || {}
+  return `${qax.status || '-'} / 处理 ${qax.processed_count || qax.processed || 0}，更新 ${qax.updated_count || qax.updated || 0}，失败 ${qax.failed_count || qax.failed || 0}`
+})
+
+const collectResultDetail = computed(() => {
+  const lines = []
+  if (collectState.value?.mail?.message) lines.push(`邮件：${collectState.value.mail.message}`)
+  if (collectState.value?.qax?.message) lines.push(`QAX：${collectState.value.qax.message}`)
+  return lines.join('\n')
 })
 
 let timerId = null
@@ -429,6 +544,11 @@ function buildDefaultSchedulerForm() {
     due_remind_run_at: '09:00',
     overdue_remind_enabled: true,
     overdue_remind_run_at: '09:00',
+    completed_mail_cleanup_enabled: true,
+    completed_mail_cleanup_retention_days: 30,
+    system_log_cleanup_enabled: true,
+    system_log_retention_days: 60,
+    system_log_cleanup_interval_hours: 24,
     qax_auto_collect_enabled: false,
     qax_auto_collect_interval_minutes: 60,
     mail_scan_baseline_at: '',
@@ -447,6 +567,7 @@ function buildDefaultSchedulerForm() {
     smtp_use_ssl: false,
     smtp_timeout_seconds: 20,
     mail_inbox_protocol: 'imap',
+    mail_inbox_folders: '',
     imap_host: '',
     imap_port: 993,
     imap_user: '',
@@ -459,6 +580,8 @@ function buildDefaultSchedulerForm() {
     pop3_password: '',
     pop3_use_tls: false,
     pop3_use_ssl: false,
+    dns_auto_resolve_enabled: true,
+    mail_host_mappings: [],
   }
 }
 
@@ -485,6 +608,8 @@ function closeTaskDetail() {
 async function loadEvents() {
   const { data } = await http.get('/admin/mail/events')
   events.value = data
+  const existingIds = new Set(data.map((item) => item.id))
+  selectedEventIds.value = selectedEventIds.value.filter((id) => existingIds.has(id))
 }
 
 async function loadPollState() {
@@ -503,6 +628,11 @@ async function loadSchedulerSettings() {
     due_remind_run_at: data.due_remind_run_at || '09:00',
     overdue_remind_enabled: data.overdue_remind_enabled !== false,
     overdue_remind_run_at: data.overdue_remind_run_at || '09:00',
+    completed_mail_cleanup_enabled: data.completed_mail_cleanup_enabled !== false,
+    completed_mail_cleanup_retention_days: Math.max(1, Number(data.completed_mail_cleanup_retention_days || 30)),
+    system_log_cleanup_enabled: data.system_log_cleanup_enabled !== false,
+    system_log_retention_days: Math.max(1, Number(data.system_log_retention_days || 60)),
+    system_log_cleanup_interval_hours: Math.max(1, Math.round(Number(data.system_log_cleanup_interval_seconds || 86400) / 3600)),
     qax_auto_collect_enabled: Boolean(data.qax_auto_collect_enabled),
     qax_auto_collect_interval_minutes: Math.max(1, Math.round(Number(data.qax_auto_collect_interval_seconds || 3600) / 60)),
     mail_scan_baseline_at: data.mail_scan_baseline_at ? String(data.mail_scan_baseline_at).slice(0, 16) : '',
@@ -523,6 +653,7 @@ async function loadSchedulerSettings() {
     mail_inbox_protocol: ['imap', 'pop3'].includes(String(data.mail_inbox_protocol || '').toLowerCase())
       ? String(data.mail_inbox_protocol).toLowerCase()
       : 'imap',
+    mail_inbox_folders: data.mail_inbox_folders || '',
     imap_host: data.imap_host || '',
     imap_port: Number(data.imap_port || 993),
     imap_user: data.imap_user || '',
@@ -535,6 +666,8 @@ async function loadSchedulerSettings() {
     pop3_password: data.pop3_password || '',
     pop3_use_tls: Boolean(data.pop3_use_tls),
     pop3_use_ssl: Boolean(data.pop3_use_ssl),
+    dns_auto_resolve_enabled: data.dns_auto_resolve_enabled !== false,
+    mail_host_mappings: Array.isArray(data.mail_host_mappings) ? data.mail_host_mappings : [],
   }
 }
 
@@ -560,9 +693,54 @@ function showFeedback(title, message, type = 'success') {
   feedback.value = { title, message, type }
 }
 
+function addMapping() {
+  schedulerForm.value.mail_host_mappings.push({
+    id: null,
+    host: '',
+    ip: '',
+    enabled: true,
+    source: 'manual',
+    note: '',
+  })
+}
+
+function removeMapping(index) {
+  schedulerForm.value.mail_host_mappings.splice(index, 1)
+}
+
 function setEventFilter(value) {
   eventFilter.value = value
   page.value = 1
+  selectedEventIds.value = []
+}
+
+function toggleCurrentEventPageSelection() {
+  const pageIds = pagedEvents.value.map((item) => item.id)
+  if (isCurrentEventPageSelected.value) {
+    selectedEventIds.value = selectedEventIds.value.filter((id) => !pageIds.includes(id))
+  } else {
+    selectedEventIds.value = Array.from(new Set([...selectedEventIds.value, ...pageIds]))
+  }
+}
+
+async function deleteEvent(item) {
+  if (!window.confirm(`确认删除该邮件落库记录吗？主题：${item.subject || '-'}`)) return
+  await http.delete(`/admin/mail/events/${item.id}`)
+  if (detailMailEventId.value === item.id) {
+    detailMailEventId.value = null
+  }
+  await loadEvents()
+}
+
+async function bulkDeleteEvents() {
+  if (selectedEventIds.value.length === 0) return
+  if (!window.confirm(`确认删除选中的 ${selectedEventIds.value.length} 条邮件落库记录吗？`)) return
+  await http.post('/admin/mail/events/bulk-delete', { ids: selectedEventIds.value })
+  selectedEventIds.value = []
+  if (detailMailEventId.value) {
+    detailMailEventId.value = null
+  }
+  await loadEvents()
 }
 
 async function testMailSettings() {
@@ -613,6 +791,11 @@ async function saveSchedulerSettings() {
       mail_auto_poll_interval_seconds: Math.max(1, Number(schedulerForm.value.mail_auto_poll_interval_minutes || 5)) * 60,
       mail_inbox_max_scan: Math.max(1, Number(schedulerForm.value.mail_inbox_max_scan || 20)),
       qax_auto_collect_interval_seconds: Math.max(1, Number(schedulerForm.value.qax_auto_collect_interval_minutes || 60)) * 60,
+      completed_mail_cleanup_enabled: schedulerForm.value.completed_mail_cleanup_enabled !== false,
+      completed_mail_cleanup_retention_days: Math.max(1, Number(schedulerForm.value.completed_mail_cleanup_retention_days || 30)),
+      system_log_cleanup_enabled: schedulerForm.value.system_log_cleanup_enabled !== false,
+      system_log_retention_days: Math.max(1, Number(schedulerForm.value.system_log_retention_days || 60)),
+      system_log_cleanup_interval_seconds: Math.max(1, Number(schedulerForm.value.system_log_cleanup_interval_hours || 24)) * 3600,
       smtp_port: Math.max(1, Number(schedulerForm.value.smtp_port || 25)),
       smtp_timeout_seconds: Math.max(1, Number(schedulerForm.value.smtp_timeout_seconds || 20)),
       imap_port: Math.max(1, Number(schedulerForm.value.imap_port || 993)),
@@ -623,6 +806,17 @@ async function saveSchedulerSettings() {
       mail_scan_baseline_at: schedulerForm.value.mail_scan_baseline_at
         ? schedulerForm.value.mail_scan_baseline_at
         : null,
+      dns_auto_resolve_enabled: schedulerForm.value.dns_auto_resolve_enabled !== false,
+      mail_host_mappings: (schedulerForm.value.mail_host_mappings || [])
+        .filter((item) => String(item.host || '').trim())
+        .map((item) => ({
+          id: item.id || null,
+          host: String(item.host || '').trim(),
+          ip: String(item.ip || '').trim(),
+          enabled: item.enabled !== false,
+          source: item.source || 'manual',
+          note: item.note || '',
+        })),
     })
     showFeedback('计划任务设置', '设置已保存', 'success')
     await Promise.all([loadPollState(), loadSchedulerSettings()])

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -23,7 +23,7 @@ from app.bootstrap import bootstrap_database
 from app.config import settings
 from app.db import SessionLocal
 from app.services.audit import cleanup_system_logs, write_system_log
-from app.services.mail import poll_mailbox
+from app.services.mail import cleanup_completed_task_mails, poll_mailbox
 from app.services.notifications import create_due_reminders, create_overdue_task_reminders
 from app.services.qax import collect_qax_status
 from app.services.runtime_settings import load_runtime_settings
@@ -49,6 +49,8 @@ _overdue_remind_stop_event = threading.Event()
 _overdue_remind_thread: threading.Thread | None = None
 _system_log_cleanup_stop_event = threading.Event()
 _system_log_cleanup_thread: threading.Thread | None = None
+_completed_mail_cleanup_stop_event = threading.Event()
+_completed_mail_cleanup_thread: threading.Thread | None = None
 
 
 def _cron_field_matches(field: str, value: int, *, minimum: int, maximum: int) -> bool:
@@ -136,15 +138,16 @@ def _mail_poll_loop() -> None:
 def _system_log_cleanup_loop() -> None:
     """后台定时清理过期系统日志。
 
-    清理周期与保留天数都来自配置文件，默认每天清理一次、保留 60 天，
-    便于系统管理员按部署规模和磁盘容量调整。
+    清理开关、周期与保留天数来自计划任务运行配置，便于系统管理员按部署规模和磁盘容量调整。
     """
 
-    interval = max(settings.system_log_cleanup_interval_seconds, 300)
-    while not _system_log_cleanup_stop_event.wait(interval):
+    while not _system_log_cleanup_stop_event.wait(max(load_runtime_settings().system_log_cleanup_interval_seconds, 300)):
+        runtime = load_runtime_settings()
+        if not runtime.system_log_cleanup_enabled:
+            continue
         try:
             with SessionLocal() as db:
-                deleted_count = cleanup_system_logs(db, settings.system_log_retention_days)
+                deleted_count = cleanup_system_logs(db, runtime.system_log_retention_days)
                 write_system_log(
                     db,
                     operator_id=None,
@@ -152,28 +155,84 @@ def _system_log_cleanup_loop() -> None:
                     target_type="SystemLog",
                     target_id=None,
                     before={},
-                    after={"deleted_count": deleted_count, "retention_days": settings.system_log_retention_days},
+                    after={"deleted_count": deleted_count, "retention_days": runtime.system_log_retention_days},
                     log_level="INFO",
                     module_name="scheduler.system-log",
                     message=f"自动清理系统日志完成，删除 {deleted_count} 条过期记录",
                     detail={
                         "deleted_count": deleted_count,
-                        "retention_days": settings.system_log_retention_days,
-                        "interval_seconds": interval,
+                        "retention_days": runtime.system_log_retention_days,
+                        "interval_seconds": runtime.system_log_cleanup_interval_seconds,
                     },
                 )
                 db.commit()
-                logger.info("Auto system log cleanup result: deleted=%s retention_days=%s", deleted_count, settings.system_log_retention_days)
+                logger.info("Auto system log cleanup result: deleted=%s retention_days=%s", deleted_count, runtime.system_log_retention_days)
         except Exception as exc:  # pragma: no cover
             logger.exception("Auto system log cleanup failed: %s", exc)
+
+
+def _completed_mail_cleanup_loop() -> None:
+    """每天清理超过保留天数的已完成任务邮件回执。"""
+
+    last_run_date: date | None = None
+    while not _completed_mail_cleanup_stop_event.wait(30):
+        runtime = load_runtime_settings()
+        if not runtime.completed_mail_cleanup_enabled:
+            continue
+        now = shanghai_now_naive()
+        if now.strftime("%H:%M") != "02:30" or last_run_date == now.date():
+            continue
+        try:
+            with SessionLocal() as db:
+                result = cleanup_completed_task_mails(db, runtime.completed_mail_cleanup_retention_days)
+                write_system_log(
+                    db,
+                    operator_id=None,
+                    action_type="AUTO_CLEANUP_COMPLETED_TASK_MAILS",
+                    target_type="MailInbox",
+                    target_id=None,
+                    before={},
+                    after=result,
+                    log_level="INFO" if result.get("failed_count", 0) == 0 else "WARNING",
+                    module_name="scheduler.mail-cleanup",
+                    message=(
+                        f"自动清理已完成任务邮件完成，扫描 {result.get('task_count', 0)} 个任务，"
+                        f"删除 {result.get('deleted_count', 0)} 封，"
+                        f"清理落库记录 {result.get('deleted_record_count', 0)} 条，"
+                        f"失败 {result.get('failed_count', 0)} 封"
+                    ),
+                    detail=result,
+                )
+                db.commit()
+                last_run_date = now.date()
+                logger.info("Auto completed task mail cleanup result: %s", result)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Auto completed task mail cleanup failed: %s", exc)
 
 
 def _qax_collect_loop() -> None:
     """按 cron 配置定时执行 QAX 状态采集并写入系统日志。"""
 
-    while not _qax_collect_stop_event.wait(max(load_runtime_settings().qax_auto_collect_interval_seconds, 30)):
+    check_interval_seconds = 30
+    next_run_at: datetime | None = None
+    last_interval_seconds: int | None = None
+
+    while not _qax_collect_stop_event.wait(check_interval_seconds):
         runtime = load_runtime_settings()
         if not runtime.qax_auto_collect_enabled:
+            next_run_at = None
+            last_interval_seconds = None
+            continue
+        interval_seconds = max(runtime.qax_auto_collect_interval_seconds, 30)
+        now = shanghai_now_naive()
+        if next_run_at is None:
+            next_run_at = now + timedelta(seconds=interval_seconds)
+            last_interval_seconds = interval_seconds
+            continue
+        if last_interval_seconds != interval_seconds:
+            next_run_at = now + timedelta(seconds=interval_seconds)
+            last_interval_seconds = interval_seconds
+        if now < next_run_at:
             continue
         try:
             with SessionLocal() as db:
@@ -194,12 +253,32 @@ def _qax_collect_loop() -> None:
                     log_level="INFO" if result.get("status") == "success" else "WARNING",
                     module_name="scheduler.qax",
                     message=f"自动采集 QAX 状态完成，结果：{result.get('status')}",
-                    detail={"interval_seconds": runtime.qax_auto_collect_interval_seconds, **result},
+                    detail={"interval_seconds": interval_seconds, **result},
                 )
                 db.commit()
                 logger.info("Auto qax collect result: %s", result)
         except Exception as exc:  # pragma: no cover
             logger.exception("Auto qax collect failed: %s", exc)
+            try:
+                with SessionLocal() as db:
+                    write_system_log(
+                        db,
+                        operator_id=None,
+                        action_type="AUTO_COLLECT_QAX_STATUS",
+                        target_type="Notification",
+                        target_id=None,
+                        before={},
+                        after={"status": "failed"},
+                        log_level="ERROR",
+                        module_name="scheduler.qax",
+                        message="自动采集 QAX 状态失败",
+                        detail={"interval_seconds": interval_seconds, "status": "failed", "message": str(exc)},
+                    )
+                    db.commit()
+            except Exception:
+                logger.exception("Auto qax collect failure log write failed")
+        finally:
+            next_run_at = shanghai_now_naive() + timedelta(seconds=interval_seconds)
 
 
 def _due_remind_loop() -> None:
@@ -299,7 +378,7 @@ app.add_middleware(
 def startup_event() -> None:
     """应用启动时初始化数据库，并按配置拉起自动收件线程。"""
     bootstrap_database()
-    global _mail_poll_thread, _qax_collect_thread, _due_remind_thread, _overdue_remind_thread, _system_log_cleanup_thread
+    global _mail_poll_thread, _qax_collect_thread, _due_remind_thread, _overdue_remind_thread, _system_log_cleanup_thread, _completed_mail_cleanup_thread
     if _mail_poll_thread is None:
         _mail_poll_stop_event.clear()
         _mail_poll_thread = threading.Thread(target=_mail_poll_loop, name="mail-auto-poll", daemon=True)
@@ -324,22 +403,35 @@ def startup_event() -> None:
         _system_log_cleanup_stop_event.clear()
         _system_log_cleanup_thread = threading.Thread(target=_system_log_cleanup_loop, name="system-log-cleanup", daemon=True)
         _system_log_cleanup_thread.start()
+        runtime = load_runtime_settings()
         logger.info(
-            "Auto system log cleanup started, retention_days=%s interval=%ss",
-            settings.system_log_retention_days,
-            max(settings.system_log_cleanup_interval_seconds, 300),
+            "Auto system log cleanup started, enabled=%s retention_days=%s interval=%ss",
+            runtime.system_log_cleanup_enabled,
+            runtime.system_log_retention_days,
+            max(runtime.system_log_cleanup_interval_seconds, 300),
+        )
+    if _completed_mail_cleanup_thread is None:
+        _completed_mail_cleanup_stop_event.clear()
+        _completed_mail_cleanup_thread = threading.Thread(target=_completed_mail_cleanup_loop, name="completed-mail-cleanup", daemon=True)
+        _completed_mail_cleanup_thread.start()
+        runtime = load_runtime_settings()
+        logger.info(
+            "Auto completed task mail cleanup started, enabled=%s retention_days=%s",
+            runtime.completed_mail_cleanup_enabled,
+            runtime.completed_mail_cleanup_retention_days,
         )
 
 
 @app.on_event("shutdown")
 def shutdown_event() -> None:
     """应用关闭时优雅停止后台轮询线程，避免进程悬挂。"""
-    global _mail_poll_thread, _qax_collect_thread, _due_remind_thread, _overdue_remind_thread, _system_log_cleanup_thread
+    global _mail_poll_thread, _qax_collect_thread, _due_remind_thread, _overdue_remind_thread, _system_log_cleanup_thread, _completed_mail_cleanup_thread
     _mail_poll_stop_event.set()
     _qax_collect_stop_event.set()
     _due_remind_stop_event.set()
     _overdue_remind_stop_event.set()
     _system_log_cleanup_stop_event.set()
+    _completed_mail_cleanup_stop_event.set()
     if _mail_poll_thread and _mail_poll_thread.is_alive():
         _mail_poll_thread.join(timeout=2)
     if _qax_collect_thread and _qax_collect_thread.is_alive():
@@ -350,11 +442,14 @@ def shutdown_event() -> None:
         _overdue_remind_thread.join(timeout=2)
     if _system_log_cleanup_thread and _system_log_cleanup_thread.is_alive():
         _system_log_cleanup_thread.join(timeout=2)
+    if _completed_mail_cleanup_thread and _completed_mail_cleanup_thread.is_alive():
+        _completed_mail_cleanup_thread.join(timeout=2)
     _mail_poll_thread = None
     _qax_collect_thread = None
     _due_remind_thread = None
     _overdue_remind_thread = None
     _system_log_cleanup_thread = None
+    _completed_mail_cleanup_thread = None
 
 
 @app.get("/health")

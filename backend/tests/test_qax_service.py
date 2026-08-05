@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import tempfile
 import unittest
+import asyncio
 from datetime import datetime
 from unittest.mock import patch
 
@@ -14,15 +15,18 @@ from app.db import Base, SessionLocal, engine
 from app.models import Notification, NotificationRecipient, Task, TaskMember, Template, User
 from app.services.notifications import create_notification_with_recipients
 from app.services.qax import (
+    QaxAutomationClient,
     QaxAutomationError,
     QaxTaskStatus,
     _build_qax_certificate_hint,
     _check_chromium_runtime_dependencies,
+    _ensure_qax_runtime_directories,
     _local_chromium_executable,
     _map_qax_status,
     _validate_qax_certificates,
     _wrap_qax_startup_error,
     collect_qax_status,
+    delete_qax_task_notifications,
     sanitize_qax_content,
 )
 
@@ -48,6 +52,7 @@ class _FakeQaxAutomationClient:
             row_text="执行结束 已读",
             delivery_status="delivered",
             read_status="read",
+            read_at="2026-07-30 11:30:00",
             detail="执行结束，终端已读",
         )
 
@@ -175,6 +180,65 @@ class QaxServiceTestCase(unittest.TestCase):
         self.assertEqual(failed_status.delivery_status, "failed")
         self.assertEqual(failed_status.read_status, "unread")
 
+    def test_query_task_status_falls_back_to_row_text_when_detail_popup_fails(self) -> None:
+        class _FakeCell:
+            async def inner_text(self) -> str:
+                return "执行结束"
+
+        class _FakeCells:
+            def nth(self, index: int) -> _FakeCell:
+                self.index = index
+                return _FakeCell()
+
+        class _FakeRowButton:
+            async def click(self) -> None:
+                raise RuntimeError("popup failed")
+
+        class _FakeButtons:
+            def nth(self, index: int) -> _FakeRowButton:
+                self.index = index
+                return _FakeRowButton()
+
+        class _FakeRow:
+            async def wait_for(self, *, state: str, timeout: int) -> None:
+                return None
+
+            def get_by_role(self, role: str):
+                if role == "cell":
+                    return _FakeCells()
+                if role == "button":
+                    return _FakeButtons()
+                raise AssertionError(role)
+
+        class _FakePopupContext:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            @property
+            async def value(self):
+                raise AssertionError("popup should not resolve when click fails")
+
+        class _FakePage:
+            def get_by_role(self, role: str, name: str | None = None):
+                if role == "row":
+                    return _FakeRow()
+                raise AssertionError((role, name))
+
+            def expect_popup(self) -> _FakePopupContext:
+                return _FakePopupContext()
+
+        client = QaxAutomationClient()
+        client.page = _FakePage()
+
+        result = asyncio.run(client.query_task_status("task-x", "10.0.0.2"))
+        self.assertTrue(result.found)
+        self.assertEqual(result.delivery_status, "delivered")
+        self.assertEqual(result.read_status, "unread")
+        self.assertEqual(result.detail, "执行结束\n执行结束")
+
     @patch("app.services.notifications.send_qax_notification")
     def test_create_notification_uses_sanitized_qax_content(self, mock_send_qax_notification) -> None:
         """创建 QAX 通知时，应发送并落库清洗后的正文快照。"""
@@ -241,10 +305,39 @@ class QaxServiceTestCase(unittest.TestCase):
             refreshed_task = db.query(Task).filter(Task.id == notification.task_id).first()
             self.assertEqual(recipient.delivery_status, "delivered")
             self.assertEqual(recipient.read_status, "read")
+            self.assertEqual(recipient.read_at, "2026-07-30 11:30:00")
             self.assertEqual(recipient.last_error, "")
             self.assertEqual(refreshed_notification.status, "delivered")
             self.assertEqual(refreshed_task.main_status, "in_progress")
             self.assertEqual(len(fake_client.deleted_task_names), 1)
+
+    def test_delete_qax_task_notifications_removes_every_recipient_task(self) -> None:
+        with SessionLocal() as db:
+            task = db.query(Task).filter(Task.id == 1).first()
+            first = Notification(task_id=task.id, channel="qax", notify_type="task_created", content_snapshot="", status="delivered")
+            second = Notification(task_id=task.id, channel="qax", notify_type="manual_remind", content_snapshot="", status="delivered")
+            db.add_all([first, second])
+            db.flush()
+            db.add_all(
+                [
+                    NotificationRecipient(notification_id=first.id, user_id=2, recipient_role="participant"),
+                    NotificationRecipient(notification_id=second.id, user_id=2, recipient_role="participant"),
+                ]
+            )
+            db.commit()
+
+            fake_client = _FakeQaxAutomationClient()
+            with patch("app.services.qax._ensure_qax_settings", return_value=None), patch(
+                "app.services.qax.QaxAutomationClient",
+                return_value=fake_client,
+            ):
+                result = delete_qax_task_notifications(db, task)
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["attempted"], 2)
+            self.assertEqual(result["deleted"], 2)
+            self.assertEqual(result["failed"], 0)
+            self.assertEqual(len(fake_client.deleted_task_names), 2)
 
     def test_collect_any_qax_read_starts_not_started_task(self) -> None:
         """未开始任务收到任意类型 QAX 已读反馈后，都应推进为进行中。"""
@@ -326,42 +419,18 @@ class QaxServiceTestCase(unittest.TestCase):
             self.assertEqual(refreshed_task.main_status, "not_started")
             self.assertEqual(len(fake_client.deleted_task_names), 0)
 
-    def test_validate_qax_certificates_rejects_empty_certificate_file(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config_root = root / "config"
-            config_root.mkdir()
-            (config_root / "client.cer").write_bytes(b"")
-            with patch("app.services.qax.PROJECT_ROOT", root):
-                with self.assertRaises(QaxAutomationError) as ctx:
-                    _validate_qax_certificates()
-            self.assertIn("证书文件为空", str(ctx.exception))
-            self.assertIn("config/client.cer", str(ctx.exception))
-
-    def test_build_qax_certificate_hint_mentions_p12_when_only_public_cert_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config_root = root / "config"
-            config_root.mkdir()
-            (config_root / "login.cer").write_text("dummy", encoding="utf-8")
-            with patch("app.services.qax.PROJECT_ROOT", root):
-                state = _validate_qax_certificates()
-                hint = _build_qax_certificate_hint(state)
-            self.assertIn(".p12/.pfx", hint)
-            self.assertIn("config/login.cer", hint)
+    def test_build_qax_certificate_hint_uses_system_trust_store_guidance(self) -> None:
+        state = _validate_qax_certificates()
+        hint = _build_qax_certificate_hint(state)
+        self.assertIn("系统级信任链", hint)
+        self.assertIn("不会读取 config/", hint)
 
     def test_wrap_qax_startup_error_adds_certificate_guidance(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config_root = root / "config"
-            config_root.mkdir()
-            (config_root / "login.p12").write_text("dummy", encoding="utf-8")
-            with patch("app.services.qax.PROJECT_ROOT", root):
-                state = _validate_qax_certificates()
-                wrapped = _wrap_qax_startup_error(RuntimeError("net::ERR_BAD_SSL_CLIENT_AUTH_CERT"), state)
-            self.assertIsInstance(wrapped, QaxAutomationError)
-            self.assertIn("证书/TLS 错误", str(wrapped))
-            self.assertIn("config/login.p12", str(wrapped))
+        state = _validate_qax_certificates()
+        wrapped = _wrap_qax_startup_error(RuntimeError("net::ERR_BAD_SSL_CLIENT_AUTH_CERT"), state)
+        self.assertIsInstance(wrapped, QaxAutomationError)
+        self.assertIn("证书/TLS 错误", str(wrapped))
+        self.assertIn("系统级信任链", str(wrapped))
 
     def test_wrap_qax_startup_error_mentions_glibc_browser_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -404,6 +473,19 @@ class QaxServiceTestCase(unittest.TestCase):
             with patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(root)}, clear=False):
                 resolved = _local_chromium_executable()
             self.assertEqual(resolved, str(executable))
+
+    def test_ensure_qax_runtime_directories_creates_local_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with patch("app.services.qax.PROJECT_ROOT", root):
+                _ensure_qax_runtime_directories()
+
+            self.assertTrue((root / "local" / "temp").is_dir())
+            self.assertTrue((root / "local" / "cache").is_dir())
+            self.assertTrue((root / "local" / "home").is_dir())
+            self.assertTrue((root / "local" / "logs" / "qax_debug").is_dir())
+            self.assertEqual(os.environ["TMPDIR"], str(root / "local" / "temp"))
+            self.assertEqual(os.environ["HOME"], str(root / "local" / "home"))
 
 
 if __name__ == "__main__":

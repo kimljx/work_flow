@@ -17,7 +17,7 @@ class TimestampMixin:
 
 
 class AppSetting(Base):
-    """Database-backed runtime settings previously stored in .env/JSON files."""
+    """Database-backed runtime settings edited from the system settings UI."""
     __tablename__ = "app_settings"
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -172,6 +172,7 @@ class NotificationRecipient(Base, TimestampMixin):
     recipient_role: Mapped[str] = mapped_column(String(16), nullable=False)
     delivery_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     read_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unread")
+    read_at: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content_snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="")
     last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -231,9 +232,13 @@ class MailEvent(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     message_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     from_addr: Mapped[str] = mapped_column(String(255), nullable=False)
+    to_addr: Mapped[str] = mapped_column(Text, nullable=False, default="")
     subject: Mapped[str] = mapped_column(Text, nullable=False)
     body_digest: Mapped[str] = mapped_column(Text, nullable=False)
     original_body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    inbox_protocol: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    inbox_folder: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    server_message_ref: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     resolved_template_id: Mapped[int | None] = mapped_column(ForeignKey("templates.id"), nullable=True)
     resolved_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     process_status: Mapped[str] = mapped_column(String(32), nullable=False, default="NEW")

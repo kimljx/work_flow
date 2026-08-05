@@ -25,6 +25,11 @@ class RuntimeSettings:
     due_remind_run_at: str = base_settings.remind_daily_run_at
     overdue_remind_enabled: bool = True
     overdue_remind_run_at: str = "09:00"
+    completed_mail_cleanup_enabled: bool = True
+    completed_mail_cleanup_retention_days: int = 30
+    system_log_cleanup_enabled: bool = True
+    system_log_retention_days: int = base_settings.system_log_retention_days
+    system_log_cleanup_interval_seconds: int = base_settings.system_log_cleanup_interval_seconds
     qax_auto_collect_enabled: bool = bool((base_settings.qax_collect_cron or "").strip())
     qax_auto_collect_interval_seconds: int = 3600
     mail_scan_baseline_at: str = ""
@@ -55,6 +60,7 @@ class RuntimeSettings:
     pop3_password: str = base_settings.pop3_password
     pop3_use_tls: bool = base_settings.pop3_use_tls
     pop3_use_ssl: bool = base_settings.pop3_use_ssl
+    mail_inbox_folders: str = base_settings.mail_inbox_folders
     dns_auto_resolve_enabled: bool = True
     mail_host_mappings: list[dict[str, Any]] = field(default_factory=list)
 
@@ -63,6 +69,8 @@ BOOL_FIELDS = {
     "mail_auto_poll_enabled",
     "due_remind_enabled",
     "overdue_remind_enabled",
+    "completed_mail_cleanup_enabled",
+    "system_log_cleanup_enabled",
     "qax_auto_collect_enabled",
     "qax_browser_visible",
     "qax_ignore_https_errors",
@@ -77,6 +85,9 @@ BOOL_FIELDS = {
 INT_FIELDS = {
     "mail_auto_poll_interval_seconds",
     "mail_inbox_max_scan",
+    "completed_mail_cleanup_retention_days",
+    "system_log_retention_days",
+    "system_log_cleanup_interval_seconds",
     "qax_auto_collect_interval_seconds",
     "smtp_port",
     "smtp_timeout_seconds",
@@ -173,7 +184,7 @@ def _apply_raw_settings(current: RuntimeSettings, raw: dict[str, Any]) -> Runtim
         if field_name in BOOL_FIELDS:
             setattr(current, field_name, _coerce_bool(raw.get(field_name), default))
         elif field_name in INT_FIELDS:
-            minimum = 30 if field_name in {"mail_auto_poll_interval_seconds", "qax_auto_collect_interval_seconds"} else 1
+            minimum = 300 if field_name == "system_log_cleanup_interval_seconds" else 30 if field_name in {"mail_auto_poll_interval_seconds", "qax_auto_collect_interval_seconds"} else 1
             setattr(current, field_name, _coerce_int(raw.get(field_name), default, minimum))
         elif field_name in TIME_FIELDS:
             setattr(current, field_name, _coerce_time(raw.get(field_name), default))

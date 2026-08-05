@@ -42,6 +42,10 @@ REAL_DIR=$(readlink -f /data/work_flow/current)
 sudo APP_PORT=18849 POSTGRES_PASSWORD='请替换为强密码' bash run_project.sh "$REAL_DIR"
 ```
 
+生产配置不再使用 `.env` 文件。启动必需参数通过命令行环境变量传入，业务配置进入系统后在“系统设置”中维护并保存到 PostgreSQL。
+
+QAX 等 HTTPS 证书按系统级导入处理，应用默认校验证书链。
+
 停止项目：
 
 ```bash

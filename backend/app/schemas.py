@@ -18,6 +18,7 @@ class LoginRequest(BaseModel):
     """登录请求体。"""
     username: str
     password: str
+    password_legacy_sha256: str = ""
 
 
 class RefreshRequest(BaseModel):
@@ -25,9 +26,31 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """当前用户修改密码请求体，密码字段由前端 MD5 后提交。"""
+    current_password: str
+    new_password: str
+    current_password_legacy_sha256: str = ""
+
+
+class ResetPasswordRequest(BaseModel):
+    """管理员重置指定用户密码请求体，密码字段由前端 MD5 后提交。"""
+    new_password: str
+
+
 class ApiMessage(BaseModel):
     """统一的简单提示消息响应。"""
     message: str
+
+
+class NotificationBulkDeleteRequest(BaseModel):
+    """批量删除通知请求。"""
+    ids: list[int] = Field(default_factory=list)
+
+
+class MailEventBulkDeleteRequest(BaseModel):
+    """批量删除收件落库记录请求。"""
+    ids: list[int] = Field(default_factory=list)
 
 
 class UserOut(BaseModel):
@@ -129,6 +152,7 @@ class TaskOut(BaseModel):
     subtask_count: int = 0
     subtask_status_summary: list[dict] = Field(default_factory=list)
     latest_notifications: dict[str, dict] = Field(default_factory=dict)
+    notification_sending: bool = False
     created_at: datetime | None = None
 
 
@@ -213,6 +237,7 @@ class NotificationRecipientOut(BaseModel):
     delivery_status_text: str = ""
     read_status: str
     read_status_text: str = ""
+    read_at: str = ""
     feedback_label: str = ""
     retry_count: int = 0
     content_snapshot: str = ""
@@ -324,6 +349,11 @@ class RuntimeSettingsUpdate(BaseModel):
     due_remind_run_at: str = "09:00"
     overdue_remind_enabled: bool = True
     overdue_remind_run_at: str = "09:00"
+    completed_mail_cleanup_enabled: bool = True
+    completed_mail_cleanup_retention_days: int = 30
+    system_log_cleanup_enabled: bool = True
+    system_log_retention_days: int = 60
+    system_log_cleanup_interval_seconds: int = 86400
     qax_auto_collect_enabled: bool
     qax_auto_collect_interval_seconds: int = 3600
     mail_scan_baseline_at: datetime | None = None
@@ -354,6 +384,7 @@ class RuntimeSettingsUpdate(BaseModel):
     pop3_password: str = ""
     pop3_use_tls: bool = False
     pop3_use_ssl: bool = False
+    mail_inbox_folders: str = ""
     dns_auto_resolve_enabled: bool = True
     mail_host_mappings: list[HostIpMappingPayload] = []
 

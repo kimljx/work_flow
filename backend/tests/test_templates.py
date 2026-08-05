@@ -8,6 +8,7 @@ from app.models import Template
 from app.services.templates import (
     extract_template_placeholders,
     sort_templates,
+    select_reply_template,
     template_allowed_variables,
     template_matches,
     validate_template_content,
@@ -39,6 +40,23 @@ class TemplateMatcherTestCase(unittest.TestCase):
         self.assertTrue(template_matches(template, "任务完成", ""))
         self.assertTrue(template_matches(template, "", "已完成"))
 
+    def test_reply_template_uses_first_status_including_after_newline(self) -> None:
+        done = Template(id=1, name="已完成", template_kind="MAIL_REPLY", notify_type="task_done", priority=120, version=1, enabled=True, body_rule="已完成|完成")
+        in_progress = Template(id=2, name="进行中", template_kind="MAIL_REPLY", notify_type="task_in_progress", priority=110, version=1, enabled=True, body_rule="进行中")
+
+        self.assertEqual(select_reply_template([done, in_progress], "", "进行中，已完成第一点").id, in_progress.id)
+        self.assertEqual(select_reply_template([done, in_progress], "", "进行中\n已完成第一点").id, in_progress.id)
+        self.assertEqual(select_reply_template([done, in_progress], "", "已完成\n后续说明：仍在进行中").id, done.id)
+
+    def test_reply_template_keeps_first_status_across_common_sentence_separators(self) -> None:
+        done = Template(id=1, name="已完成", template_kind="MAIL_REPLY", notify_type="task_done", priority=120, version=1, enabled=True, body_rule="已完成|完成")
+        in_progress = Template(id=2, name="进行中", template_kind="MAIL_REPLY", notify_type="task_in_progress", priority=110, version=1, enabled=True, body_rule="进行中")
+
+        for separator in ("。", ".", "；", ";", "、", "：", ":", "！", "!", "？", "?"):
+            with self.subTest(separator=separator):
+                selected = select_reply_template([done, in_progress], "", f"进行中{separator}已完成第一点")
+                self.assertEqual(selected.id, in_progress.id)
+
     def test_template_variable_catalog_matches_notify_type(self) -> None:
         variables = template_allowed_variables("MAIL_SEND", "task_created")
         self.assertIn("creator_name", variables)
@@ -67,6 +85,13 @@ class TemplateMatcherTestCase(unittest.TestCase):
             "MAIL_SEND",
             "delay_approval",
             "负责人：{owner_name}\n任务创建人：{creator_name}\n延期申请编号：{delay_request_id}\n原因：{apply_reason}",
+        )
+
+    def test_validate_template_content_accepts_default_task_context_variables(self) -> None:
+        validate_template_content(
+            "MAIL_SEND",
+            "task_created",
+            "当前提醒重点：{remind_focus}\n主任务备注：{task_remark}",
         )
 
 

@@ -8,7 +8,7 @@
     </div>
 
     <div class="panel">
-      <div class="form-grid">
+      <div class="form-grid user-form-grid">
         <div><label>用户名</label><input v-model="form.username" :disabled="Boolean(editingId)" /></div>
         <div><label>姓名</label><input v-model="form.name" /></div>
         <div>
@@ -22,7 +22,7 @@
         <div><label>邮箱</label><input v-model="form.email" /></div>
         <div><label>IP 地址</label><input v-model="form.ip_address" /></div>
       </div>
-      <div class="toolbar">
+      <div class="toolbar user-form-actions">
         <button @click="submitUser">{{ editingId ? '保存用户' : '新增用户' }}</button>
         <button class="button secondary" v-if="editingId" @click="resetForm">取消编辑</button>
       </div>
@@ -54,14 +54,40 @@
                 <button class="button secondary" @click="editUser(item)">编辑</button>
                 <button class="button secondary" v-if="item.is_active" @click="toggleUser(item, false)">禁用</button>
                 <button class="button secondary" v-else @click="toggleUser(item, true)">启用</button>
-                <button class="button danger" @click="resetPassword(item.id)">重置密码</button>
+                <button class="button danger" @click="openResetPassword(item)">重置密码</button>
                 <button class="button danger" @click="deleteUser(item)">删除</button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
-      <AppPagination v-model="page" :total="users.length" :page-size="pageSize" />
+      <AppPagination v-model="page" v-model:page-size="pageSize" :total="users.length" />
+    </div>
+
+    <div v-if="resetPasswordTarget" class="modal-mask">
+      <div class="modal-card password-modal-card">
+        <div class="modal-section-head">
+          <div>
+            <h2>重置密码</h2>
+            <p>{{ resetPasswordTarget.name || resetPasswordTarget.username }}</p>
+          </div>
+        </div>
+        <form class="password-form" @submit.prevent="submitResetPassword">
+          <div>
+            <label>新密码</label>
+            <input v-model="resetPasswordForm.password" type="password" autocomplete="new-password" />
+          </div>
+          <div>
+            <label>确认新密码</label>
+            <input v-model="resetPasswordForm.confirm" type="password" autocomplete="new-password" />
+          </div>
+          <p v-if="resetPasswordMessage" class="error-text">{{ resetPasswordMessage }}</p>
+          <div class="toolbar modal-actions">
+            <button class="button secondary" type="button" @click="closeResetPassword">取消</button>
+            <button type="submit">确认重置</button>
+          </div>
+        </form>
+      </div>
     </div>
   </section>
 </template>
@@ -70,11 +96,15 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import http from '../../api/http'
 import AppPagination from '../../components/AppPagination.vue'
+import { md5Hex } from '../../utils/md5'
 
 const users = ref([])
 const editingId = ref(null)
 const page = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
+const resetPasswordTarget = ref(null)
+const resetPasswordForm = reactive({ password: '', confirm: '' })
+const resetPasswordMessage = ref('')
 const form = reactive({
   username: '',
   name: '',
@@ -85,8 +115,8 @@ const form = reactive({
 })
 
 const pagedUsers = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return users.value.slice(start, start + pageSize)
+  const start = (page.value - 1) * pageSize.value
+  return users.value.slice(start, start + pageSize.value)
 })
 
 watch(
@@ -158,10 +188,30 @@ async function toggleUser(item, enabled) {
   await loadUsers()
 }
 
-async function resetPassword(userId) {
-  if (!window.confirm('确认要将该用户密码重置为默认密码吗？')) return
-  await http.post(`/admin/users/${userId}/reset-password`)
-  window.alert('密码已重置为默认密码。')
+function openResetPassword(item) {
+  resetPasswordTarget.value = item
+  resetPasswordMessage.value = ''
+  Object.assign(resetPasswordForm, { password: '', confirm: '' })
+}
+
+function closeResetPassword() {
+  resetPasswordTarget.value = null
+}
+
+async function submitResetPassword() {
+  if (!resetPasswordForm.password) {
+    resetPasswordMessage.value = '请输入新密码'
+    return
+  }
+  if (resetPasswordForm.password !== resetPasswordForm.confirm) {
+    resetPasswordMessage.value = '两次输入的新密码不一致'
+    return
+  }
+  await http.post(`/admin/users/${resetPasswordTarget.value.id}/reset-password`, {
+    new_password: md5Hex(resetPasswordForm.password),
+  })
+  closeResetPassword()
+  await loadUsers()
 }
 
 async function deleteUser(item) {
